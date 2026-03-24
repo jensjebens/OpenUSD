@@ -1,0 +1,32 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Exec" : {
+                    "Schemas": {
+                        "UnitsResolutionAPI": {
+                            "allowsPluginComputations": true
+                        }
+                    }
+                },
+                "Types": {
+                    "UnitsResolutionAPI": {
+                        "alias": {
+                            "UsdSchemaBase": "UnitsResolutionAPI"
+                        },
+                        "bases": [
+                            "UsdAPISchemaBase"
+                        ],
+                        "schemaIdentifier": "UnitsResolutionAPI",
+                        "schemaKind": "singleApplyAPI"
+                    }
+                }
+            },
+            "LibraryPath": "@PLUG_INFO_LIBRARY_PATH@",
+            "Name": "execUnits",
+            "ResourcePath": "@PLUG_INFO_RESOURCE_PATH@",
+            "Root": "@PLUG_INFO_ROOT@",
+            "Type": "library"
+        }
+    ]
+}

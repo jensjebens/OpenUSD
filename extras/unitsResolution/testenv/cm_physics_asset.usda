@@ -1,0 +1,29 @@
+#usda 1.0
+(
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    kilogramsPerUnit = 1.0
+)
+
+def PhysicsScene "PhysicsScene" {
+    float physics:gravityMagnitude = 981
+    vector3f physics:gravityDirection = (0, -1, 0)
+}
+
+def Xform "Ball" (
+    apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsCollisionAPI"]
+)
+{
+    double3 xformOp:translate = (100, 200, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    # Velocity in cm/s
+    vector3f physics:velocity = (50, 0, -30)
+    vector3f physics:angularVelocity = (0, 1, 0)
+
+    # Mass properties (density in g/cm³ → kg/m³ requires *1000)
+    float physics:density = 7.8
+    point3f physics:centerOfMass = (5, 5, 5)
+    float3 physics:diagonalInertia = (100, 100, 100)
+    float physics:mass = 2.5
+}

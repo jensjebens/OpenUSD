@@ -1,0 +1,14 @@
+#usda 1.0
+(
+    "WARNING: THIS FILE IS GENERATED.  DO NOT EDIT."
+)
+
+class "UnitsResolutionAPI"
+{
+    double unitsResolution:metersPerUnitScale = 1.0 (
+        doc = """Scale factor to convert from source units to stage units.
+        Computed as source_metersPerUnit / stage_metersPerUnit.
+        1.0 means no conversion needed.
+        0.01 means source is in cm, stage is in meters."""
+    )
+}

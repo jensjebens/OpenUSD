@@ -1,0 +1,10 @@
+#usda 1.0
+(
+    metersPerUnit = 1.0
+    upAxis = "Z"
+)
+
+def Xform "Building" {
+    double3 xformOp:translate = (10, 20, 50)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
