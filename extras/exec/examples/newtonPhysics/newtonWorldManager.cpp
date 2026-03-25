@@ -28,15 +28,37 @@ NewtonWorldManager::Initialize(const UsdPhysicsScene &scene)
     if (scene.GetGravityDirectionAttr().Get(&gravityDirection)) {
         float gravityMagnitude = 9.81f;
         scene.GetGravityMagnitudeAttr().Get(&gravityMagnitude);
-        _gravity = GfVec3d(
+        GfVec3d gravity(
             gravityDirection[0] * gravityMagnitude,
             gravityDirection[1] * gravityMagnitude,
             gravityDirection[2] * gravityMagnitude);
+        Initialize(gravity);
     }
     else {
         // Default: Y-up gravity.
-        _gravity = GfVec3d(0.0, -9.81, 0.0);
+        Initialize(GfVec3d(0.0, -9.81, 0.0));
     }
+}
+
+void
+NewtonWorldManager::Initialize(const GfVec3d &gravity)
+{
+    // Reset any existing world first.
+    if (_initialized) {
+        Reset();
+    }
+
+    _gravity = gravity;
+    _accumulatedTime = 0.0;
+
+#ifdef NEWTON_DYNAMICS_FOUND
+    _world = new ndWorld();
+    _world->SetSubSteps(2);
+    // Note: Newton 4 does not store gravity on the world.
+    // Gravity is applied per-body via ndBodyNotify::OnApplyExternalForce()
+    // during body creation (Phase 2). We store the gravity vector in
+    // _gravity so it can be queried and applied to bodies later.
+#endif
 
     _initialized = true;
 
@@ -47,18 +69,41 @@ NewtonWorldManager::Initialize(const UsdPhysicsScene &scene)
 void
 NewtonWorldManager::Step(double dt)
 {
-    // Phase 0: no-op.
-    // Phase 2 will call ndWorld::Update(dt) here.
-    (void)dt;
+    if (!_initialized) {
+        TF_WARN("NewtonWorldManager::Step called before Initialize.");
+        return;
+    }
+
+#ifdef NEWTON_DYNAMICS_FOUND
+    // Newton 4 async stepping: Update() begins the simulation step,
+    // Sync() blocks until it completes.
+    _world->Update(static_cast<ndFloat32>(dt));
+    _world->Sync();
+#endif
+
+    _accumulatedTime += dt;
 }
 
 void
 NewtonWorldManager::Reset()
 {
+#ifdef NEWTON_DYNAMICS_FOUND
+    if (_world) {
+        delete _world;
+        _world = nullptr;
+    }
+#endif
+
     _gravity = GfVec3d(0.0, -9.81, 0.0);
+    _accumulatedTime = 0.0;
     _initialized = false;
 
     TF_STATUS("NewtonWorldManager reset.");
+}
+
+NewtonWorldManager::~NewtonWorldManager()
+{
+    Reset();
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
