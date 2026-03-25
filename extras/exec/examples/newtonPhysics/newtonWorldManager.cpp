@@ -101,6 +101,19 @@ NewtonWorldManager::Reset()
     TF_STATUS("NewtonWorldManager reset.");
 }
 
+#ifdef NEWTON_DYNAMICS_FOUND
+void
+NewtonWorldManager::AddBody(const ndSharedPtr<ndBody> &body)
+{
+    if (_world) {
+        _world->AddBody(body);
+    }
+    else {
+        TF_WARN("NewtonWorldManager::AddBody called with no world.");
+    }
+}
+#endif
+
 NewtonWorldManager::~NewtonWorldManager()
 {
     Reset();

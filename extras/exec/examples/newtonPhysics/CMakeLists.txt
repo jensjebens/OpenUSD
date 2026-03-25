@@ -65,3 +65,48 @@ pxr_register_test(testNewtonWorldCreation
     TESTENV testenv/testNewtonPhysicsPlugin
     EXPECTED_RETURN_CODE 0
 )
+
+pxr_build_test(testNewtonBodyMapping
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        testenv/testBodyMapping.cpp
+)
+
+pxr_register_test(testNewtonBodyMapping
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonBodyMapping"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)
+
+pxr_build_test(testNewtonShapeMapping
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        testenv/testShapeMapping.cpp
+)
+
+pxr_register_test(testNewtonShapeMapping
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonShapeMapping"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)
+
+pxr_build_test(testNewtonMassProperties
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        testenv/testMassProperties.cpp
+)
+
+pxr_register_test(testNewtonMassProperties
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonMassProperties"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)

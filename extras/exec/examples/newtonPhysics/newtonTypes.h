@@ -19,6 +19,8 @@
 
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/quatd.h"
+#include "pxr/base/gf/quatf.h"
 #include "pxr/base/gf/vec3d.h"
 
 #ifdef NEWTON_DYNAMICS_FOUND
@@ -86,6 +88,45 @@ UsdToNewton(const GfVec3d &v)
         static_cast<ndFloat32>(v[1]),
         static_cast<ndFloat32>(v[2]),
         ndFloat32(0.0f));
+}
+
+/// Convert a USD GfQuatd to a Newton ndQuaternion.
+///
+/// GfQuatd stores (real, imaginary) where imaginary = (i, j, k).
+/// ndQuaternion layout is (x, y, z, w) where w is the scalar part.
+inline ndQuaternion
+UsdToNewton(const GfQuatd &q)
+{
+    GfVec3d img = q.GetImaginary();
+    return ndQuaternion(
+        static_cast<ndFloat32>(img[0]),
+        static_cast<ndFloat32>(img[1]),
+        static_cast<ndFloat32>(img[2]),
+        static_cast<ndFloat32>(q.GetReal()));
+}
+
+/// Convert a Newton ndQuaternion to a USD GfQuatd.
+inline GfQuatd
+NewtonToUsd(const ndQuaternion &q)
+{
+    return GfQuatd(
+        static_cast<double>(q.m_w),
+        GfVec3d(
+            static_cast<double>(q.m_x),
+            static_cast<double>(q.m_y),
+            static_cast<double>(q.m_z)));
+}
+
+/// Convert a USD GfQuatf to a Newton ndQuaternion.
+inline ndQuaternion
+UsdToNewton(const GfQuatf &q)
+{
+    GfVec3f img = q.GetImaginary();
+    return ndQuaternion(
+        static_cast<ndFloat32>(img[0]),
+        static_cast<ndFloat32>(img[1]),
+        static_cast<ndFloat32>(img[2]),
+        static_cast<ndFloat32>(q.GetReal()));
 }
 
 #else // !NEWTON_DYNAMICS_FOUND
