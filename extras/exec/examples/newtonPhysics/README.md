@@ -7,10 +7,11 @@ engine with OpenUSD, enabling real-time rigid-body simulation driven by
 
 ## Status
 
-**Phase 2 — USD → Newton Body Mapping.** The plugin now maps USD physics
-prims to Newton Dynamics bodies. Supports box, sphere, and capsule shapes;
-dynamic, kinematic, and static bodies; mass from `PhysicsMassAPI` (explicit
-mass and density); and per-body gravity via `ndBodyNotify`.
+**Phase 3 — Simulation Stepping & Transform Writeback.** The plugin now
+runs the full simulation loop: Newton world stepping, reading back
+simulated transforms, and writing them to a USD session sublayer. An
+OpenExec `computeSimulatedTransform` computation reads back the session-
+layer-authored values, providing an Exec-compatible interface.
 
 ### Roadmap
 
@@ -19,7 +20,7 @@ mass and density); and per-body gravity via `ndBodyNotify`.
 | 0     | Scaffolding, stubs, test assets | ✅ Done |
 | 1     | Newton world lifecycle — ndWorld, stepping, gravity | ✅ Done |
 | 2     | USD → Newton body mapping — shapes, mass, kinematic | ✅ Done |
-| 3     | OpenExec computation: `computeSimulatedTransform` | Planned |
+| 3     | Simulation stepping, session-layer writeback, OpenExec computation | ✅ Done |
 | 4     | USDView integration and interactive playback | Planned |
 
 ## Directory Structure
@@ -35,6 +36,8 @@ newtonPhysics/
 ├── newtonTypes.h                   ← Newton↔USD type conversions
 ├── newtonWorldManager.h/.cpp       ← ndWorld lifecycle management
 ├── usdToNewtonMapper.h/.cpp        ← USD physics prim → Newton body mapping
+├── newtonPhysicsSystem.h/.cpp      ← Central orchestrator (singleton)
+├── newtonSimulationDriver.h/.cpp   ← Session-layer simulation driver
 ├── newtonPhysicsComputations.cpp   ← EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA
 └── testenv/
     ├── testPluginLoads.cpp         ← Plugin load/registration test
@@ -42,6 +45,9 @@ newtonPhysics/
     ├── testBodyMapping.cpp         ← Body mapping count/kinematic tests
     ├── testShapeMapping.cpp        ← Shape type mapping tests
     ├── testMassProperties.cpp      ← Mass/density handling tests
+    ├── testFallingBox.cpp          ← Falling box integration test
+    ├── testGroundCollision.cpp     ← Ground collision/settlement test
+    ├── testMultiBody.cpp           ← Multi-body/multi-shape test
     ├── testNewtonPhysicsPlugin/    ← Test plugin resources
     ├── fallingBox.usda             ← Single falling box
     ├── stackedBoxes.usda           ← Three stacked boxes
@@ -51,6 +57,32 @@ newtonPhysics/
 ```
 
 ## Architecture
+
+### Simulation Loop
+
+The simulation is driven by `NewtonSimulationDriver`:
+
+1. **Initialize**: Find `PhysicsScene`, create Newton world, map all
+   physics bodies, create session sublayer
+2. **Step**: Advance Newton world by `dt`, read back simulated transforms
+3. **Writeback**: Author `xformOp:translate` to the session sublayer for
+   each dynamic body
+4. **Consumption**: USDView/Hydra sees the session-layer values via normal
+   USD composition; OpenExec reads them via `computeSimulatedTransform`
+
+### Central Orchestrator
+
+`NewtonPhysicsSystem` is a singleton that ties the world manager and
+mapper together with lazy initialization and frame stepping. It provides
+a simpler interface for contexts that don't need session-layer writeback.
+
+### OpenExec Computation
+
+`computeSimulatedTransform` is registered via
+`EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)`. It reads
+`physics:rigidBodyEnabled` and `xformOp:translate` as inputs, returning
+a `GfMatrix4d`. The actual simulation is driven by the driver — the
+computation reads back the session-layer-authored values.
 
 ### Body Mapping
 

@@ -28,6 +28,8 @@ pxr_build_test(newtonPhysicsPlugin
         ${NEWTON_PHYSICS_LIBS}
     CPPFILES
         newtonPhysicsComputations.cpp
+        newtonPhysicsSystem.cpp
+        newtonSimulationDriver.cpp
         newtonWorldManager.cpp
         usdToNewtonMapper.cpp
 )
@@ -107,6 +109,56 @@ pxr_build_test(testNewtonMassProperties
 
 pxr_register_test(testNewtonMassProperties
     COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonMassProperties"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)
+
+# --- Phase 3: Integration tests ---
+
+pxr_build_test(testNewtonFallingBox
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        newtonSimulationDriver.cpp
+        testenv/testFallingBox.cpp
+)
+
+pxr_register_test(testNewtonFallingBox
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonFallingBox"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)
+
+pxr_build_test(testNewtonGroundCollision
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        newtonSimulationDriver.cpp
+        testenv/testGroundCollision.cpp
+)
+
+pxr_register_test(testNewtonGroundCollision
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonGroundCollision"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)
+
+pxr_build_test(testNewtonMultiBody
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        newtonSimulationDriver.cpp
+        testenv/testMultiBody.cpp
+)
+
+pxr_register_test(testNewtonMultiBody
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonMultiBody"
     TESTENV testenv/testNewtonPhysicsPlugin
     EXPECTED_RETURN_CODE 0
 )
