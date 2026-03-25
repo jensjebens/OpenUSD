@@ -69,6 +69,14 @@ public:
     /// Returns accumulated simulation time.
     double GetAccumulatedTime() const { return _accumulatedTime; }
 
+#ifdef NEWTON_DYNAMICS_FOUND
+    /// Add a body to the Newton world. The world takes shared ownership.
+    void AddBody(const ndSharedPtr<ndBody> &body);
+
+    /// Get the ndWorld pointer (for advanced operations).
+    ndWorld *GetWorld() { return _world; }
+#endif
+
 private:
     NewtonWorldManager() = default;
     ~NewtonWorldManager();

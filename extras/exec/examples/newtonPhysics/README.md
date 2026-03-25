@@ -7,19 +7,20 @@ engine with OpenUSD, enabling real-time rigid-body simulation driven by
 
 ## Status
 
-**Phase 0 — Scaffolding.** The plugin structure, build files, stub
-implementations, and test assets are in place. No actual physics simulation
-occurs yet.
+**Phase 2 — USD → Newton Body Mapping.** The plugin now maps USD physics
+prims to Newton Dynamics bodies. Supports box, sphere, and capsule shapes;
+dynamic, kinematic, and static bodies; mass from `PhysicsMassAPI` (explicit
+mass and density); and per-body gravity via `ndBodyNotify`.
 
 ### Roadmap
 
-| Phase | Description |
-|-------|-------------|
-| 0     | Scaffolding, stubs, test assets (this phase) |
-| 1     | Newton Dynamics integration — create ndWorld, map prims to bodies |
-| 2     | Type conversions, collision shapes, simulation stepping |
-| 3     | OpenExec computation: `computeSimulatedTransform` |
-| 4     | USDView integration and interactive playback |
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0     | Scaffolding, stubs, test assets | ✅ Done |
+| 1     | Newton world lifecycle — ndWorld, stepping, gravity | ✅ Done |
+| 2     | USD → Newton body mapping — shapes, mass, kinematic | ✅ Done |
+| 3     | OpenExec computation: `computeSimulatedTransform` | Planned |
+| 4     | USDView integration and interactive playback | Planned |
 
 ## Directory Structure
 
@@ -30,12 +31,17 @@ newtonPhysics/
 │   └── FindNewtonDynamics.cmake    ← CMake find module for Newton 4
 ├── plugInfo.json                   ← Exec plugin registration
 ├── README.md                       ← This file
+├── newtonBodyNotify.h              ← Custom ndBodyNotify for gravity
 ├── newtonTypes.h                   ← Newton↔USD type conversions
 ├── newtonWorldManager.h/.cpp       ← ndWorld lifecycle management
 ├── usdToNewtonMapper.h/.cpp        ← USD physics prim → Newton body mapping
 ├── newtonPhysicsComputations.cpp   ← EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA
 └── testenv/
     ├── testPluginLoads.cpp         ← Plugin load/registration test
+    ├── testWorldCreation.cpp       ← World lifecycle tests
+    ├── testBodyMapping.cpp         ← Body mapping count/kinematic tests
+    ├── testShapeMapping.cpp        ← Shape type mapping tests
+    ├── testMassProperties.cpp      ← Mass/density handling tests
     ├── testNewtonPhysicsPlugin/    ← Test plugin resources
     ├── fallingBox.usda             ← Single falling box
     ├── stackedBoxes.usda           ← Three stacked boxes
@@ -44,14 +50,39 @@ newtonPhysics/
     └── materialFriction.usda       ← Friction material test
 ```
 
+## Architecture
+
+### Body Mapping
+
+`UsdToNewtonMapper` traverses the stage and creates Newton bodies:
+
+- **Dynamic bodies**: Prims with `PhysicsRigidBodyAPI` (not kinematic).
+  Created as `ndBodyDynamic` with mass and gravity callback.
+- **Kinematic bodies**: Prims with `PhysicsRigidBodyAPI` where
+  `physics:kinematicEnabled = true`. Created as `ndBodyKinematic`.
+- **Static colliders**: Prims with `PhysicsCollisionAPI` but no
+  `PhysicsRigidBodyAPI`. Created as `ndBodyKinematic` with zero velocity.
+
+### Gravity
+
+Newton 4 applies gravity per-body via `ndBodyNotify::OnApplyExternalForce()`.
+`NewtonGravityNotify` implements this callback, applying `F = m * g` each step.
+
+### Collision Shapes
+
+| USD Prim Type | Newton Shape |
+|---------------|--------------|
+| `UsdGeomCube` | `ndShapeBox` |
+| `UsdGeomSphere` | `ndShapeSphere` |
+| `UsdGeomCapsule` | `ndShapeCapsule` |
+| Other | `ndShapeBox` (1×1×1 fallback) |
+
 ## Building
 
 ### Without Newton (stub mode)
 
-The plugin skeleton compiles without Newton Dynamics installed.
+The plugin compiles without Newton Dynamics installed.
 Newton-dependent code is guarded by `#ifdef NEWTON_DYNAMICS_FOUND`.
-
-Build as part of the OpenUSD build:
 
 ```bash
 cd OpenUSD
@@ -60,23 +91,15 @@ python build_scripts/build_usd.py /path/to/build
 
 ### With Newton Dynamics
 
-Set `NEWTON_DYNAMICS_ROOT` to your Newton 4 install prefix:
-
 ```bash
 cmake -DNEWTON_DYNAMICS_ROOT=/path/to/newton4 ...
-```
-
-Or enable FetchContent to download Newton automatically:
-
-```bash
-cmake -DNEWTON_FETCH_CONTENT=ON ...
 ```
 
 ## Dependencies
 
 - **OpenUSD** (with OpenExec — `exec`, `execUsd`, `vdf`)
 - **UsdPhysics** schemas (`usdPhysics`, `usdGeom`)
-- **Newton Dynamics 4** (optional for Phase 0)
+- **Newton Dynamics 4** (optional — stubs compile without it)
 
 ## License
 
