@@ -114,6 +114,29 @@ UsdToNewtonMapper::IsKinematic(const SdfPath &path) const
     return it->second.isKinematic;
 }
 
+std::vector<SdfPath>
+UsdToNewtonMapper::GetDynamicBodyPaths() const
+{
+    std::vector<SdfPath> paths;
+    for (const auto &entry : _bodyMap) {
+        if (entry.second.isDynamic && !entry.second.isKinematic) {
+            paths.push_back(entry.first);
+        }
+    }
+    return paths;
+}
+
+std::vector<SdfPath>
+UsdToNewtonMapper::GetAllBodyPaths() const
+{
+    std::vector<SdfPath> paths;
+    paths.reserve(_bodyMap.size());
+    for (const auto &entry : _bodyMap) {
+        paths.push_back(entry.first);
+    }
+    return paths;
+}
+
 // --------------------------------------------------------------------------
 // Mapping helpers
 // --------------------------------------------------------------------------

@@ -29,6 +29,7 @@
 #endif
 
 #include <cstddef>
+#include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -66,6 +67,12 @@ public:
 
     /// Returns true if the body at \p path is kinematic.
     bool IsKinematic(const SdfPath &path) const;
+
+    /// Returns paths to all dynamic (non-kinematic, non-static) bodies.
+    std::vector<SdfPath> GetDynamicBodyPaths() const;
+
+    /// Returns paths to all mapped bodies (dynamic, kinematic, static).
+    std::vector<SdfPath> GetAllBodyPaths() const;
 
 private:
     /// Describes a mapped physics body.
