@@ -47,7 +47,7 @@ def Xform "Root"
     )
     {
         uniform token[] xformOpOrder = [ "xformOp:transform" ]
-        matrix4d xformOps:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (100, 200, 300, 1) )
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (100, 200, 300, 1) )
         double unitsResolution:metersPerUnitScale = 0.01
     }
 
@@ -56,14 +56,14 @@ def Xform "Root"
     )
     {
         uniform token[] xformOpOrder = [ "xformOp:transform" ]
-        matrix4d xformOps:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5, 10, 15, 1) )
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5, 10, 15, 1) )
         double unitsResolution:metersPerUnitScale = 1.0
     }
 
     def Xform "NoApi"
     {
         uniform token[] xformOpOrder = [ "xformOp:transform" ]
-        matrix4d xformOps:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (7, 8, 9, 1) )
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (7, 8, 9, 1) )
     }
 }
 )usda";
