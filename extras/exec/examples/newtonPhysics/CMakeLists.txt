@@ -51,3 +51,17 @@ pxr_register_test(testNewtonPhysicsPluginLoads
     TESTENV testenv/testNewtonPhysicsPlugin
     EXPECTED_RETURN_CODE 0
 )
+
+pxr_build_test(testNewtonWorldCreation
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        testenv/testWorldCreation.cpp
+)
+
+pxr_register_test(testNewtonWorldCreation
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonWorldCreation"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)

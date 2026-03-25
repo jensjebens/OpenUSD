@@ -32,27 +32,45 @@ namespace NewtonTypes {
 #ifdef NEWTON_DYNAMICS_FOUND
 
 /// Convert a Newton ndMatrix to a USD GfMatrix4d.
+///
+/// Newton's ndMatrix stores four column vectors (m_front, m_up, m_right,
+/// m_posit) as single-precision floats. USD's GfMatrix4d is row-major
+/// double[4][4]. We transpose while converting.
 inline GfMatrix4d
 NewtonToUsd(const ndMatrix &m)
 {
-    // TODO: Phase 2 — implement full matrix conversion.
-    // Newton uses column-major, USD uses row-major.
-    return GfMatrix4d(1.0);
+    return GfMatrix4d(
+        m.m_front.m_x, m.m_up.m_x, m.m_right.m_x, m.m_posit.m_x,
+        m.m_front.m_y, m.m_up.m_y, m.m_right.m_y, m.m_posit.m_y,
+        m.m_front.m_z, m.m_up.m_z, m.m_right.m_z, m.m_posit.m_z,
+        0.0,           0.0,         0.0,            1.0
+    );
 }
 
 /// Convert a USD GfMatrix4d to a Newton ndMatrix.
+///
+/// USD row-major layout to Newton column vectors.
 inline ndMatrix
 UsdToNewton(const GfMatrix4d &m)
 {
-    // TODO: Phase 2 — implement full matrix conversion.
-    return ndGetIdentityMatrix();
+    const double *d = m.GetArray();
+    // Row-major to Newton column vectors.
+    ndMatrix result;
+    result.m_front = ndVector(
+        ndFloat32(d[0]), ndFloat32(d[4]), ndFloat32(d[8]),  0.0f);
+    result.m_up    = ndVector(
+        ndFloat32(d[1]), ndFloat32(d[5]), ndFloat32(d[9]),  0.0f);
+    result.m_right = ndVector(
+        ndFloat32(d[2]), ndFloat32(d[6]), ndFloat32(d[10]), 0.0f);
+    result.m_posit = ndVector(
+        ndFloat32(d[3]), ndFloat32(d[7]), ndFloat32(d[11]), 1.0f);
+    return result;
 }
 
 /// Convert a Newton ndVector to a USD GfVec3d.
 inline GfVec3d
 NewtonToUsd(const ndVector &v)
 {
-    // TODO: Phase 2 — implement full vector conversion.
     return GfVec3d(
         static_cast<double>(v.m_x),
         static_cast<double>(v.m_y),
@@ -63,7 +81,6 @@ NewtonToUsd(const ndVector &v)
 inline ndVector
 UsdToNewton(const GfVec3d &v)
 {
-    // TODO: Phase 2 — implement full vector conversion.
     return ndVector(
         static_cast<ndFloat32>(v[0]),
         static_cast<ndFloat32>(v[1]),
