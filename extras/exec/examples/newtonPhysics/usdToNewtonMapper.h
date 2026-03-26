@@ -11,7 +11,8 @@
 /// Traverses a USD stage, identifies prims with PhysicsRigidBodyAPI
 /// and/or PhysicsCollisionAPI, and creates corresponding Newton 4 bodies.
 /// Supports box, sphere, and capsule shapes; dynamic, kinematic, and
-/// static bodies; and mass from PhysicsMassAPI.
+/// static bodies; mass from PhysicsMassAPI; and material properties
+/// (friction and restitution) from PhysicsMaterialAPI.
 
 #ifndef EXTRAS_EXEC_EXAMPLES_NEWTON_PHYSICS_USD_TO_NEWTON_MAPPER_H
 #define EXTRAS_EXEC_EXAMPLES_NEWTON_PHYSICS_USD_TO_NEWTON_MAPPER_H
@@ -32,6 +33,17 @@
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+/// \struct PhysicsMaterialProperties
+///
+/// Stores physics material parameters read from a USD PhysicsMaterialAPI.
+/// Default values match the USD physics schema defaults.
+///
+struct PhysicsMaterialProperties {
+    float staticFriction = 0.5f;   ///< Default static friction coefficient.
+    float dynamicFriction = 0.5f;  ///< Default dynamic friction coefficient.
+    float restitution = 0.0f;      ///< Default restitution (no bounce).
+};
 
 /// \class UsdToNewtonMapper
 ///
@@ -74,6 +86,11 @@ public:
     /// Returns paths to all mapped bodies (dynamic, kinematic, static).
     std::vector<SdfPath> GetAllBodyPaths() const;
 
+    /// Get material properties for a body at \p path.
+    /// Returns default PhysicsMaterialProperties if the body is not found
+    /// or no physics material was bound.
+    PhysicsMaterialProperties GetMaterialProperties(const SdfPath &path) const;
+
 private:
     /// Describes a mapped physics body.
     struct BodyRecord {
@@ -82,6 +99,7 @@ private:
         bool isKinematic = false;
         GfMatrix4d initialTransform;
         GfMatrix4d simulatedTransform;  // updated after Step()
+        PhysicsMaterialProperties materialProps;
 #ifdef NEWTON_DYNAMICS_FOUND
         ndSharedPtr<ndBody> body;
 #endif
@@ -101,6 +119,10 @@ private:
 
     // Mass / inertia
     float _GetMass(const UsdPrim &prim, float defaultMass = 1.0f);
+
+    // Material properties (friction, restitution)
+    PhysicsMaterialProperties _GetMaterialProperties(
+        const UsdPrim &prim) const;
 
     // Transform reading
     GfMatrix4d _GetWorldTransform(const UsdPrim &prim) const;

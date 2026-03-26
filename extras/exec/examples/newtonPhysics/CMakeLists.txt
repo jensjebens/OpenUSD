@@ -15,6 +15,7 @@ set(NEWTON_PHYSICS_LIBS
     usd
     usdGeom
     usdPhysics
+    usdShade
     vdf
     vt
 )
@@ -174,6 +175,38 @@ pxr_build_test(testNewtonExecHydraIntegration
 
 pxr_register_test(testNewtonExecHydraIntegration
     COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonExecHydraIntegration"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)
+
+# --- Phase 4: Material properties (friction & restitution) ---
+
+pxr_build_test(testNewtonMaterialFriction
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        testenv/testMaterialFriction.cpp
+)
+
+pxr_register_test(testNewtonMaterialFriction
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonMaterialFriction"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)
+
+pxr_build_test(testNewtonRestitution
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        testenv/testRestitution.cpp
+)
+
+pxr_register_test(testNewtonRestitution
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonRestitution"
     TESTENV testenv/testNewtonPhysicsPlugin
     EXPECTED_RETURN_CODE 0
 )
