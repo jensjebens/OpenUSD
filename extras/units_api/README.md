@@ -262,6 +262,20 @@ PerAttributeUnits.annotate_stage(stage, meters_per_unit, kilograms_per_unit=1.0,
 - [Units & Scale](https://github.com/jensjebens/OpenUSD-proposals/blob/jjebens/units-and-scale/proposals/units_and_scale/README.md) — problem statement and design principles
 - [MetricsAPI / Revise Layer Metadata (PR #45)](https://github.com/PixarAnimationStudios/OpenUSD-proposals/pull/45) — prim-level unit declarations
 
+## Branch Architecture
+
+```
+release (v26.03)
+  └── jjebens/metrics-api-core           ← C++ schemas + dimensional registry + Python bindings
+        ├── jjebens/units-api-poc        ← this branch (Python Units API)
+        └── jjebens/units-aware-value-resolution  ← OpenExec + Hydra integration
+```
+
+- **[`jjebens/metrics-api-core`](https://github.com/jensjebens/OpenUSD/tree/jjebens/metrics-api-core/extras/usd/metricsApiCore)** — shared foundation: real USD applied schemas (`UsdGeomMetricsAPI`, `UsdPhysicsMetricsAPI`), C++ dimensional registry via `plugInfo.json`, ancestor-walk resolution, Python bindings. Symmetric tests mirror this branch's `test_metrics_api.py` and `test_dimensions.py`.
+- **[`jensjebens/omni-units-api`](https://github.com/jensjebens/omni-units-api)** — Omniverse Kit extension wrapping this Python API. 35 tests passing in Kit 110 headless.
+
+This Python POC is the portable implementation for environments without the C++ core (stock USD, Kit). The C++ core is for OpenExec/Hydra consumers that need native performance.
+
 ## License
 
 Same as OpenUSD. See [LICENSE.txt](../../LICENSE.txt).
