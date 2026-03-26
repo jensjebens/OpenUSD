@@ -6,6 +6,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(NewtonDynamics QUIET)
 
 set(NEWTON_PHYSICS_LIBS
+    ef
     exec
     execUsd
     gf
