@@ -7,11 +7,12 @@ engine with OpenUSD, enabling real-time rigid-body simulation driven by
 
 ## Status
 
-**Phase 3 — Simulation Stepping & Transform Writeback.** The plugin now
-runs the full simulation loop: Newton world stepping, reading back
-simulated transforms, and writing them to a USD session sublayer. An
-OpenExec `computeSimulatedTransform` computation reads back the session-
-layer-authored values, providing an Exec-compatible interface.
+**Phase 3.5 — HdExec Integration.** The plugin now has the full
+simulation-to-Hydra pipeline working: Newton physics writes transforms to
+a session sublayer, the `computeSimulatedTransform` OpenExec computation
+reads them back, and the generic `HdExecComputedTransformSceneIndex` scene
+index filter consumes the computation to overlay transforms onto the
+Hydra 2.0 data model.
 
 ### Roadmap
 
@@ -21,7 +22,9 @@ layer-authored values, providing an Exec-compatible interface.
 | 1     | Newton world lifecycle — ndWorld, stepping, gravity | ✅ Done |
 | 2     | USD → Newton body mapping — shapes, mass, kinematic | ✅ Done |
 | 3     | Simulation stepping, session-layer writeback, OpenExec computation | ✅ Done |
-| 4     | USDView integration and interactive playback | Planned |
+| 3.5   | HdExec scene index filter integration | ✅ Done |
+| 4     | Material properties (friction, restitution) | Planned |
+| 5     | Demo scene, performance profiling | Planned |
 
 ## Directory Structure
 
@@ -40,20 +43,21 @@ newtonPhysics/
 ├── newtonSimulationDriver.h/.cpp   ← Session-layer simulation driver
 ├── newtonPhysicsComputations.cpp   ← EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA
 └── testenv/
-    ├── testPluginLoads.cpp         ← Plugin load/registration test
-    ├── testWorldCreation.cpp       ← World lifecycle tests
-    ├── testBodyMapping.cpp         ← Body mapping count/kinematic tests
-    ├── testShapeMapping.cpp        ← Shape type mapping tests
-    ├── testMassProperties.cpp      ← Mass/density handling tests
-    ├── testFallingBox.cpp          ← Falling box integration test
-    ├── testGroundCollision.cpp     ← Ground collision/settlement test
-    ├── testMultiBody.cpp           ← Multi-body/multi-shape test
-    ├── testNewtonPhysicsPlugin/    ← Test plugin resources
-    ├── fallingBox.usda             ← Single falling box
-    ├── stackedBoxes.usda           ← Three stacked boxes
-    ├── mixedShapes.usda            ← Sphere, box, capsule
-    ├── kinematicAndDynamic.usda    ← Kinematic + dynamic interaction
-    └── materialFriction.usda       ← Friction material test
+    ├── testPluginLoads.cpp                ← Plugin load/registration test
+    ├── testWorldCreation.cpp              ← World lifecycle tests
+    ├── testBodyMapping.cpp                ← Body mapping count/kinematic tests
+    ├── testShapeMapping.cpp               ← Shape type mapping tests
+    ├── testMassProperties.cpp             ← Mass/density handling tests
+    ├── testFallingBox.cpp                 ← Falling box integration test
+    ├── testGroundCollision.cpp            ← Ground collision/settlement test
+    ├── testMultiBody.cpp                  ← Multi-body/multi-shape test
+    ├── testExecTransformWithPhysics.cpp   ← HdExec pipeline integration test
+    ├── testNewtonPhysicsPlugin/           ← Test plugin resources
+    ├── fallingBox.usda                    ← Single falling box
+    ├── stackedBoxes.usda                  ← Three stacked boxes
+    ├── mixedShapes.usda                   ← Sphere, box, capsule
+    ├── kinematicAndDynamic.usda           ← Kinematic + dynamic interaction
+    └── materialFriction.usda              ← Friction material test
 ```
 
 ## Architecture
@@ -83,6 +87,52 @@ a simpler interface for contexts that don't need session-layer writeback.
 `physics:rigidBodyEnabled` and `xformOp:translate` as inputs, returning
 a `GfMatrix4d`. The actual simulation is driven by the driver — the
 computation reads back the session-layer-authored values.
+
+### HdExec Scene Index Filter (Hydra Pipeline)
+
+The generic `HdExecComputedTransformSceneIndex` (from `pxr/imaging/hdExec/`)
+consumes the `computeSimulatedTransform` computation and overlays the
+resulting `GfMatrix4d` onto the Hydra `HdXformSchema` for each prim.
+
+**Full data flow:**
+
+```
+Newton World  →  Session Layer  →  OpenExec Computation  →  HdExec Filter  →  Hydra
+  (ndWorld)      (xformOp:translate   (computeSimulated      (HdXformSchema    (renderer
+   step()         authored per body)   Transform reads        overlay)           reads
+                                       session values)                           xform)
+```
+
+**Setting up in a viewer:**
+
+```cpp
+#include "pxr/imaging/hdExec/execComputedTransformSceneIndex.h"
+#include "pxr/exec/execUsd/system.h"
+
+// 1. Create the exec system from the stage
+auto execSystem = std::make_shared<ExecUsdSystem>(stage);
+
+// 2. Initialize the Newton simulation driver
+NewtonSimulationDriver driver;
+driver.Initialize(stage);
+
+// 3. Insert the HdExec filter into the scene index chain
+auto physicsFilter = HdExecComputedTransformSceneIndex::New(
+    inputSceneIndex,          // upstream scene index
+    stage,                    // USD stage for prim lookups
+    execSystem,               // OpenExec system
+    {TfToken("computeSimulatedTransform")},  // computation token
+    /* resetXformStack = */ true);            // world-space transforms
+
+// 4. Each frame: step Newton, then advance filter time
+driver.StepAndWriteBack(dt);
+physicsFilter->SetTime(currentTime);
+```
+
+The filter automatically discovers which prims have
+`computeSimulatedTransform` available (those with `UsdPhysicsRigidBodyAPI`)
+and overlays the exec-computed matrix. Prims without the computation pass
+through unchanged.
 
 ### Body Mapping
 
