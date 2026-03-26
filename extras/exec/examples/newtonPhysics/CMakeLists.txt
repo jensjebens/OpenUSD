@@ -23,16 +23,8 @@ if(NewtonDynamics_FOUND)
     list(APPEND NEWTON_PHYSICS_LIBS ${NEWTON_DYNAMICS_LIBRARIES})
 endif()
 
-pxr_build_test(newtonPhysicsPlugin
-    LIBRARIES
-        ${NEWTON_PHYSICS_LIBS}
-    CPPFILES
-        newtonPhysicsComputations.cpp
-        newtonPhysicsSystem.cpp
-        newtonSimulationDriver.cpp
-        newtonWorldManager.cpp
-        usdToNewtonMapper.cpp
-)
+# Note: newtonPhysicsPlugin is a library, not a standalone test.
+# Its source files are compiled into individual test targets below.
 
 pxr_build_test(testNewtonPhysicsPluginLoads
     LIBRARIES
