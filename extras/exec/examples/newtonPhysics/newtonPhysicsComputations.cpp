@@ -73,6 +73,6 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)
         })
         .Inputs(
             AttributeValue<bool>(TfToken("physics:rigidBodyEnabled")),
-            Computation(ExecBuiltinComputations->computePath)
+            Computation<SdfPath>(ExecBuiltinComputations->computePath)
         );
 }

@@ -22,11 +22,14 @@
 
 include(FindPackageHandleStandardArgs)
 
-# Try to find Newton headers
+# Try to find Newton headers.
+# Newton 4 installs headers to source/ (monolithic install) or
+# sdk/dNewton/, sdk/dCollision/, sdk/dCore/ (in-tree).
 find_path(NEWTON_DYNAMICS_INCLUDE_DIR
     NAMES ndNewton.h
     PATHS
         ${NEWTON_DYNAMICS_ROOT}/include
+        ${NEWTON_DYNAMICS_ROOT}/source
         ${NEWTON_DYNAMICS_ROOT}/sdk/dNewton
         /usr/local/include/newton
         /usr/include/newton
@@ -35,7 +38,21 @@ find_path(NEWTON_DYNAMICS_INCLUDE_DIR
         newton
 )
 
-# Try to find Newton libraries
+# Newton 4 can build as a single monolithic shared lib (libndNewton.so)
+# or as separate static libs (libndCore.a, libndCollision.a, libndNewton.a).
+# Try monolithic first, then separate.
+find_library(NEWTON_DYNAMICS_NEWTON_LIB
+    NAMES ndNewton dNewton
+    PATHS
+        ${NEWTON_DYNAMICS_ROOT}/lib
+        /usr/local/lib
+        /usr/lib
+    PATH_SUFFIXES
+        newton-4.00
+        newton
+)
+
+# Optional separate libs (not needed if monolithic)
 find_library(NEWTON_DYNAMICS_CORE_LIB
     NAMES ndCore dCore
     PATHS
@@ -58,32 +75,23 @@ find_library(NEWTON_DYNAMICS_COLLISION_LIB
         newton
 )
 
-find_library(NEWTON_DYNAMICS_NEWTON_LIB
-    NAMES ndNewton dNewton
-    PATHS
-        ${NEWTON_DYNAMICS_ROOT}/lib
-        /usr/local/lib
-        /usr/lib
-    PATH_SUFFIXES
-        newton-4.00
-        newton
-)
-
+# Newton is found if we have the include dir and at least the main lib
 find_package_handle_standard_args(NewtonDynamics
     REQUIRED_VARS
         NEWTON_DYNAMICS_INCLUDE_DIR
-        NEWTON_DYNAMICS_CORE_LIB
-        NEWTON_DYNAMICS_COLLISION_LIB
         NEWTON_DYNAMICS_NEWTON_LIB
 )
 
 if(NewtonDynamics_FOUND)
     set(NEWTON_DYNAMICS_INCLUDE_DIRS ${NEWTON_DYNAMICS_INCLUDE_DIR})
-    set(NEWTON_DYNAMICS_LIBRARIES
-        ${NEWTON_DYNAMICS_NEWTON_LIB}
-        ${NEWTON_DYNAMICS_COLLISION_LIB}
-        ${NEWTON_DYNAMICS_CORE_LIB}
-    )
+    # Use monolithic lib; add separate libs if found
+    set(NEWTON_DYNAMICS_LIBRARIES ${NEWTON_DYNAMICS_NEWTON_LIB})
+    if(NEWTON_DYNAMICS_COLLISION_LIB)
+        list(APPEND NEWTON_DYNAMICS_LIBRARIES ${NEWTON_DYNAMICS_COLLISION_LIB})
+    endif()
+    if(NEWTON_DYNAMICS_CORE_LIB)
+        list(APPEND NEWTON_DYNAMICS_LIBRARIES ${NEWTON_DYNAMICS_CORE_LIB})
+    endif()
     mark_as_advanced(
         NEWTON_DYNAMICS_INCLUDE_DIR
         NEWTON_DYNAMICS_CORE_LIB
