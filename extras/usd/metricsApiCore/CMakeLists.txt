@@ -35,6 +35,8 @@ pxr_plugin(${PXR_PACKAGE}
         wrapGeomMetricsAPI.cpp
         wrapPhysicsMetricsAPI.cpp
         wrapTokens.cpp
+        wrapDimensionalRegistry.cpp
+        wrapMetricsUtils.cpp
 
     PYMODULE_FILES
         __init__.py
