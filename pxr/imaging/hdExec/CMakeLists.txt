@@ -9,6 +9,7 @@ pxr_library(hdExec
         sdf
         tf
         usd
+        usdPhysics
         vt
         exec
         execUsd

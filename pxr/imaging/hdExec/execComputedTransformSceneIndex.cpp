@@ -18,6 +18,7 @@
 
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usdPhysics/rigidBodyAPI.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
@@ -434,13 +435,23 @@ HdExecComputedTransformSceneIndex::_HasExecComputation(
         return false;
     }
 
+    // Quick check: the prim must actually have an API schema that
+    // provides computeSimulatedTransform. Currently that's only
+    // UsdPhysicsRigidBodyAPI. Without this guard, BuildRequest()
+    // can return valid=true for prims that don't have the schema,
+    // leading to exec compilation failures when the computation
+    // isn't actually registered for that prim.
+    if (!prim.HasAPI<UsdPhysicsRigidBodyAPI>()) {
+        std::lock_guard<std::mutex> lock(_cacheMutex);
+        _hasComputationCache[primPath] = false;
+        return false;
+    }
+
     // Try each computation token.
     for (const auto &token : _computationTokens) {
         std::vector<ExecUsdValueKey> keys;
         keys.emplace_back(prim, token);
         ExecUsdRequest req = _execSystem->BuildRequest(std::move(keys));
-        fprintf(stderr, "[HdExec] _HasExecComputation: %s token=%s valid=%d\n",
-                primPath.GetText(), token.GetText(), req.IsValid());
         if (req.IsValid()) {
             std::lock_guard<std::mutex> lock(_cacheMutex);
             _hasComputationCache[primPath] = true;

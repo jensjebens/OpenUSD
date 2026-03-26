@@ -5,6 +5,10 @@ A proof-of-concept OpenExec plugin that integrates the
 engine with OpenUSD, enabling real-time rigid-body simulation driven by
 `UsdPhysicsRigidBodyAPI` schemas.
 
+![Falling box demo — a rigid body falls under gravity and collides with a ground plane](demo.gif)
+
+*Rendered by `usdrecord` + Storm. Newton Dynamics 4 drives the rigid body transform live through the OpenExec → HdExec → Hydra pipeline — no baking, no session layer.*
+
 ## Status
 
 **Phase 3 (Rewritten) — Clean Pipeline.** The plugin now uses a clean
@@ -25,7 +29,7 @@ computation to overlay transforms onto the Hydra 2.0 data model.
 | 3     | Clean pipeline: Newton→OpenExec→Hydra (no session layer) | ✅ Done |
 | 3.5   | HdExec scene index filter integration | ✅ Done |
 | 4     | Material properties (friction, restitution) | ✅ Done |
-| 5     | Demo scene, performance profiling | Planned |
+| 5     | Demo scene, usdrecord rendering | ✅ Done |
 
 ## Directory Structure
 
@@ -58,7 +62,8 @@ newtonPhysics/
     ├── stackedBoxes.usda                  ← Three stacked boxes
     ├── mixedShapes.usda                   ← Sphere, box, capsule
     ├── kinematicAndDynamic.usda           ← Kinematic + dynamic interaction
-    └── materialFriction.usda              ← Friction material test
+    ├── materialFriction.usda              ← Friction material test
+    └── demoScene.usda                     ← Camera + scene for usdrecord GIF
 ```
 
 ## Architecture
@@ -201,6 +206,95 @@ cmake -DNEWTON_DYNAMICS_ROOT=/path/to/newton4 ...
 - **OpenUSD** (with OpenExec — `exec`, `execUsd`, `vdf`)
 - **UsdPhysics** schemas (`usdPhysics`, `usdGeom`)
 - **Newton Dynamics 4** (optional — stubs compile without it)
+
+## Lessons Learned
+
+Hard-won notes from building this POC. Most of these aren't documented
+anywhere — they fell out of debugging the full Newton → OpenExec → Hydra
+pipeline end-to-end.
+
+### Newton Dynamics 4
+
+- **`CollisionUpdate()` before `Update()`**: Newton's broadphase and
+  narrowphase collision detection runs in `CollisionUpdate(dt)`, which
+  must be called *before* `Update(dt)` (the solver step). Without it,
+  the solver sees zero contact pairs and bodies pass through each other.
+  The step sequence is: `CollisionUpdate(dt)` → `Update(dt)` → `Sync()`.
+
+- **Gravity is per-body, not per-world**: Newton 4 doesn't store gravity
+  on `ndWorld`. You apply it per-body via a custom `ndBodyNotify` subclass
+  that implements `OnApplyExternalForce()` with `F = mass * gravity`.
+
+- **Shapes are shared, bodies own the matrix**: Create `ndShapeInstance`
+  wrappers around the base `ndShape`. The body's `SetMatrix()` controls
+  world-space placement; the shape defines local geometry only.
+
+### OpenExec Integration
+
+- **`computePath` is the key builtin**: The `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA`
+  callback doesn't receive the prim directly. Use `ExecBuiltinComputations->computePath`
+  as an input to get the `SdfPath` of the prim being evaluated.
+
+- **Lazy initialization from computation callbacks**: The first time a
+  computation fires, the physics world may not exist yet. The callback
+  needs to lazy-init from the global stage (via `SetGlobalStage()` /
+  `GetGlobalStage()`) rather than assuming setup happened elsewhere.
+
+- **`BuildRequest().IsValid()` lies**: The exec system's `BuildRequest()`
+  can return `IsValid() = true` for prims that don't actually have the
+  relevant API schema. Always guard with `prim.HasAPI<T>()` before
+  querying exec, or you'll get compilation failures for prims like
+  cameras and static colliders that don't have `UsdPhysicsRigidBodyAPI`.
+
+### Hydra / Scene Index
+
+- **Xform overlay must be keyed as `"xform"`**: `HdXformSchema::Builder().Build()`
+  returns the inner container (matrix + resetXformStack). When overlaying
+  onto prim data, you must wrap it under the `"xform"` key with
+  `HdRetainedContainerDataSource::New(HdXformSchemaTokens->xform, ...)`.
+  Without this, Storm silently ignores your transform.
+
+- **`UniversalSet` for cache eviction**: When dirtying computed prims on
+  time change, use `HdDataSourceLocatorSet::UniversalSet()` rather than
+  just `HdXformSchema::GetDefaultLocator()`. The `CachingSceneIndex`
+  upstream of Storm only evicts its cache on container-level dirty
+  signals — locator-specific dirty can be silently dropped.
+
+- **`SetGlobalStage` timing matters**: The `HdExec` scene index filter
+  auto-bootstraps when it first sees a stage. In `usdrecord`, the stage
+  arrives via `UsdNotice::StageContentsChanged` during population. If
+  you miss that notice, the filter spins on `_TryBootstrap: no global
+  stage yet` until something else sets it. The fix was listening for
+  `_PrimsAdded` as a second bootstrap trigger.
+
+### plugInfo.json
+
+- **No `Type` field in the computation plugin**: Unlike Hydra renderer
+  plugins, an OpenExec computation plugin registered with
+  `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA` must *not* have a `Type`
+  field in `plugInfo.json` — it conflicts with the exec registration
+  machinery. Only `LibraryPath` and `Info` are needed.
+
+- **`loadWithRenderer: GL`** for scene index plugins: If your scene
+  index plugin needs to be active during `usdrecord` (which defaults
+  to the GL/Storm renderer), set `"loadWithRenderer": "GL"` in the
+  hdExec `plugInfo.json`. Without it, the plugin never loads in
+  headless rendering contexts.
+
+### General
+
+- **Session layer is a dead end for physics**: The initial approach
+  (Phase 3 v1) wrote simulated transforms into a session sublayer each
+  frame. This technically worked but was architecturally wrong — it
+  fights the exec/Hydra data model where computations *are* the
+  transport. The rewrite to direct computation queries was cleaner,
+  faster, and composable.
+
+- **Test at every layer**: Unit tests at the Newton wrapper level
+  (`testWorldCreation`, `testBodyMapping`) caught issues long before
+  the full pipeline was wired. The `testExecTransformWithPhysics`
+  integration test proved the pipeline without needing a GPU. Only
+  `usdrecord` needed GL.
 
 ## License
 
