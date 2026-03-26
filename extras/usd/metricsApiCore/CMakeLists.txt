@@ -18,12 +18,14 @@ pxr_plugin(${PXR_PACKAGE}
     PUBLIC_HEADERS
         api.h
         dimensionalRegistry.h
+        metricsUtils.h
         geomMetricsAPI.h
         physicsMetricsAPI.h
         tokens.h
 
     CPPFILES
         dimensionalRegistry.cpp
+        metricsUtils.cpp
         geomMetricsAPI.cpp
         physicsMetricsAPI.cpp
         tokens.cpp
