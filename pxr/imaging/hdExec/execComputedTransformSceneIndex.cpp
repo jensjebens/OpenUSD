@@ -384,6 +384,15 @@ HdExecComputedTransformSceneIndex::_PrimsAdded(
         return;
     }
 
+    // Auto-bootstrap: when prims are first added, the stage is available.
+    // This is the right time to bootstrap because _PrimsAdded fires
+    // AFTER the stage scene index populates, which means the stage
+    // is fully set up and the notice we missed at construction time
+    // doesn't matter.
+    if (_autoBootstrap && !_bootstrapped) {
+        _TryBootstrap();
+    }
+
     // Invalidate cache for added paths.
     {
         std::lock_guard<std::mutex> lock(_cacheMutex);
