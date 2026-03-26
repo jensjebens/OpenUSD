@@ -18,7 +18,6 @@
 
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/prim.h"
-#include "pxr/usd/usdPhysics/rigidBodyAPI.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
@@ -26,6 +25,7 @@
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/envSetting.h"
+#include "pxr/base/tf/errorMark.h"
 #include "pxr/base/vt/value.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -337,14 +337,16 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
     TF_STATUS("HdExec: Auto-bootstrapping with stage @%s@",
               stage->GetRootLayer()->GetIdentifier().c_str());
 
-    // Force-load any exec computation plugins that are discovered.
-    // This ensures EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA runs before
-    // we create the ExecUsdSystem.
+    // Force-load any discovered exec computation plugins so
+    // EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA runs before we create
+    // the ExecUsdSystem. Without this, computations from dynamically
+    // loaded plugins won't be available.
     {
-        PlugPluginPtr newtonPlugin = 
-            PlugRegistry::GetInstance().GetPluginWithName("newtonPhysicsPlugin");
-        if (newtonPlugin && !newtonPlugin->IsLoaded()) {
-            newtonPlugin->Load();
+        PlugRegistry &reg = PlugRegistry::GetInstance();
+        for (const auto &plugin : reg.GetAllPlugins()) {
+            if (!plugin->IsLoaded() && plugin->GetMetadata().count("Exec")) {
+                plugin->Load();
+            }
         }
     }
 
@@ -454,27 +456,24 @@ HdExecComputedTransformSceneIndex::_HasExecComputation(
         return false;
     }
 
-    // Quick check: the prim must actually have an API schema that
-    // provides computeSimulatedTransform. Currently that's only
-    // UsdPhysicsRigidBodyAPI. Without this guard, BuildRequest()
-    // can return valid=true for prims that don't have the schema,
-    // leading to exec compilation failures when the computation
-    // isn't actually registered for that prim.
-    if (!prim.HasAPI<UsdPhysicsRigidBodyAPI>()) {
-        std::lock_guard<std::mutex> lock(_cacheMutex);
-        _hasComputationCache[primPath] = false;
-        return false;
-    }
-
-    // Try each computation token.
+    // Check if any of the requested computations are actually registered
+    // for this prim's applied API schemas. We do a trial BuildRequest +
+    // PrepareRequest — if PrepareRequest succeeds without errors, the
+    // computation is genuinely available. BuildRequest().IsValid() alone
+    // is insufficient as it can return true for prims without the schema.
     for (const auto &token : _computationTokens) {
         std::vector<ExecUsdValueKey> keys;
         keys.emplace_back(prim, token);
         ExecUsdRequest req = _execSystem->BuildRequest(std::move(keys));
         if (req.IsValid()) {
-            std::lock_guard<std::mutex> lock(_cacheMutex);
-            _hasComputationCache[primPath] = true;
-            return true;
+            TfErrorMark mark;
+            _execSystem->PrepareRequest(req);
+            if (mark.IsClean()) {
+                std::lock_guard<std::mutex> lock(_cacheMutex);
+                _hasComputationCache[primPath] = true;
+                return true;
+            }
+            mark.Clear();
         }
     }
 
