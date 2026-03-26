@@ -103,8 +103,16 @@ public:
     HDEXEC_API
     static void SetGlobalStage(const UsdStageRefPtr &stage);
 
+    /// Advance time for all auto-bootstrapped instances. Called by the
+    /// imaging engine on each frame to ensure exec computations re-evaluate.
+    HDEXEC_API
+    static void AdvanceGlobalTime(UsdTimeCode time);
+
     HDEXEC_API
     HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override;
+
+    HDEXEC_API
+    ~HdExecComputedTransformSceneIndex() override;
 
     HDEXEC_API
     SdfPathVector GetChildPrimPaths(const SdfPath &primPath) const override;
@@ -148,6 +156,7 @@ private:
     bool _autoBootstrap = false;
     mutable bool _bootstrapped = false;
     mutable UsdTimeCode _currentTime;
+    mutable double _currentTimeFrame = 0.0;
 
     // Lazy bootstrap: try to acquire stage and create exec system.
     void _TryBootstrap() const;
