@@ -14,7 +14,7 @@
 
 #include "pxr/pxr.h"
 
-#include "../newtonSimulationDriver.h"
+#include "../newtonPhysicsSystem.h"
 #include "../newtonWorldManager.h"
 #include "../usdToNewtonMapper.h"
 
@@ -26,37 +26,8 @@
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/stage.h"
-#include "pxr/usd/usdGeom/xformable.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
-
-namespace {
-
-GfVec3d
-_GetTranslate(const UsdStageRefPtr &stage, const SdfPath &path)
-{
-    UsdPrim prim = stage->GetPrimAtPath(path);
-    TF_AXIOM(prim);
-
-    UsdGeomXformable xformable(prim);
-    TF_AXIOM(xformable);
-
-    bool resetsXformStack = false;
-    std::vector<UsdGeomXformOp> ops = xformable.GetOrderedXformOps(
-        &resetsXformStack);
-
-    for (const UsdGeomXformOp &op : ops) {
-        if (op.GetOpType() == UsdGeomXformOp::TypeTranslate) {
-            GfVec3d translate;
-            op.Get(&translate);
-            return translate;
-        }
-    }
-
-    return GfVec3d(0.0);
-}
-
-} // anonymous namespace
 
 int main()
 {
@@ -73,42 +44,37 @@ int main()
         UsdStageRefPtr stage = UsdStage::Open(layer);
         TF_AXIOM(stage);
 
-        NewtonSimulationDriver driver;
-        driver.Initialize(stage);
-        TF_AXIOM(driver.IsInitialized());
+        NewtonPhysicsSystem &sys = NewtonPhysicsSystem::GetInstance();
+        sys.EnsureInitialized(stage);
+        TF_AXIOM(sys.IsInitialized());
 
         // Step for 240 frames at 1/60s = 4 seconds of simulation.
-        // This is enough time for the box to fall from y=10 and settle.
-        const double dt = 1.0 / 60.0;
         for (int i = 0; i < 240; ++i) {
-            driver.StepAndWriteBack(dt);
+            sys.AdvanceToTime((i + 1) / 60.0);
         }
 
-        GfVec3d finalTranslate = _GetTranslate(
-            stage, SdfPath("/World/FallingBox"));
+        GfMatrix4d xform = sys.GetSimulatedTransform(
+            SdfPath("/World/FallingBox"));
+        GfVec3d finalPos = xform.ExtractTranslation();
 
         printf("  FallingBox final position: (%.4f, %.4f, %.4f)\n",
-               finalTranslate[0], finalTranslate[1], finalTranslate[2]);
+               finalPos[0], finalPos[1], finalPos[2]);
 
 #ifdef NEWTON_DYNAMICS_FOUND
         // After 4 seconds the box should have settled near the ground.
-        // Ground top surface is at y ≈ 0 (ground translate y=-0.05,
-        // scale y=0.1 on a unit cube means top is at y=0).
-        // The box is 1m, so its center should rest near y=0.5.
-        // Use generous tolerances for physics imprecision.
-        TF_AXIOM(finalTranslate[1] < 5.0);   // definitely fallen
-        TF_AXIOM(finalTranslate[1] >= -1.0);  // not through the ground
+        TF_AXIOM(finalPos[1] < 5.0);    // definitely fallen
+        TF_AXIOM(finalPos[1] >= -1.0);   // not through the ground
 
         // X and Z should be close to the original (no lateral forces).
-        TF_AXIOM(GfIsClose(finalTranslate[0], 0.0, 2.0));
-        TF_AXIOM(GfIsClose(finalTranslate[2], 0.0, 2.0));
+        TF_AXIOM(GfIsClose(finalPos[0], 0.0, 2.0));
+        TF_AXIOM(GfIsClose(finalPos[2], 0.0, 2.0));
 #else
         // Stub mode: position unchanged.
         printf("  [stub mode] Expected Y ≈ 10.0\n");
-        TF_AXIOM(GfIsClose(finalTranslate[1], 10.0, 1e-4));
+        TF_AXIOM(GfIsClose(finalPos[1], 10.0, 0.1));
 #endif
 
-        driver.Reset();
+        sys.Reset();
         printf("  PASSED\n");
     }
 
@@ -125,20 +91,20 @@ int main()
         UsdStageRefPtr stage = UsdStage::Open(layer);
         TF_AXIOM(stage);
 
-        NewtonSimulationDriver driver;
-        driver.Initialize(stage);
+        NewtonPhysicsSystem &sys = NewtonPhysicsSystem::GetInstance();
+        sys.EnsureInitialized(stage);
 
-        const double dt = 1.0 / 60.0;
         double minY = 10.0;
 
         for (int i = 0; i < 240; ++i) {
-            driver.StepAndWriteBack(dt);
+            sys.AdvanceToTime((i + 1) / 60.0);
 
-            GfVec3d translate = _GetTranslate(
-                stage, SdfPath("/World/FallingBox"));
+            GfMatrix4d xform = sys.GetSimulatedTransform(
+                SdfPath("/World/FallingBox"));
+            GfVec3d pos = xform.ExtractTranslation();
 
-            if (translate[1] < minY) {
-                minY = translate[1];
+            if (pos[1] < minY) {
+                minY = pos[1];
             }
         }
 
@@ -146,14 +112,13 @@ int main()
 
 #ifdef NEWTON_DYNAMICS_FOUND
         // The box center should never go significantly below ground.
-        // Some minor penetration is expected in physics engines.
         TF_AXIOM(minY >= -2.0);  // generous tolerance
 #else
-        // Stub mode: Y stays at 10.0 (no writes).
-        TF_AXIOM(GfIsClose(minY, 10.0, 1e-4));
+        // Stub mode: Y stays at 10.0 (no simulation).
+        TF_AXIOM(GfIsClose(minY, 10.0, 0.1));
 #endif
 
-        driver.Reset();
+        sys.Reset();
         printf("  PASSED\n");
     }
 

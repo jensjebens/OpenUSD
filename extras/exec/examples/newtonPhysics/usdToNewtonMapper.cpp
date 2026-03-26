@@ -93,18 +93,30 @@ UsdToNewtonMapper::GetSimulatedTransform(const SdfPath &path) const
         return GfMatrix4d(1.0);
     }
 
+    // Always return the cached simulatedTransform. This is updated by
+    // UpdateSimulatedTransforms() after each Newton step, avoiding
+    // direct reads from Newton bodies during computation evaluation
+    // (which could cause threading issues).
+    return it->second.simulatedTransform;
+}
+
+void
+UsdToNewtonMapper::UpdateSimulatedTransforms()
+{
 #ifdef NEWTON_DYNAMICS_FOUND
-    const BodyRecord &rec = it->second;
-    if (rec.body) {
-        const ndBodyKinematic *kinBody =
-            rec.body->GetAsBodyKinematic();
-        if (kinBody) {
-            return NewtonTypes::NewtonToUsd(kinBody->GetMatrix());
+    for (auto &pair : _bodyMap) {
+        BodyRecord &rec = pair.second;
+        if (rec.body) {
+            const ndBodyKinematic *kinBody =
+                rec.body->GetAsBodyKinematic();
+            if (kinBody) {
+                rec.simulatedTransform =
+                    NewtonTypes::NewtonToUsd(kinBody->GetMatrix());
+            }
         }
     }
 #endif
-
-    return it->second.simulatedTransform;
+    // In stub mode (no Newton), transforms stay at their initial values.
 }
 
 bool

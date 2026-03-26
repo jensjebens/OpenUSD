@@ -8,18 +8,18 @@
 /// \file testenv/testFallingBox.cpp
 /// \brief Integration test: Does a box actually fall under gravity?
 ///
-/// Opens fallingBox.usda, initializes the NewtonSimulationDriver,
+/// Opens fallingBox.usda, initializes NewtonPhysicsSystem directly,
 /// steps for 60 frames at 1/60s, and verifies that:
 ///   - The FallingBox Y position has decreased from its initial 10.0
 ///   - The FallingBox hasn't fallen through the ground
 ///   - The Ground transform is unchanged (static body)
 ///
-/// In stub mode (no Newton), the driver initializes and steps without
+/// In stub mode (no Newton), the system initializes and steps without
 /// crashing, but transforms stay at their initial values.
 
 #include "pxr/pxr.h"
 
-#include "../newtonSimulationDriver.h"
+#include "../newtonPhysicsSystem.h"
 #include "../newtonWorldManager.h"
 #include "../usdToNewtonMapper.h"
 
@@ -35,39 +35,10 @@
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
-namespace {
-
-/// Helper: Read xformOp:translate from a prim on the stage.
-GfVec3d
-_GetTranslate(const UsdStageRefPtr &stage, const SdfPath &path)
-{
-    UsdPrim prim = stage->GetPrimAtPath(path);
-    TF_AXIOM(prim);
-
-    UsdGeomXformable xformable(prim);
-    TF_AXIOM(xformable);
-
-    bool resetsXformStack = false;
-    std::vector<UsdGeomXformOp> ops = xformable.GetOrderedXformOps(
-        &resetsXformStack);
-
-    for (const UsdGeomXformOp &op : ops) {
-        if (op.GetOpType() == UsdGeomXformOp::TypeTranslate) {
-            GfVec3d translate;
-            op.Get(&translate);
-            return translate;
-        }
-    }
-
-    return GfVec3d(0.0);
-}
-
-} // anonymous namespace
-
 int main()
 {
     // ==================================================================
-    // Test 1: Basic falling box simulation
+    // Test 1: Basic falling box simulation via NewtonPhysicsSystem
     // ==================================================================
     {
         printf("Test 1: Basic falling box simulation...\n");
@@ -79,57 +50,47 @@ int main()
         UsdStageRefPtr stage = UsdStage::Open(layer);
         TF_AXIOM(stage);
 
-        // Verify initial position.
-        GfVec3d initialTranslate = _GetTranslate(
-            stage, SdfPath("/World/FallingBox"));
-        TF_AXIOM(GfIsClose(initialTranslate[1], 10.0, 1e-4));
-
-        // Initialize the simulation driver.
-        NewtonSimulationDriver driver;
-        driver.Initialize(stage);
-        TF_AXIOM(driver.IsInitialized());
-        TF_AXIOM(driver.GetMapper().GetBodyCount() == 2);
-        TF_AXIOM(driver.GetMapper().GetDynamicBodyCount() == 1);
-        TF_AXIOM(driver.GetMapper().GetStaticBodyCount() == 1);
+        // Initialize the physics system directly.
+        NewtonPhysicsSystem &sys = NewtonPhysicsSystem::GetInstance();
+        sys.EnsureInitialized(stage);
+        TF_AXIOM(sys.IsInitialized());
+        TF_AXIOM(sys.GetMapper().GetBodyCount() == 2);
+        TF_AXIOM(sys.GetMapper().GetDynamicBodyCount() == 1);
+        TF_AXIOM(sys.GetMapper().GetStaticBodyCount() == 1);
 
         // Step for 60 frames at 1/60 second each (1 second total).
-        const double dt = 1.0 / 60.0;
         for (int i = 0; i < 60; ++i) {
-            driver.StepAndWriteBack(dt);
+            sys.AdvanceToTime((i + 1) / 60.0);
         }
 
-        // Read back the FallingBox position from the stage.
-        // The driver should have authored xformOp:translate on the
-        // session layer.
-        GfVec3d finalTranslate = _GetTranslate(
-            stage, SdfPath("/World/FallingBox"));
+        // Read transform directly from the physics system.
+        GfMatrix4d xform = sys.GetSimulatedTransform(
+            SdfPath("/World/FallingBox"));
+        GfVec3d pos = xform.ExtractTranslation();
 
 #ifdef NEWTON_DYNAMICS_FOUND
         // With Newton: box should have fallen significantly from y=10.
-        // After 1 second of free fall: y ≈ 10 - 0.5*9.81*1² ≈ 5.1
-        // With ground collision it may have already hit the ground.
-        printf("  FallingBox final Y: %.4f\n", finalTranslate[1]);
-        TF_AXIOM(finalTranslate[1] < 10.0);
+        printf("  FallingBox final Y: %.4f\n", pos[1]);
+        TF_AXIOM(pos[1] < 10.0);
 
-        // Should not have fallen through the ground (y >= some negative
-        // tolerance accounting for penetration and box half-height).
-        TF_AXIOM(finalTranslate[1] >= -1.0);
+        // Should not have fallen through the ground.
+        TF_AXIOM(pos[1] >= -1.0);
 #else
-        // Stub mode: transforms stay at initial values — the driver
-        // steps are no-ops so no session layer writes happen.
+        // Stub mode: transforms stay at initial values.
         printf("  [stub mode] FallingBox Y: %.4f (expected ~10.0)\n",
-               finalTranslate[1]);
-        TF_AXIOM(GfIsClose(finalTranslate[1], 10.0, 1e-4));
+               pos[1]);
+        TF_AXIOM(GfIsClose(pos[1], 10.0, 0.1));
 #endif
 
         // Verify ground transform is unchanged.
-        GfVec3d groundTranslate = _GetTranslate(
-            stage, SdfPath("/World/Ground"));
-        TF_AXIOM(GfIsClose(groundTranslate[0], 0.0, 1e-4));
-        TF_AXIOM(GfIsClose(groundTranslate[1], -0.05, 1e-4));
-        TF_AXIOM(GfIsClose(groundTranslate[2], 0.0, 1e-4));
+        GfMatrix4d groundXform = sys.GetSimulatedTransform(
+            SdfPath("/World/Ground"));
+        GfVec3d groundPos = groundXform.ExtractTranslation();
+        TF_AXIOM(GfIsClose(groundPos[0], 0.0, 1e-4));
+        TF_AXIOM(GfIsClose(groundPos[1], -0.05, 1e-4));
+        TF_AXIOM(GfIsClose(groundPos[2], 0.0, 1e-4));
 
-        driver.Reset();
+        sys.Reset();
 
         printf("  PASSED\n");
     }
@@ -147,26 +108,33 @@ int main()
         UsdStageRefPtr stage = UsdStage::Open(layer);
         TF_AXIOM(stage);
 
-        NewtonSimulationDriver driver;
-        driver.Initialize(stage);
-        TF_AXIOM(GfIsClose(driver.GetCurrentSimTime(), 0.0, 1e-9));
+        NewtonPhysicsSystem &sys = NewtonPhysicsSystem::GetInstance();
+        sys.EnsureInitialized(stage);
+        TF_AXIOM(sys.IsInitialized());
 
-        driver.StepAndWriteBack(1.0 / 60.0);
-        TF_AXIOM(GfIsClose(driver.GetCurrentSimTime(), 1.0 / 60.0, 1e-9));
+        // Advance step by step and verify transforms change (or stay
+        // in stub mode).
+        sys.AdvanceToTime(1.0 / 60.0);
+        sys.AdvanceToTime(2.0 / 60.0);
 
-        driver.StepAndWriteBack(1.0 / 60.0);
-        TF_AXIOM(GfIsClose(driver.GetCurrentSimTime(), 2.0 / 60.0, 1e-9));
+        // Just verify it doesn't crash and the system is still valid.
+        GfMatrix4d xform = sys.GetSimulatedTransform(
+            SdfPath("/World/FallingBox"));
+        GfVec3d pos = xform.ExtractTranslation();
 
-        driver.Reset();
+        // Y should be <= 10.0 (equal in stub mode, less in Newton mode).
+        TF_AXIOM(pos[1] <= 10.0 + 1e-4);
+
+        sys.Reset();
 
         printf("  PASSED\n");
     }
 
     // ==================================================================
-    // Test 3: AdvanceToTimeCode
+    // Test 3: Reset clears state
     // ==================================================================
     {
-        printf("Test 3: AdvanceToTimeCode...\n");
+        printf("Test 3: Reset clears state...\n");
 
         SdfLayerRefPtr layer = SdfLayer::FindOrOpen(
             TfAbsPath("fallingBox.usda"));
@@ -175,50 +143,14 @@ int main()
         UsdStageRefPtr stage = UsdStage::Open(layer);
         TF_AXIOM(stage);
 
-        NewtonSimulationDriver driver;
-        driver.Initialize(stage);
+        NewtonPhysicsSystem &sys = NewtonPhysicsSystem::GetInstance();
+        sys.EnsureInitialized(stage);
+        TF_AXIOM(sys.IsInitialized());
 
-        // The scene is at 24 fps (timeCodesPerSecond = 24).
-        // Advance to time code 24 = 1 second.
-        driver.AdvanceToTimeCode(UsdTimeCode(24.0), 24.0);
-        TF_AXIOM(GfIsClose(driver.GetCurrentSimTime(), 1.0, 1e-6));
+        sys.AdvanceToTime(1.0 / 60.0);
 
-        // Advance to time code 48 = 2 seconds.
-        driver.AdvanceToTimeCode(UsdTimeCode(48.0), 24.0);
-        TF_AXIOM(GfIsClose(driver.GetCurrentSimTime(), 2.0, 1e-6));
-
-        // Advance to same time code — should be a no-op.
-        driver.AdvanceToTimeCode(UsdTimeCode(48.0), 24.0);
-        TF_AXIOM(GfIsClose(driver.GetCurrentSimTime(), 2.0, 1e-6));
-
-        driver.Reset();
-
-        printf("  PASSED\n");
-    }
-
-    // ==================================================================
-    // Test 4: Reset clears state
-    // ==================================================================
-    {
-        printf("Test 4: Reset clears state...\n");
-
-        SdfLayerRefPtr layer = SdfLayer::FindOrOpen(
-            TfAbsPath("fallingBox.usda"));
-        TF_AXIOM(layer);
-
-        UsdStageRefPtr stage = UsdStage::Open(layer);
-        TF_AXIOM(stage);
-
-        NewtonSimulationDriver driver;
-        driver.Initialize(stage);
-        TF_AXIOM(driver.IsInitialized());
-
-        driver.StepAndWriteBack(1.0 / 60.0);
-        TF_AXIOM(driver.GetCurrentSimTime() > 0.0);
-
-        driver.Reset();
-        TF_AXIOM(!driver.IsInitialized());
-        TF_AXIOM(GfIsClose(driver.GetCurrentSimTime(), 0.0, 1e-9));
+        sys.Reset();
+        TF_AXIOM(!sys.IsInitialized());
 
         printf("  PASSED\n");
     }

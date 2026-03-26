@@ -7,12 +7,13 @@ engine with OpenUSD, enabling real-time rigid-body simulation driven by
 
 ## Status
 
-**Phase 3.5 — HdExec Integration.** The plugin now has the full
-simulation-to-Hydra pipeline working: Newton physics writes transforms to
-a session sublayer, the `computeSimulatedTransform` OpenExec computation
-reads them back, and the generic `HdExecComputedTransformSceneIndex` scene
-index filter consumes the computation to overlay transforms onto the
-Hydra 2.0 data model.
+**Phase 3 (Rewritten) — Clean Pipeline.** The plugin now uses a clean
+Newton→OpenExec→Hydra pipeline with no session layer. The
+`computeSimulatedTransform` OpenExec computation uses the builtin
+`computePath` to resolve the prim's `SdfPath`, then queries
+`NewtonPhysicsSystem` directly for the simulated transform. The
+`HdExecComputedTransformSceneIndex` scene index filter consumes the
+computation to overlay transforms onto the Hydra 2.0 data model.
 
 ### Roadmap
 
@@ -21,9 +22,9 @@ Hydra 2.0 data model.
 | 0     | Scaffolding, stubs, test assets | ✅ Done |
 | 1     | Newton world lifecycle — ndWorld, stepping, gravity | ✅ Done |
 | 2     | USD → Newton body mapping — shapes, mass, kinematic | ✅ Done |
-| 3     | Simulation stepping, session-layer writeback, OpenExec computation | ✅ Done |
+| 3     | Clean pipeline: Newton→OpenExec→Hydra (no session layer) | ✅ Done |
 | 3.5   | HdExec scene index filter integration | ✅ Done |
-| 4     | Material properties (friction, restitution) | Planned |
+| 4     | Material properties (friction, restitution) | ✅ Done |
 | 5     | Demo scene, performance profiling | Planned |
 
 ## Directory Structure
@@ -40,7 +41,7 @@ newtonPhysics/
 ├── newtonWorldManager.h/.cpp       ← ndWorld lifecycle management
 ├── usdToNewtonMapper.h/.cpp        ← USD physics prim → Newton body mapping
 ├── newtonPhysicsSystem.h/.cpp      ← Central orchestrator (singleton)
-├── newtonSimulationDriver.h/.cpp   ← Session-layer simulation driver
+├── newtonSimulationDriver.h/.cpp   ← DEPRECATED: thin wrapper for compat
 ├── newtonPhysicsComputations.cpp   ← EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA
 └── testenv/
     ├── testPluginLoads.cpp                ← Plugin load/registration test
@@ -62,46 +63,53 @@ newtonPhysics/
 
 ## Architecture
 
-### Simulation Loop
+### Clean Pipeline (Phase 3)
 
-The simulation is driven by `NewtonSimulationDriver`:
+The simulation data flows directly from Newton through OpenExec to Hydra,
+with no session-layer intermediary:
 
-1. **Initialize**: Find `PhysicsScene`, create Newton world, map all
-   physics bodies, create session sublayer
-2. **Step**: Advance Newton world by `dt`, read back simulated transforms
-3. **Writeback**: Author `xformOp:translate` to the session sublayer for
-   each dynamic body
-4. **Consumption**: USDView/Hydra sees the session-layer values via normal
-   USD composition; OpenExec reads them via `computeSimulatedTransform`
+```
+Newton World  →  NewtonPhysicsSystem  →  OpenExec Computation  →  HdExec Filter  →  Hydra
+  (ndWorld)       (stores transforms      (computeSimulated        (HdXformSchema    (Storm
+   step()          per SdfPath)            Transform via            overlay)           renders
+                                           computePath builtin)                        xform)
+```
+
+The computation IS the transport — no baking, no session layer.
 
 ### Central Orchestrator
 
 `NewtonPhysicsSystem` is a singleton that ties the world manager and
-mapper together with lazy initialization and frame stepping. It provides
-a simpler interface for contexts that don't need session-layer writeback.
+mapper together:
+
+1. **EnsureInitialized(stage)**: Find `PhysicsScene`, create Newton world,
+   map all physics bodies
+2. **AdvanceToTime(seconds)**: Step the Newton world, then pull all body
+   transforms from Newton into the mapper's cached records via
+   `UpdateSimulatedTransforms()`
+3. **GetSimulatedTransform(path)**: Return the cached `GfMatrix4d` for a
+   prim — thread-safe since transforms are updated once per frame before
+   any computation evaluates
 
 ### OpenExec Computation
 
 `computeSimulatedTransform` is registered via
-`EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)`. It reads
-`physics:rigidBodyEnabled` and `xformOp:translate` as inputs, returning
-a `GfMatrix4d`. The actual simulation is driven by the driver — the
-computation reads back the session-layer-authored values.
+`EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)`. It takes
+two inputs:
+
+- `AttributeValue<bool>("physics:rigidBodyEnabled")` — to check if the
+  body is enabled
+- `Computation(ExecBuiltinComputations->computePath)` — the builtin that
+  returns the prim's `SdfPath`
+
+The callback queries `NewtonPhysicsSystem::GetSimulatedTransform(primPath)`
+directly, returning a `GfMatrix4d`.
 
 ### HdExec Scene Index Filter (Hydra Pipeline)
 
 The generic `HdExecComputedTransformSceneIndex` (from `pxr/imaging/hdExec/`)
 consumes the `computeSimulatedTransform` computation and overlays the
 resulting `GfMatrix4d` onto the Hydra `HdXformSchema` for each prim.
-
-**Full data flow:**
-
-```
-Newton World  →  Session Layer  →  OpenExec Computation  →  HdExec Filter  →  Hydra
-  (ndWorld)      (xformOp:translate   (computeSimulated      (HdXformSchema    (renderer
-   step()         authored per body)   Transform reads        overlay)           reads
-                                       session values)                           xform)
-```
 
 **Setting up in a viewer:**
 
@@ -112,9 +120,9 @@ Newton World  →  Session Layer  →  OpenExec Computation  →  HdExec Filter 
 // 1. Create the exec system from the stage
 auto execSystem = std::make_shared<ExecUsdSystem>(stage);
 
-// 2. Initialize the Newton simulation driver
-NewtonSimulationDriver driver;
-driver.Initialize(stage);
+// 2. Initialize the Newton physics system
+NewtonPhysicsSystem &sys = NewtonPhysicsSystem::GetInstance();
+sys.EnsureInitialized(stage);
 
 // 3. Insert the HdExec filter into the scene index chain
 auto physicsFilter = HdExecComputedTransformSceneIndex::New(
@@ -124,8 +132,8 @@ auto physicsFilter = HdExecComputedTransformSceneIndex::New(
     {TfToken("computeSimulatedTransform")},  // computation token
     /* resetXformStack = */ true);            // world-space transforms
 
-// 4. Each frame: step Newton, then advance filter time
-driver.StepAndWriteBack(dt);
+// 4. Each frame: advance physics, then advance filter time
+sys.AdvanceToTime(currentTimeInSeconds);
 physicsFilter->SetTime(currentTime);
 ```
 
@@ -133,6 +141,13 @@ The filter automatically discovers which prims have
 `computeSimulatedTransform` available (those with `UsdPhysicsRigidBodyAPI`)
 and overlays the exec-computed matrix. Prims without the computation pass
 through unchanged.
+
+### NewtonSimulationDriver (DEPRECATED)
+
+`NewtonSimulationDriver` is retained as a thin convenience wrapper around
+`NewtonPhysicsSystem` for backward compatibility. It no longer creates
+session sublayers — all calls delegate to the physics system singleton.
+New code should use `NewtonPhysicsSystem` directly.
 
 ### Body Mapping
 
@@ -144,6 +159,10 @@ through unchanged.
   `physics:kinematicEnabled = true`. Created as `ndBodyKinematic`.
 - **Static colliders**: Prims with `PhysicsCollisionAPI` but no
   `PhysicsRigidBodyAPI`. Created as `ndBodyKinematic` with zero velocity.
+
+After each Newton step, `UpdateSimulatedTransforms()` iterates all body
+records and caches the current `GfMatrix4d` from each Newton body. This
+ensures thread-safe reads during computation evaluation.
 
 ### Gravity
 

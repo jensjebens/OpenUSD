@@ -97,6 +97,7 @@ NewtonPhysicsSystem::AdvanceToTime(double timeInSeconds)
     }
 
     NewtonWorldManager::GetInstance().Step(dt);
+    _mapper.UpdateSimulatedTransforms();  // Pull transforms from Newton
     _currentSimTime = timeInSeconds;
     _lastStepTime = timeInSeconds;
 }

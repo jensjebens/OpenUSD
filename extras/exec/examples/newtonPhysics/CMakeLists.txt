@@ -114,7 +114,7 @@ pxr_build_test(testNewtonFallingBox
     CPPFILES
         newtonWorldManager.cpp
         usdToNewtonMapper.cpp
-        newtonSimulationDriver.cpp
+        newtonPhysicsSystem.cpp
         testenv/testFallingBox.cpp
 )
 
@@ -130,7 +130,7 @@ pxr_build_test(testNewtonGroundCollision
     CPPFILES
         newtonWorldManager.cpp
         usdToNewtonMapper.cpp
-        newtonSimulationDriver.cpp
+        newtonPhysicsSystem.cpp
         testenv/testGroundCollision.cpp
 )
 
@@ -146,7 +146,7 @@ pxr_build_test(testNewtonMultiBody
     CPPFILES
         newtonWorldManager.cpp
         usdToNewtonMapper.cpp
-        newtonSimulationDriver.cpp
+        newtonPhysicsSystem.cpp
         testenv/testMultiBody.cpp
 )
 
@@ -167,7 +167,6 @@ pxr_build_test(testNewtonExecHydraIntegration
     CPPFILES
         newtonWorldManager.cpp
         usdToNewtonMapper.cpp
-        newtonSimulationDriver.cpp
         newtonPhysicsSystem.cpp
         newtonPhysicsComputations.cpp
         testenv/testExecTransformWithPhysics.cpp

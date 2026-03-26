@@ -91,6 +91,12 @@ public:
     /// or no physics material was bound.
     PhysicsMaterialProperties GetMaterialProperties(const SdfPath &path) const;
 
+    /// Update all body records with current simulated transforms from Newton.
+    /// Called after NewtonWorldManager::Step() to pull transforms from the
+    /// physics engine into the mapper's cached records. In stub mode
+    /// (no Newton), this is a no-op — transforms stay at their initial values.
+    void UpdateSimulatedTransforms();
+
 private:
     /// Describes a mapped physics body.
     struct BodyRecord {
