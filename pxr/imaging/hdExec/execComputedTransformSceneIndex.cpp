@@ -72,8 +72,6 @@ HdExecComputedTransformSceneIndex::SetGlobalStage(
 {
     std::lock_guard<std::mutex> lock(_sGlobalStageMutex);
     _sGlobalStage = stage;
-    fprintf(stderr, "[HdExec] SetGlobalStage: %s\n",
-            stage ? stage->GetRootLayer()->GetIdentifier().c_str() : "null");
 }
 
 UsdStageRefPtr
@@ -96,8 +94,6 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
     _sGlobalTimeFrame.store(time.IsDefault() ? 0.0 : time.GetValue());
     for (auto *inst : _sInstances) {
         if (inst->_bootstrapped && inst->_execSystem) {
-            fprintf(stderr, "[HdExec] AdvanceGlobalTime: frame=%.1f\n",
-                    time.GetValue());
             inst->_execSystem->ChangeTime(time);
             inst->_currentTime = time;
             inst->_currentTimeFrame = time.IsDefault() ? 0.0 : time.GetValue();
@@ -164,10 +160,6 @@ public:
             double timeSeconds = frame / fps;
 
             GfMatrix4d mat = provider(_primPath, timeSeconds);
-            GfVec3d pos = mat.ExtractTranslation();
-            fprintf(stderr, "[HdExec] DataSource: %s → translate=(%.2f, %.2f, %.2f) frame=%.0f t=%.3fs\n",
-                    _primPath.GetText(), pos[0], pos[1], pos[2],
-                    frame, timeSeconds);
             return mat;
         }
 
@@ -330,7 +322,6 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
     }
 
     if (!TfGetEnvSetting(HDEXEC_AUTO_BOOTSTRAP)) {
-        fprintf(stderr, "[HdExec] _TryBootstrap: disabled by env var\n");
         return;
     }
 
@@ -338,7 +329,6 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
     {
         std::lock_guard<std::mutex> lock(_sGlobalStageMutex);
         if (!_sGlobalStage) {
-            fprintf(stderr, "[HdExec] _TryBootstrap: no global stage yet\n");
             return;
         }
         stage = _sGlobalStage;
@@ -346,8 +336,6 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
 
     TF_STATUS("HdExec: Auto-bootstrapping with stage @%s@",
               stage->GetRootLayer()->GetIdentifier().c_str());
-    fprintf(stderr, "[HdExec] _TryBootstrap: got stage @%s@\n",
-            stage->GetRootLayer()->GetIdentifier().c_str());
 
     // Force-load any exec computation plugins that are discovered.
     // This ensures EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA runs before
@@ -356,10 +344,7 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
         PlugPluginPtr newtonPlugin = 
             PlugRegistry::GetInstance().GetPluginWithName("newtonPhysicsPlugin");
         if (newtonPlugin && !newtonPlugin->IsLoaded()) {
-            fprintf(stderr, "[HdExec] Loading Newton physics plugin...\n");
             newtonPlugin->Load();
-            fprintf(stderr, "[HdExec] Newton plugin loaded: %d\n", 
-                    newtonPlugin->IsLoaded());
         }
     }
 
@@ -372,7 +357,6 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
     _bootstrapped = true;
 
     TF_STATUS("HdExec: Auto-bootstrap complete — exec system ready");
-    fprintf(stderr, "[HdExec] Bootstrap COMPLETE! ExecUsdSystem ready.\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -390,8 +374,6 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
     HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
 
     if (_bootstrapped && _HasExecComputation(primPath)) {
-        fprintf(stderr, "[HdExec] GetPrim: OVERLAY applied for %s\n",
-                primPath.GetText());
         prim.dataSource = HdOverlayContainerDataSource::New(
             _CreateExecXformDataSource(primPath),
             prim.dataSource);
@@ -609,31 +591,10 @@ HdExecComputedTransformSceneIndex::_PrimsDirtied(
         }
 
         if (xformDirty) {
-            // The upstream stage scene index has changed time.
-            // Track frame count and advance the exec system's time.
-            // UsdImagingStageSceneIndex calls SetTime() before dirtying,
-            // so the stage prims now have new time-sampled values.
-            //
-            // We use the stage's timeCodesPerSecond to convert from
-            // frame count to UsdTimeCode. We increment a frame counter
-            // each time we detect a time-change dirty.
             _currentTimeFrame += 1.0;
             UsdTimeCode newTime(_currentTimeFrame);
-            fprintf(stderr, "[HdExec] Time change detected, advancing to frame %.0f\n",
-                    _currentTimeFrame);
             _execSystem->ChangeTime(newTime);
             _currentTime = newTime;
-            
-            // Also step Newton physics
-            if (_stage) {
-                double fps = _stage->GetTimeCodesPerSecond();
-                if (fps <= 0) fps = 24.0;
-                double timeInSeconds = _currentTimeFrame / fps;
-                // Import Newton header indirectly via the computation
-                // Newton stepping happens in the computation callback
-                // via computeTime. But we need ChangeTime first so
-                // computeTime returns the new value.
-            }
         }
     }
 
