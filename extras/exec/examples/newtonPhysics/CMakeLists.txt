@@ -162,3 +162,26 @@ pxr_register_test(testNewtonMultiBody
     TESTENV testenv/testNewtonPhysicsPlugin
     EXPECTED_RETURN_CODE 0
 )
+
+# --- Phase 3.5: HdExec integration test ---
+
+pxr_build_test(testNewtonExecHydraIntegration
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+        hdExec
+        hd
+        execGeom
+    CPPFILES
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+        newtonSimulationDriver.cpp
+        newtonPhysicsSystem.cpp
+        newtonPhysicsComputations.cpp
+        testenv/testExecTransformWithPhysics.cpp
+)
+
+pxr_register_test(testNewtonExecHydraIntegration
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testNewtonExecHydraIntegration"
+    TESTENV testenv/testNewtonPhysicsPlugin
+    EXPECTED_RETURN_CODE 0
+)
