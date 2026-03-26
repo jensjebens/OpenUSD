@@ -10,19 +10,15 @@
 ///        OpenExec computation to the HdExec scene index filter.
 ///
 /// Proves the complete data path:
-///   Newton → session layer → OpenExec computation → HdExec filter → Hydra
+///   Newton → NewtonPhysicsSystem → OpenExec computeSimulatedTransform
+///   → HdExec filter → Hydra
 ///
-/// Opens fallingBox.usda, initializes the Newton simulation driver,
-/// creates an HdExecComputedTransformSceneIndex, steps for 60 frames,
-/// then reads back the xform via the Hydra scene index to verify:
-///   - FallingBox Y has decreased from 10.0 (or stayed at 10.0 in stub mode)
-///   - Ground transform is unchanged
+/// NO session layer involved. The computation IS the transport.
 
 #include "pxr/pxr.h"
 
-#include "../newtonSimulationDriver.h"
-#include "../newtonWorldManager.h"
 #include "../newtonPhysicsSystem.h"
+#include "../newtonWorldManager.h"
 #include "../usdToNewtonMapper.h"
 
 #include "pxr/imaging/hdExec/execComputedTransformSceneIndex.h"
@@ -105,7 +101,7 @@ _GetTranslateFromSceneIndex(
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// Test 1: Full pipeline — Newton → session layer → exec → HdExec filter
+// Test 1: Full pipeline — Newton → NewtonPhysicsSystem → exec → HdExec
 // ---------------------------------------------------------------------------
 
 static bool
@@ -126,18 +122,17 @@ _TestFullPipeline()
     auto execSystem = std::make_shared<ExecUsdSystem>(stage);
     TF_AXIOM(execSystem);
 
-    // Initialize the Newton simulation driver (steps Newton, writes
-    // transforms to session sublayer).
-    NewtonSimulationDriver driver;
-    driver.Initialize(stage);
-    TF_AXIOM(driver.IsInitialized());
+    // Initialize the Newton physics system directly — no session layer.
+    NewtonPhysicsSystem &sys = NewtonPhysicsSystem::GetInstance();
+    sys.EnsureInitialized(stage);
+    TF_AXIOM(sys.IsInitialized());
 
     // Build the retained scene index with initial prim data.
     HdRetainedSceneIndexRefPtr retainedSi = _BuildRetainedSceneIndex();
 
     // Create the HdExec scene index filter. This looks for
-    // "computeSimulatedTransform" (registered by newtonPhysicsComputations.cpp
-    // for UsdPhysicsRigidBodyAPI).
+    // "computeSimulatedTransform" (registered by
+    // newtonPhysicsComputations.cpp for UsdPhysicsRigidBodyAPI).
     TfToken computeSimulated("computeSimulatedTransform");
 
     auto filter = HdExecComputedTransformSceneIndex::New(
@@ -149,14 +144,14 @@ _TestFullPipeline()
     TF_AXIOM(filter);
 
     // Step the simulation for 60 frames (1 second at 60 fps).
-    const double dt = 1.0 / 60.0;
     for (int i = 0; i < 60; ++i) {
-        driver.StepAndWriteBack(dt);
+        sys.AdvanceToTime((i + 1) / 60.0);
     }
 
     // Now read back through the Hydra scene index filter.
-    // The exec system should pick up the session-layer-authored values
-    // through the computation, and the filter should overlay them.
+    // The exec system should evaluate computeSimulatedTransform, which
+    // queries NewtonPhysicsSystem directly via computePath — no session
+    // layer involved.
     GfVec3d boxTranslate = _GetTranslateFromSceneIndex(
         filter, SdfPath("/World/FallingBox"));
 
@@ -173,17 +168,33 @@ _TestFullPipeline()
     std::cout << "  [Newton mode] Box fell to Y=" << boxTranslate[1]
               << std::endl;
 #else
-    // Stub mode: driver steps are no-ops, session layer never gets
-    // written. The exec computation reads back the initial
-    // xformOp:translate from the root layer → (0, 10, 0).
-    // The filter should return this without crashing.
+    // Stub mode: NewtonPhysicsSystem returns the initial transform
+    // (identity stepping), so the computation returns the initial
+    // transform from the mapper. The filter should return this without
+    // crashing.
     std::cout << "  [stub mode] FallingBox Y: " << boxTranslate[1]
               << " (expected ~10.0)" << std::endl;
     // In stub mode, the computation may return the initial value
-    // (0, 10, 0) or identity depending on whether the exec system
-    // can resolve the inputs. Accept either.
+    // or identity depending on whether the exec system can resolve
+    // the inputs. Accept either.
     // The key requirement: no crash, and we get a valid matrix back.
     TF_AXIOM(boxTranslate[1] >= 0.0);
+#endif
+
+    // Verify the physics system also agrees.
+    GfMatrix4d sysXform = sys.GetSimulatedTransform(
+        SdfPath("/World/FallingBox"));
+    GfVec3d sysPos = sysXform.ExtractTranslation();
+
+    std::cout << "  FallingBox from NewtonPhysicsSystem: ("
+              << sysPos[0] << ", "
+              << sysPos[1] << ", "
+              << sysPos[2] << ")" << std::endl;
+
+#ifdef NEWTON_DYNAMICS_FOUND
+    TF_AXIOM(sysPos[1] < 10.0);
+#else
+    TF_AXIOM(GfIsClose(sysPos[1], 10.0, 0.1));
 #endif
 
     // Ground should be unchanged — it has CollisionAPI but no
@@ -203,7 +214,7 @@ _TestFullPipeline()
     TF_AXIOM(GfIsClose(groundTranslate[0], 0.0, 1e-4));
     TF_AXIOM(GfIsClose(groundTranslate[2], 0.0, 1e-4));
 
-    driver.Reset();
+    sys.Reset();
 
     std::cout << "  PASSED" << std::endl;
     return true;
@@ -407,7 +418,9 @@ int main(int /*argc*/, char ** /*argv*/)
 
     std::cout << "testExecTransformWithPhysics — Full pipeline integration"
               << std::endl;
-    std::cout << "Newton → session layer → OpenExec → HdExec filter → Hydra"
+    std::cout << "Newton → NewtonPhysicsSystem → OpenExec → HdExec → Hydra"
+              << std::endl;
+    std::cout << "(No session layer — computation IS the transport)"
               << std::endl;
     std::cout << std::endl;
 
