@@ -36,6 +36,8 @@
 
 #include "newtonPhysicsSystem.h"
 
+#include "pxr/imaging/hdExec/execComputedTransformSceneIndex.h"
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 TF_DEFINE_PRIVATE_TOKENS(
@@ -47,45 +49,40 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)
 {
     self.PrimComputation(_tokens->computeSimulatedTransform)
         .Callback<GfMatrix4d>(+[](const VdfContext &context) {
-            const bool enabled =
-                context.GetInputValue<bool>(
-                    TfToken("physics:rigidBodyEnabled"));
-
-            if (!enabled) {
-                return GfMatrix4d(1.0);
-            }
-
+            fprintf(stderr, "[Newton] COMPUTATION CALLBACK ENTERED\n");
+            
             // Get this prim's path from the builtin computePath.
             const SdfPath primPath =
                 context.GetInputValue<SdfPath>(
                     ExecBuiltinComputations->computePath);
 
-            // Get the current time from the builtin computeTime.
-            // This drives Newton stepping — each evaluation at a new
-            // time advances the physics simulation.
-            const EfTime efTime =
-                context.GetInputValue<EfTime>(
-                    ExecBuiltinComputations->computeTime);
-            
-            UsdTimeCode timeCode = efTime.GetTimeCode();
-            double timeInSeconds = 0.0;
-            if (!timeCode.IsDefault()) {
-                // Convert time code to seconds (assuming 24 fps default)
-                // TODO: read timeCodesPerSecond from stage metadata
-                timeInSeconds = timeCode.GetValue() / 24.0;
-            }
+            fprintf(stderr, "[Newton] prim=%s\n", primPath.GetText());
 
-            // Ensure Newton is stepped to the current time.
-            // This is idempotent — if already at this time, it's a no-op.
+            // Query the Newton physics system for the simulated
+            // transform. Lazy-init if needed.
             NewtonPhysicsSystem &sys =
                 NewtonPhysicsSystem::GetInstance();
             
-            fprintf(stderr, "[Newton] computeSimulatedTransform: prim=%s time=%.2f init=%d\n",
-                    primPath.GetText(), timeInSeconds, sys.IsInitialized());
-            
-            if (sys.IsInitialized()) {
-                sys.AdvanceToTime(timeInSeconds);
+            if (!sys.IsInitialized()) {
+                // Try to get the stage from the prim
+                UsdPrim prim = UsdPrim();
+                // Use the global stage from HdExec
+                UsdStageRefPtr stage = 
+                    HdExecComputedTransformSceneIndex::GetGlobalStage();
+                if (stage) {
+                    fprintf(stderr, "[Newton] Lazy-initializing physics from computation\n");
+                    sys.EnsureInitialized(stage);
+                } else {
+                    fprintf(stderr, "[Newton] No stage available, returning identity\n");
+                    return GfMatrix4d(1.0);
+                }
             }
+            
+            // Step Newton to the current time
+            double frame = HdExecComputedTransformSceneIndex::GetGlobalTimeFrame();
+            double fps = 24.0; // TODO: read from stage metadata
+            double timeInSeconds = frame / fps;
+            sys.AdvanceToTime(timeInSeconds);
 
             GfMatrix4d result = sys.GetSimulatedTransform(primPath);
             GfVec3d pos = result.ExtractTranslation();
@@ -94,8 +91,6 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)
             return result;
         })
         .Inputs(
-            AttributeValue<bool>(TfToken("physics:rigidBodyEnabled")),
-            Computation<SdfPath>(ExecBuiltinComputations->computePath),
-            Stage().Computation<EfTime>(ExecBuiltinComputations->computeTime)
+            Computation<SdfPath>(ExecBuiltinComputations->computePath)
         );
 }

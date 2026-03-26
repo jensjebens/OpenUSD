@@ -10,6 +10,7 @@ set(NEWTON_PHYSICS_LIBS
     exec
     execUsd
     gf
+    hdExec
     plug
     sdf
     tf
