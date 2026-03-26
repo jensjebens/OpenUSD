@@ -25,6 +25,9 @@
 #include "pxr/usd/usdPhysics/rigidBodyAPI.h"
 #include "pxr/usd/usdPhysics/collisionAPI.h"
 #include "pxr/usd/usdPhysics/massAPI.h"
+#include "pxr/usd/usdPhysics/materialAPI.h"
+#include "pxr/usd/usdShade/materialBindingAPI.h"
+#include "pxr/usd/usdShade/material.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -137,6 +140,16 @@ UsdToNewtonMapper::GetAllBodyPaths() const
     return paths;
 }
 
+PhysicsMaterialProperties
+UsdToNewtonMapper::GetMaterialProperties(const SdfPath &path) const
+{
+    auto it = _bodyMap.find(path);
+    if (it == _bodyMap.end()) {
+        return PhysicsMaterialProperties();
+    }
+    return it->second.materialProps;
+}
+
 // --------------------------------------------------------------------------
 // Mapping helpers
 // --------------------------------------------------------------------------
@@ -156,12 +169,16 @@ UsdToNewtonMapper::_MapRigidBody(const UsdPrim &prim,
     // Mass (only meaningful for dynamic bodies).
     float mass = _GetMass(prim);
 
+    // Material properties (friction, restitution).
+    PhysicsMaterialProperties matProps = _GetMaterialProperties(prim);
+
     BodyRecord rec;
     rec.primPath = prim.GetPath();
     rec.isDynamic = !kinematicEnabled;
     rec.isKinematic = kinematicEnabled;
     rec.initialTransform = worldXform;
     rec.simulatedTransform = worldXform;
+    rec.materialProps = matProps;
 
 #ifdef NEWTON_DYNAMICS_FOUND
     NewtonWorldManager &mgr = NewtonWorldManager::GetInstance();
@@ -199,6 +216,11 @@ UsdToNewtonMapper::_MapRigidBody(const UsdPrim &prim,
         rec.body = body;
         mgr.AddBody(body);
     }
+
+    // TODO(Phase 4): Apply matProps to Newton bodies via a custom
+    // ndContactNotify callback on the world. Newton 4 handles material
+    // properties through contact callbacks rather than per-shape settings.
+    // Material properties are stored in the BodyRecord for now.
 #endif
 
     _bodyMap[prim.GetPath()] = std::move(rec);
@@ -207,10 +229,14 @@ UsdToNewtonMapper::_MapRigidBody(const UsdPrim &prim,
     // "dynamic" for accounting purposes (vs. purely static colliders).
     _dynamicCount++;
 
-    TF_STATUS("Mapped rigid body: %s (%s, mass=%.2f)",
+    TF_STATUS("Mapped rigid body: %s (%s, mass=%.2f, "
+              "friction=%.2f/%.2f, restitution=%.2f)",
               prim.GetPath().GetText(),
               kinematicEnabled ? "kinematic" : "dynamic",
-              mass);
+              mass,
+              matProps.staticFriction,
+              matProps.dynamicFriction,
+              matProps.restitution);
 }
 
 void
@@ -219,12 +245,16 @@ UsdToNewtonMapper::_MapStaticCollider(const UsdPrim &prim,
 {
     GfMatrix4d worldXform = _GetWorldTransform(prim);
 
+    // Material properties (friction, restitution).
+    PhysicsMaterialProperties matProps = _GetMaterialProperties(prim);
+
     BodyRecord rec;
     rec.primPath = prim.GetPath();
     rec.isDynamic = false;
     rec.isKinematic = false;
     rec.initialTransform = worldXform;
     rec.simulatedTransform = worldXform;
+    rec.materialProps = matProps;
 
 #ifdef NEWTON_DYNAMICS_FOUND
     NewtonWorldManager &mgr = NewtonWorldManager::GetInstance();
@@ -245,7 +275,12 @@ UsdToNewtonMapper::_MapStaticCollider(const UsdPrim &prim,
     _bodyMap[prim.GetPath()] = std::move(rec);
     _staticCount++;
 
-    TF_STATUS("Mapped static collider: %s", prim.GetPath().GetText());
+    TF_STATUS("Mapped static collider: %s (friction=%.2f/%.2f, "
+              "restitution=%.2f)",
+              prim.GetPath().GetText(),
+              matProps.staticFriction,
+              matProps.dynamicFriction,
+              matProps.restitution);
 }
 
 // --------------------------------------------------------------------------
@@ -356,6 +391,41 @@ UsdToNewtonMapper::_GetMass(const UsdPrim &prim, float defaultMass)
         }
     }
     return defaultMass;
+}
+
+// --------------------------------------------------------------------------
+// Material properties
+// --------------------------------------------------------------------------
+
+PhysicsMaterialProperties
+UsdToNewtonMapper::_GetMaterialProperties(const UsdPrim &prim) const
+{
+    PhysicsMaterialProperties props;
+
+    UsdShadeMaterialBindingAPI bindingAPI(prim);
+    if (!bindingAPI) {
+        return props;
+    }
+
+    // Resolve the physics-purpose material binding.
+    TfToken physicsPurpose("physics");
+    UsdShadeMaterial material =
+        bindingAPI.ComputeBoundMaterial(physicsPurpose);
+    if (!material) {
+        return props;
+    }
+
+    UsdPrim matPrim = material.GetPrim();
+    if (!matPrim.HasAPI<UsdPhysicsMaterialAPI>()) {
+        return props;
+    }
+
+    UsdPhysicsMaterialAPI materialAPI(matPrim);
+    materialAPI.GetStaticFrictionAttr().Get(&props.staticFriction);
+    materialAPI.GetDynamicFrictionAttr().Get(&props.dynamicFriction);
+    materialAPI.GetRestitutionAttr().Get(&props.restitution);
+
+    return props;
 }
 
 // --------------------------------------------------------------------------
