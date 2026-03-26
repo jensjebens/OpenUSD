@@ -5,6 +5,7 @@
                 "Types": {
                     "HdExec_ComputedTransformSceneIndexPlugin": {
                         "bases": ["HdSceneIndexPlugin"],
+                        "loadWithRenderer": "GL",
                         "displayName": "OpenExec Computed Transform",
                         "priority": 0
                     }
