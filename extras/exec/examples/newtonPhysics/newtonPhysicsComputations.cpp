@@ -79,11 +79,19 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)
             // This is idempotent — if already at this time, it's a no-op.
             NewtonPhysicsSystem &sys =
                 NewtonPhysicsSystem::GetInstance();
+            
+            fprintf(stderr, "[Newton] computeSimulatedTransform: prim=%s time=%.2f init=%d\n",
+                    primPath.GetText(), timeInSeconds, sys.IsInitialized());
+            
             if (sys.IsInitialized()) {
                 sys.AdvanceToTime(timeInSeconds);
             }
 
-            return sys.GetSimulatedTransform(primPath);
+            GfMatrix4d result = sys.GetSimulatedTransform(primPath);
+            GfVec3d pos = result.ExtractTranslation();
+            fprintf(stderr, "[Newton] Result: translate=(%.2f, %.2f, %.2f)\n",
+                    pos[0], pos[1], pos[2]);
+            return result;
         })
         .Inputs(
             AttributeValue<bool>(TfToken("physics:rigidBodyEnabled")),

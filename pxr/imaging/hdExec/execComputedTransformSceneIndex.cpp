@@ -113,6 +113,8 @@ public:
         ExecUsdRequest request =
             _execSystem->BuildRequest(std::move(keys));
         if (!request.IsValid()) {
+            fprintf(stderr, "[HdExec] DataSource: request invalid for %s\n",
+                    _prim.GetPath().GetText());
             return GfMatrix4d(1.0);
         }
 
@@ -121,9 +123,15 @@ public:
 
         VtValue val = view.Get(0);
         if (val.IsHolding<GfMatrix4d>()) {
-            return val.UncheckedGet<GfMatrix4d>();
+            GfMatrix4d mat = val.UncheckedGet<GfMatrix4d>();
+            GfVec3d pos = mat.ExtractTranslation();
+            fprintf(stderr, "[HdExec] DataSource: %s → translate=(%.2f, %.2f, %.2f)\n",
+                    _prim.GetPath().GetText(), pos[0], pos[1], pos[2]);
+            return mat;
         }
 
+        fprintf(stderr, "[HdExec] DataSource: %s → not GfMatrix4d\n",
+                _prim.GetPath().GetText());
         return GfMatrix4d(1.0);
     }
 

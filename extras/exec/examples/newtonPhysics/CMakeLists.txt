@@ -28,8 +28,19 @@ if(NewtonDynamics_FOUND)
     message(STATUS "Newton includes: ${NEWTON_DYNAMICS_INCLUDE_DIRS}")
 endif()
 
-# Note: newtonPhysicsPlugin is a library, not a standalone test.
-# Its source files are compiled into individual test targets below.
+# Build the Newton physics plugin as a shared library so the exec system
+# can load it at runtime to evaluate computeSimulatedTransform.
+pxr_plugin(newtonPhysicsPlugin
+    LIBRARIES
+        ${NEWTON_PHYSICS_LIBS}
+    CPPFILES
+        newtonPhysicsComputations.cpp
+        newtonPhysicsSystem.cpp
+        newtonWorldManager.cpp
+        usdToNewtonMapper.cpp
+    RESOURCE_FILES
+        plugInfo.json
+)
 
 pxr_build_test(testNewtonPhysicsPluginLoads
     LIBRARIES
