@@ -75,6 +75,11 @@ NewtonWorldManager::Step(double dt)
     }
 
 #ifdef NEWTON_DYNAMICS_FOUND
+    // Broadphase + narrowphase collision detection must run before
+    // the solver step, otherwise Newton has zero contact pairs and
+    // bodies fall through each other.
+    _world->CollisionUpdate(static_cast<ndFloat32>(dt));
+
     // Newton 4 async stepping: Update() begins the simulation step,
     // Sync() blocks until it completes.
     _world->Update(static_cast<ndFloat32>(dt));
