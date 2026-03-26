@@ -39,12 +39,50 @@ TF_DEFINE_ENV_SETTING(
 std::mutex HdExecComputedTransformSceneIndex::_sGlobalStageMutex;
 UsdStageRefPtr HdExecComputedTransformSceneIndex::_sGlobalStage;
 
+// Track all auto-bootstrapped instances for global time advancing
+static std::mutex _sInstancesMutex;
+static std::vector<HdExecComputedTransformSceneIndex*> _sInstances;
+
 void
 HdExecComputedTransformSceneIndex::SetGlobalStage(
     const UsdStageRefPtr &stage)
 {
     std::lock_guard<std::mutex> lock(_sGlobalStageMutex);
     _sGlobalStage = stage;
+    fprintf(stderr, "[HdExec] SetGlobalStage: %s\n",
+            stage ? stage->GetRootLayer()->GetIdentifier().c_str() : "null");
+}
+
+void
+HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
+{
+    std::lock_guard<std::mutex> lock(_sInstancesMutex);
+    for (auto *inst : _sInstances) {
+        if (inst->_bootstrapped && inst->_execSystem) {
+            fprintf(stderr, "[HdExec] AdvanceGlobalTime: frame=%.1f\n",
+                    time.GetValue());
+            inst->_execSystem->ChangeTime(time);
+            inst->_currentTime = time;
+            inst->_currentTimeFrame = time.IsDefault() ? 0.0 : time.GetValue();
+            
+            // Dirty all computed prims so Hydra re-pulls GetPrim()
+            HdSceneIndexObserver::DirtiedPrimEntries dirtyEntries;
+            {
+                std::lock_guard<std::mutex> cacheLock(inst->_cacheMutex);
+                for (const auto &pair : inst->_hasComputationCache) {
+                    if (pair.second) {
+                        dirtyEntries.push_back({
+                            pair.first,
+                            HdDataSourceLocatorSet{
+                                HdXformSchema::GetDefaultLocator()}});
+                    }
+                }
+            }
+            if (!dirtyEntries.empty()) {
+                inst->_SendPrimsDirtied(dirtyEntries);
+            }
+        }
+    }
 }
 
 namespace
@@ -175,6 +213,21 @@ HdExecComputedTransformSceneIndex::HdExecComputedTransformSceneIndex(
     , _resetXformStack(resetXformStack)
     , _currentTime(UsdTimeCode::Default())
 {
+    // Register this instance for global time advancing
+    std::lock_guard<std::mutex> lock(_sInstancesMutex);
+    _sInstances.push_back(this);
+}
+
+HdExecComputedTransformSceneIndex::~HdExecComputedTransformSceneIndex()
+{
+    // Unregister from global instances
+    std::lock_guard<std::mutex> lock(_sInstancesMutex);
+    for (auto it = _sInstances.begin(); it != _sInstances.end(); ++it) {
+        if (*it == this) {
+            _sInstances.erase(it);
+            break;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +309,8 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
     HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
 
     if (_bootstrapped && _HasExecComputation(primPath)) {
+        fprintf(stderr, "[HdExec] GetPrim: OVERLAY applied for %s\n",
+                primPath.GetText());
         prim.dataSource = HdOverlayContainerDataSource::New(
             _CreateExecXformDataSource(primPath),
             prim.dataSource);
@@ -341,6 +396,8 @@ HdExecComputedTransformSceneIndex::_HasExecComputation(
         std::vector<ExecUsdValueKey> keys;
         keys.emplace_back(prim, token);
         ExecUsdRequest req = _execSystem->BuildRequest(std::move(keys));
+        fprintf(stderr, "[HdExec] _HasExecComputation: %s token=%s valid=%d\n",
+                primPath.GetText(), token.GetText(), req.IsValid());
         if (req.IsValid()) {
             std::lock_guard<std::mutex> lock(_cacheMutex);
             _hasComputationCache[primPath] = true;
@@ -454,22 +511,30 @@ HdExecComputedTransformSceneIndex::_PrimsDirtied(
 
         if (xformDirty) {
             // The upstream stage scene index has changed time.
-            // We need to get the current time from the stage and step
-            // our exec system accordingly.
+            // Track frame count and advance the exec system's time.
+            // UsdImagingStageSceneIndex calls SetTime() before dirtying,
+            // so the stage prims now have new time-sampled values.
             //
-            // Since UsdImagingStageSceneIndex doesn't expose its current
-            // time directly, and we can't easily query it, we rely on
-            // the exec system's ChangeTime being called.
-            //
-            // For the auto-bootstrap path, we track time via the stage's
-            // current time code. UsdStage doesn't have a "current time"
-            // concept, but the _StageGlobals in UsdImagingStageSceneIndex
-            // does. Since we can't access that, we note the dirty and
-            // let the data source re-evaluate on the next pull.
-            //
-            // This works because _ExecMatrixDataSource::GetTypedValue()
-            // always evaluates the computation fresh, and the Newton
-            // physics system tracks its own time via AdvanceToTime().
+            // We use the stage's timeCodesPerSecond to convert from
+            // frame count to UsdTimeCode. We increment a frame counter
+            // each time we detect a time-change dirty.
+            _currentTimeFrame += 1.0;
+            UsdTimeCode newTime(_currentTimeFrame);
+            fprintf(stderr, "[HdExec] Time change detected, advancing to frame %.0f\n",
+                    _currentTimeFrame);
+            _execSystem->ChangeTime(newTime);
+            _currentTime = newTime;
+            
+            // Also step Newton physics
+            if (_stage) {
+                double fps = _stage->GetTimeCodesPerSecond();
+                if (fps <= 0) fps = 24.0;
+                double timeInSeconds = _currentTimeFrame / fps;
+                // Import Newton header indirectly via the computation
+                // Newton stepping happens in the computation callback
+                // via computeTime. But we need ChangeTime first so
+                // computeTime returns the new value.
+            }
         }
     }
 

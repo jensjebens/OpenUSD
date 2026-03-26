@@ -539,6 +539,14 @@ UsdImagingGLEngine::PrepareBatch(
         // SetTime will only react if time actually changes.
         if (UseUsdImagingSceneIndex()) {
             _stageSceneIndex->SetTime(params.frame);
+
+            // Advance the HdExec scene index filter's time so that
+            // exec computations (e.g., physics) re-evaluate at the
+            // new frame. This is necessary because physics prims may
+            // not have time-sampled attributes, so the stage scene
+            // index won't dirty them on time change.
+            HdExecComputedTransformSceneIndex::AdvanceGlobalTime(
+                params.frame);
         } else {
             _sceneDelegate->SetTime(params.frame);
         }
