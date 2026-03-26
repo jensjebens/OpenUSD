@@ -37,35 +37,46 @@ namespace NewtonTypes {
 ///
 /// Newton's ndMatrix stores four column vectors (m_front, m_up, m_right,
 /// m_posit) as single-precision floats. USD's GfMatrix4d is row-major
-/// double[4][4]. We transpose while converting.
+/// double[4][4].
+///
+/// USD's row-major convention puts translation in the LAST ROW (row 3),
+/// while Newton stores it in the m_posit column vector. The correct
+/// mapping is: each Newton column vector becomes a ROW in GfMatrix4d.
+///   row 0 = m_front (column 0)
+///   row 1 = m_up    (column 1)
+///   row 2 = m_right (column 2)
+///   row 3 = m_posit (column 3)
 inline GfMatrix4d
 NewtonToUsd(const ndMatrix &m)
 {
     return GfMatrix4d(
-        m.m_front.m_x, m.m_up.m_x, m.m_right.m_x, m.m_posit.m_x,
-        m.m_front.m_y, m.m_up.m_y, m.m_right.m_y, m.m_posit.m_y,
-        m.m_front.m_z, m.m_up.m_z, m.m_right.m_z, m.m_posit.m_z,
-        0.0,           0.0,         0.0,            1.0
+        m.m_front.m_x, m.m_front.m_y, m.m_front.m_z, m.m_front.m_w,
+        m.m_up.m_x,    m.m_up.m_y,    m.m_up.m_z,    m.m_up.m_w,
+        m.m_right.m_x, m.m_right.m_y, m.m_right.m_z, m.m_right.m_w,
+        m.m_posit.m_x, m.m_posit.m_y, m.m_posit.m_z, m.m_posit.m_w
     );
 }
 
 /// Convert a USD GfMatrix4d to a Newton ndMatrix.
 ///
-/// USD row-major layout to Newton column vectors.
+/// USD row-major layout: rows of GfMatrix4d become Newton column vectors.
+///   m_front = row 0 = d[0..3]
+///   m_up    = row 1 = d[4..7]
+///   m_right = row 2 = d[8..11]
+///   m_posit = row 3 = d[12..15]
 inline ndMatrix
 UsdToNewton(const GfMatrix4d &m)
 {
     const double *d = m.GetArray();
-    // Row-major to Newton column vectors.
     ndMatrix result;
     result.m_front = ndVector(
-        ndFloat32(d[0]), ndFloat32(d[4]), ndFloat32(d[8]),  0.0f);
+        ndFloat32(d[0]),  ndFloat32(d[1]),  ndFloat32(d[2]),  ndFloat32(d[3]));
     result.m_up    = ndVector(
-        ndFloat32(d[1]), ndFloat32(d[5]), ndFloat32(d[9]),  0.0f);
+        ndFloat32(d[4]),  ndFloat32(d[5]),  ndFloat32(d[6]),  ndFloat32(d[7]));
     result.m_right = ndVector(
-        ndFloat32(d[2]), ndFloat32(d[6]), ndFloat32(d[10]), 0.0f);
+        ndFloat32(d[8]),  ndFloat32(d[9]),  ndFloat32(d[10]), ndFloat32(d[11]));
     result.m_posit = ndVector(
-        ndFloat32(d[3]), ndFloat32(d[7]), ndFloat32(d[11]), 1.0f);
+        ndFloat32(d[12]), ndFloat32(d[13]), ndFloat32(d[14]), ndFloat32(d[15]));
     return result;
 }
 

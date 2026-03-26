@@ -6,11 +6,17 @@
 //
 
 /// \file newtonPhysics/newtonBodyNotify.h
-/// \brief Custom ndBodyNotify that applies gravity to Newton 4 bodies.
+/// \brief DEPRECATED — Use ndBodyNotify directly.
 ///
-/// Newton Dynamics 4 applies external forces (including gravity) per-body
-/// via the ndBodyNotify callback, rather than storing gravity on the world.
-/// This class provides the gravity callback for dynamic rigid bodies.
+/// Newton Dynamics 4's base ndBodyNotify class already handles gravity
+/// when constructed with a gravity vector:
+///
+///   body->SetNotifyCallback(new ndBodyNotify(
+///       ndVector(0.0f, -9.81f, 0.0f, 0.0f)));
+///
+/// The base class's OnApplyExternalForce applies F = m * gravity
+/// automatically. This custom subclass is no longer needed and is
+/// kept only for backward compatibility.
 
 #ifndef EXTRAS_EXEC_EXAMPLES_NEWTON_PHYSICS_NEWTON_BODY_NOTIFY_H
 #define EXTRAS_EXEC_EXAMPLES_NEWTON_PHYSICS_NEWTON_BODY_NOTIFY_H
@@ -21,31 +27,20 @@
 
 /// \class NewtonGravityNotify
 ///
-/// Applies gravity as an external force on each dynamic body every
-/// simulation step. Attach this to every ndBodyDynamic that should
-/// experience gravitational acceleration.
+/// DEPRECATED — Use ndBodyNotify(gravityVector) directly instead.
 ///
-class NewtonGravityNotify : public ndBodyNotify
+/// This class is kept for backward compatibility but is no longer used
+/// by the mapper. The base ndBodyNotify constructor accepts a gravity
+/// vector and handles external force application correctly.
+///
+class [[deprecated("Use ndBodyNotify(gravityVector) directly")]]
+NewtonGravityNotify : public ndBodyNotify
 {
 public:
     /// Construct with a gravity vector (e.g., {0, -9.81, 0, 0}).
     NewtonGravityNotify(const ndVector &gravity)
-        : ndBodyNotify(ndVector::m_zero)  // zero linear/angular damping
-        , _gravity(gravity)
+        : ndBodyNotify(gravity)  // pass gravity to base — it handles the rest
     {
-    }
-
-    /// Called each physics step — applies gravitational force.
-    void OnApplyExternalForce(ndInt32 threadIndex,
-                              ndFloat32 timestep) override
-    {
-        ndBodyDynamic *const body = GetBody()->GetAsBodyDynamic();
-        if (body) {
-            // F = m * g. Mass is stored in the w component of the
-            // mass matrix (diagonal: Ixx, Iyy, Izz, mass).
-            const ndVector force(body->GetMassMatrix().m_w * _gravity);
-            body->SetForce(force);
-        }
     }
 
     /// Called when the body's transform changes.
@@ -56,9 +51,6 @@ public:
     {
         // TODO(Phase 3): Flag prim as needing transform writeback.
     }
-
-private:
-    ndVector _gravity;
 };
 
 #endif // NEWTON_DYNAMICS_FOUND

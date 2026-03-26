@@ -9,9 +9,8 @@
 #include "newtonWorldManager.h"
 #include "newtonTypes.h"
 
-#ifdef NEWTON_DYNAMICS_FOUND
-#include "newtonBodyNotify.h"
-#endif
+// Newton 4's base ndBodyNotify handles gravity via its constructor —
+// no custom notify class needed.
 
 #include "pxr/pxr.h"
 #include "pxr/base/tf/diagnostic.h"
@@ -195,37 +194,37 @@ UsdToNewtonMapper::_MapRigidBody(const UsdPrim &prim,
 #ifdef NEWTON_DYNAMICS_FOUND
     NewtonWorldManager &mgr = NewtonWorldManager::GetInstance();
 
-    ndSharedPtr<ndShape> shape = _CreateShape(prim);
-    ndShapeInstance shapeInstance(shape);
+    ndSharedPtr<ndShapeInstance> shape = _CreateShape(prim);
 
     if (kinematicEnabled) {
         // Kinematic body — driven by animation, not forces.
         ndSharedPtr<ndBody> body(new ndBodyKinematic());
-        ndBodyKinematic *kinBody = body->GetAsBodyKinematic();
-        kinBody->SetCollisionShape(shapeInstance);
-        kinBody->SetMatrix(NewtonTypes::UsdToNewton(worldXform));
+        body->GetAsBodyKinematic()->SetCollisionShape(**shape);
+        body->SetMatrix(NewtonTypes::UsdToNewton(worldXform));
 
         rec.body = body;
+        rec.shape = shape;
         mgr.AddBody(body);
     }
     else {
         // Dynamic body — participates in simulation.
         ndSharedPtr<ndBody> body(new ndBodyDynamic());
-        ndBodyDynamic *dynBody = body->GetAsBodyDynamic();
-        dynBody->SetCollisionShape(shapeInstance);
-        dynBody->SetMatrix(NewtonTypes::UsdToNewton(worldXform));
-        dynBody->SetMassMatrix(mass, shapeInstance);
 
-        // Attach gravity callback.
+        // Use base ndBodyNotify for gravity — this is the correct Newton 4
+        // pattern. The base class handles gravity in OnApplyExternalForce.
         GfVec3d grav = mgr.GetGravity();
-        ndVector newtonGrav(
-            static_cast<ndFloat32>(grav[0]),
-            static_cast<ndFloat32>(grav[1]),
-            static_cast<ndFloat32>(grav[2]),
-            0.0f);
-        dynBody->SetNotifyCallback(new NewtonGravityNotify(newtonGrav));
+        body->SetNotifyCallback(new ndBodyNotify(
+            ndVector(static_cast<ndFloat32>(grav[0]),
+                     static_cast<ndFloat32>(grav[1]),
+                     static_cast<ndFloat32>(grav[2]),
+                     0.0f)));
+
+        body->SetMatrix(NewtonTypes::UsdToNewton(worldXform));
+        body->GetAsBodyKinematic()->SetCollisionShape(**shape);
+        body->GetAsBodyKinematic()->SetMassMatrix(mass, **shape);
 
         rec.body = body;
+        rec.shape = shape;
         mgr.AddBody(body);
     }
 
@@ -271,16 +270,15 @@ UsdToNewtonMapper::_MapStaticCollider(const UsdPrim &prim,
 #ifdef NEWTON_DYNAMICS_FOUND
     NewtonWorldManager &mgr = NewtonWorldManager::GetInstance();
 
-    ndSharedPtr<ndShape> shape = _CreateShape(prim);
-    ndShapeInstance shapeInstance(shape);
+    ndSharedPtr<ndShapeInstance> shape = _CreateShape(prim);
 
     // Static body — a kinematic body with zero velocity.
     ndSharedPtr<ndBody> body(new ndBodyKinematic());
-    ndBodyKinematic *kinBody = body->GetAsBodyKinematic();
-    kinBody->SetCollisionShape(shapeInstance);
-    kinBody->SetMatrix(NewtonTypes::UsdToNewton(worldXform));
+    body->GetAsBodyKinematic()->SetCollisionShape(**shape);
+    body->SetMatrix(NewtonTypes::UsdToNewton(worldXform));
 
     rec.body = body;
+    rec.shape = shape;
     mgr.AddBody(body);
 #endif
 
@@ -301,7 +299,7 @@ UsdToNewtonMapper::_MapStaticCollider(const UsdPrim &prim,
 
 #ifdef NEWTON_DYNAMICS_FOUND
 
-ndSharedPtr<ndShape>
+ndSharedPtr<ndShapeInstance>
 UsdToNewtonMapper::_CreateShape(const UsdPrim &prim)
 {
     if (prim.IsA<UsdGeomCube>()) {
@@ -319,10 +317,11 @@ UsdToNewtonMapper::_CreateShape(const UsdPrim &prim)
              prim.GetPath().GetText(),
              prim.GetTypeName().GetText());
 
-    return ndSharedPtr<ndShape>(new ndShapeBox(1.0f, 1.0f, 1.0f));
+    return ndSharedPtr<ndShapeInstance>(
+        new ndShapeInstance(new ndShapeBox(1.0f, 1.0f, 1.0f)));
 }
 
-ndSharedPtr<ndShape>
+ndSharedPtr<ndShapeInstance>
 UsdToNewtonMapper::_CreateBoxShape(const UsdPrim &prim)
 {
     double size = 1.0;
@@ -347,20 +346,23 @@ UsdToNewtonMapper::_CreateBoxShape(const UsdPrim &prim)
     float ey = static_cast<float>(size) * scale[1];
     float ez = static_cast<float>(size) * scale[2];
 
-    return ndSharedPtr<ndShape>(new ndShapeBox(ex, ey, ez));
+    return ndSharedPtr<ndShapeInstance>(
+        new ndShapeInstance(new ndShapeBox(ex, ey, ez)));
 }
 
-ndSharedPtr<ndShape>
+ndSharedPtr<ndShapeInstance>
 UsdToNewtonMapper::_CreateSphereShape(const UsdPrim &prim)
 {
     double radius = 1.0;
     UsdGeomSphere sphere(prim);
     sphere.GetRadiusAttr().Get(&radius);
 
-    return ndSharedPtr<ndShape>(new ndShapeSphere(static_cast<float>(radius)));
+    return ndSharedPtr<ndShapeInstance>(
+        new ndShapeInstance(
+            new ndShapeSphere(static_cast<float>(radius))));
 }
 
-ndSharedPtr<ndShape>
+ndSharedPtr<ndShapeInstance>
 UsdToNewtonMapper::_CreateCapsuleShape(const UsdPrim &prim)
 {
     double height = 1.0;
@@ -370,10 +372,11 @@ UsdToNewtonMapper::_CreateCapsuleShape(const UsdPrim &prim)
     capsule.GetRadiusAttr().Get(&radius);
 
     // Newton capsule: (radius0, radius1, height between centers).
-    return ndSharedPtr<ndShape>(new ndShapeCapsule(
-        static_cast<float>(radius),
-        static_cast<float>(radius),
-        static_cast<float>(height)));
+    return ndSharedPtr<ndShapeInstance>(
+        new ndShapeInstance(new ndShapeCapsule(
+            static_cast<float>(radius),
+            static_cast<float>(radius),
+            static_cast<float>(height))));
 }
 
 #endif // NEWTON_DYNAMICS_FOUND
