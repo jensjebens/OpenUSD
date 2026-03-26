@@ -108,6 +108,7 @@ private:
         PhysicsMaterialProperties materialProps;
 #ifdef NEWTON_DYNAMICS_FOUND
         ndSharedPtr<ndBody> body;
+        ndSharedPtr<ndShapeInstance> shape;  // keep shape alive for body lifetime
 #endif
     };
 
@@ -115,12 +116,12 @@ private:
     void _MapRigidBody(const UsdPrim &prim, const UsdStageRefPtr &stage);
     void _MapStaticCollider(const UsdPrim &prim, const UsdStageRefPtr &stage);
 
-    // Shape creation
+    // Shape creation — returns ndSharedPtr<ndShapeInstance> (Newton 4 pattern)
 #ifdef NEWTON_DYNAMICS_FOUND
-    ndSharedPtr<ndShape> _CreateShape(const UsdPrim &prim);
-    ndSharedPtr<ndShape> _CreateBoxShape(const UsdPrim &prim);
-    ndSharedPtr<ndShape> _CreateSphereShape(const UsdPrim &prim);
-    ndSharedPtr<ndShape> _CreateCapsuleShape(const UsdPrim &prim);
+    ndSharedPtr<ndShapeInstance> _CreateShape(const UsdPrim &prim);
+    ndSharedPtr<ndShapeInstance> _CreateBoxShape(const UsdPrim &prim);
+    ndSharedPtr<ndShapeInstance> _CreateSphereShape(const UsdPrim &prim);
+    ndSharedPtr<ndShapeInstance> _CreateCapsuleShape(const UsdPrim &prim);
 #endif
 
     // Mass / inertia
