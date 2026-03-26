@@ -210,6 +210,7 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
     }
 
     if (!TfGetEnvSetting(HDEXEC_AUTO_BOOTSTRAP)) {
+        fprintf(stderr, "[HdExec] _TryBootstrap: disabled by env var\n");
         return;
     }
 
@@ -217,6 +218,7 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
     {
         std::lock_guard<std::mutex> lock(_sGlobalStageMutex);
         if (!_sGlobalStage) {
+            fprintf(stderr, "[HdExec] _TryBootstrap: no global stage yet\n");
             return;
         }
         stage = _sGlobalStage;
@@ -224,6 +226,8 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
 
     TF_STATUS("HdExec: Auto-bootstrapping with stage @%s@",
               stage->GetRootLayer()->GetIdentifier().c_str());
+    fprintf(stderr, "[HdExec] _TryBootstrap: got stage @%s@\n",
+            stage->GetRootLayer()->GetIdentifier().c_str());
 
     // Create the exec system for this stage.
     auto execSystem = std::make_shared<ExecUsdSystem>(stage);
@@ -234,6 +238,7 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
     _bootstrapped = true;
 
     TF_STATUS("HdExec: Auto-bootstrap complete — exec system ready");
+    fprintf(stderr, "[HdExec] Bootstrap COMPLETE! ExecUsdSystem ready.\n");
 }
 
 // ---------------------------------------------------------------------------

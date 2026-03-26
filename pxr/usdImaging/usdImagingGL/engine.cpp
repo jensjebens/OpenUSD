@@ -20,6 +20,8 @@
 #include "pxr/usdImaging/usdExecImaging/stageSceneIndexFactory.h"
 #include "pxr/usdImaging/usdExecImaging/stageSceneIndexInterface.h"
 
+#include "pxr/imaging/hdExec/execComputedTransformSceneIndex.h"
+
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdGeom/camera.h"
 #include "pxr/usd/usdRender/tokens.h"
@@ -588,6 +590,10 @@ UsdImagingGLEngine::PrepareBatch(
             if (_execStageSceneIndex) {
                 _execStageSceneIndex->SetStage(stage);
             }
+
+            // Notify HdExec scene index filter of the stage for
+            // auto-bootstrapping (e.g., physics simulation).
+            HdExecComputedTransformSceneIndex::SetGlobalStage(stage);
 
         } else {
             TF_VERIFY(_sceneDelegate);
