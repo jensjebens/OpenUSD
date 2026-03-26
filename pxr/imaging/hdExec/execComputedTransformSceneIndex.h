@@ -22,6 +22,7 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -115,6 +116,30 @@ public:
     /// imaging engine on each frame to ensure exec computations re-evaluate.
     HDEXEC_API
     static void AdvanceGlobalTime(UsdTimeCode time);
+
+    /// \name Transform Provider Callback
+    /// @{
+    ///
+    /// Optional callback that physics plugins can register to provide
+    /// simulated transforms directly, bypassing exec's computation cache.
+    /// This is needed because exec caches computations whose inputs
+    /// (e.g. computePath) don't change — but physics transforms change
+    /// every frame as a side effect of stepping the simulation.
+    ///
+    /// The callback receives a prim path and the current time in seconds,
+    /// and returns a GfMatrix4d. Return identity if the path is unknown.
+    ///
+    using TransformProviderFn =
+        std::function<GfMatrix4d(const SdfPath &primPath, double timeSeconds)>;
+
+    /// Register a transform provider. Only one may be active at a time.
+    HDEXEC_API
+    static void SetTransformProvider(TransformProviderFn fn);
+
+    /// Query the registered transform provider.
+    HDEXEC_API
+    static const TransformProviderFn &GetTransformProvider();
+    /// @}
 
     HDEXEC_API
     HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override;

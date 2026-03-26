@@ -45,6 +45,40 @@ TF_DEFINE_PRIVATE_TOKENS(
     (computeSimulatedTransform)
 );
 
+// ---------------------------------------------------------------------------
+// Register Newton as the transform provider for HdExec.
+// This callback is invoked by _ExecMatrixDataSource::GetTypedValue() on
+// every frame, bypassing exec's computation cache (which doesn't
+// invalidate for side-effect-driven physics stepping).
+// ---------------------------------------------------------------------------
+
+namespace {
+struct _TransformProviderRegistrar {
+    _TransformProviderRegistrar() {
+        HdExecComputedTransformSceneIndex::SetTransformProvider(
+            [](const SdfPath &primPath, double timeSeconds) -> GfMatrix4d {
+                NewtonPhysicsSystem &sys =
+                    NewtonPhysicsSystem::GetInstance();
+
+                if (!sys.IsInitialized()) {
+                    UsdStageRefPtr stage =
+                        HdExecComputedTransformSceneIndex::GetGlobalStage();
+                    if (stage) {
+                        sys.EnsureInitialized(stage);
+                    } else {
+                        return GfMatrix4d(1.0);
+                    }
+                }
+
+                sys.AdvanceToTime(timeSeconds);
+                return sys.GetSimulatedTransform(primPath);
+            });
+        fprintf(stderr, "[Newton] Transform provider registered with HdExec\n");
+    }
+};
+static _TransformProviderRegistrar _sRegistrar;
+} // anonymous namespace
+
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)
 {
     self.PrimComputation(_tokens->computeSimulatedTransform)

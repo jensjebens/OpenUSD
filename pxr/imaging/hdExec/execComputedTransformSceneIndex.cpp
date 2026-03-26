@@ -48,6 +48,24 @@ static std::mutex _sInstancesMutex;
 static std::vector<HdExecComputedTransformSceneIndex*> _sInstances;
 static std::atomic<double> _sGlobalTimeFrame{0.0};
 
+// Static transform provider callback
+static std::mutex _sTransformProviderMutex;
+static HdExecComputedTransformSceneIndex::TransformProviderFn _sTransformProvider;
+
+void
+HdExecComputedTransformSceneIndex::SetTransformProvider(TransformProviderFn fn)
+{
+    std::lock_guard<std::mutex> lock(_sTransformProviderMutex);
+    _sTransformProvider = std::move(fn);
+}
+
+const HdExecComputedTransformSceneIndex::TransformProviderFn &
+HdExecComputedTransformSceneIndex::GetTransformProvider()
+{
+    std::lock_guard<std::mutex> lock(_sTransformProviderMutex);
+    return _sTransformProvider;
+}
+
 void
 HdExecComputedTransformSceneIndex::SetGlobalStage(
     const UsdStageRefPtr &stage)
@@ -112,8 +130,13 @@ namespace
 // ---------------------------------------------------------------------------
 // _ExecMatrixDataSource
 // ---------------------------------------------------------------------------
-// A data source that evaluates an OpenExec computation to produce a GfMatrix4d
-// transform value. This is the heart of the bridge between exec and Hydra.
+// A data source that provides simulated transforms for physics prims.
+//
+// If a TransformProvider callback is registered (by the physics plugin),
+// it is used directly — this bypasses exec's computation cache, which
+// doesn't invalidate for side-effect-driven computations like physics.
+//
+// If no provider is registered, falls back to exec system evaluation.
 
 class _ExecMatrixDataSource : public HdMatrixDataSource
 {
@@ -127,15 +150,34 @@ public:
 
     GfMatrix4d GetTypedValue(const Time shutterOffset) override
     {
-        // Build request and compute.
+        // Prefer the direct transform provider (physics plugin callback).
+        const auto &provider =
+            HdExecComputedTransformSceneIndex::GetTransformProvider();
+        if (provider) {
+            double frame =
+                HdExecComputedTransformSceneIndex::GetGlobalTimeFrame();
+            double fps = 60.0;
+            if (_stage) {
+                fps = _stage->GetTimeCodesPerSecond();
+                if (fps <= 0) fps = 60.0;
+            }
+            double timeSeconds = frame / fps;
+
+            GfMatrix4d mat = provider(_primPath, timeSeconds);
+            GfVec3d pos = mat.ExtractTranslation();
+            fprintf(stderr, "[HdExec] DataSource: %s → translate=(%.2f, %.2f, %.2f) frame=%.0f t=%.3fs\n",
+                    _primPath.GetText(), pos[0], pos[1], pos[2],
+                    frame, timeSeconds);
+            return mat;
+        }
+
+        // Fallback: exec system evaluation (may be cached).
         std::vector<ExecUsdValueKey> keys;
         keys.emplace_back(_prim, _computationToken);
 
         ExecUsdRequest request =
             _execSystem->BuildRequest(std::move(keys));
         if (!request.IsValid()) {
-            fprintf(stderr, "[HdExec] DataSource: request invalid for %s\n",
-                    _prim.GetPath().GetText());
             return GfMatrix4d(1.0);
         }
 
@@ -144,16 +186,8 @@ public:
 
         VtValue val = view.Get(0);
         if (val.IsHolding<GfMatrix4d>()) {
-            GfMatrix4d mat = val.UncheckedGet<GfMatrix4d>();
-            GfVec3d pos = mat.ExtractTranslation();
-            fprintf(stderr, "[HdExec] DataSource: %s → translate=(%.2f, %.2f, %.2f)\n",
-                    _prim.GetPath().GetText(), pos[0], pos[1], pos[2]);
-            return mat;
+            return val.UncheckedGet<GfMatrix4d>();
         }
-
-        fprintf(stderr, "[HdExec] DataSource: %s → not GfMatrix4d (type=%s)\n",
-                _prim.GetPath().GetText(),
-                val.IsEmpty() ? "empty" : val.GetTypeName().c_str());
         return GfMatrix4d(1.0);
     }
 
@@ -162,7 +196,6 @@ public:
         Time endTime,
         std::vector<Time> *outSampleTimes) override
     {
-        // Single sample — no motion blur for exec computations (for now).
         return false;
     }
 
@@ -173,12 +206,16 @@ private:
         const TfToken &computationToken)
         : _execSystem(execSystem)
         , _prim(prim)
+        , _primPath(prim.GetPath())
+        , _stage(prim.GetStage())
         , _computationToken(computationToken)
     {
     }
 
     ExecUsdSystem *_execSystem;
     UsdPrim _prim;
+    SdfPath _primPath;
+    UsdStageRefPtr _stage;
     TfToken _computationToken;
 };
 
