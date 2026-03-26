@@ -2516,11 +2516,6 @@ HdSceneIndexAdapterSceneDelegate::GetTransform(SdfPath const & id)
                 xformSchema.GetMatrix()) {
 
             m = matrixSource->GetTypedValue(0.0f);
-            if (id.GetString().find("FallingBox") != std::string::npos) {
-                GfVec3d pos = m.ExtractTranslation();
-                fprintf(stderr, "[Storm] GetTransform %s: (%.2f, %.2f, %.2f)\n",
-                        id.GetText(), pos[0], pos[1], pos[2]);
-            }
         }
     }
 

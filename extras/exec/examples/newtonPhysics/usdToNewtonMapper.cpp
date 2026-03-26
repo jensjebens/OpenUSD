@@ -228,10 +228,9 @@ UsdToNewtonMapper::_MapRigidBody(const UsdPrim &prim,
         mgr.AddBody(body);
     }
 
-    // TODO(Phase 4): Apply matProps to Newton bodies via a custom
-    // ndContactNotify callback on the world. Newton 4 handles material
-    // properties through contact callbacks rather than per-shape settings.
-    // Material properties are stored in the BodyRecord for now.
+    // Newton 4 handles material properties through contact callbacks
+    // (ndContactNotify) rather than per-shape settings. Material
+    // properties are stored in the BodyRecord for now.
 #endif
 
     _bodyMap[prim.GetPath()] = std::move(rec);
@@ -401,7 +400,8 @@ UsdToNewtonMapper::_GetMass(const UsdPrim &prim, float defaultMass)
         float density = 0.0f;
         massAPI.GetDensityAttr().Get(&density);
         if (density > 0.0f) {
-            // TODO: multiply by actual volume for accuracy.
+            // Approximation: uses density as mass directly.
+            // For accuracy, multiply by actual shape volume.
             return density;
         }
     }
