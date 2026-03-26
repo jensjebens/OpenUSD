@@ -12,10 +12,10 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 TF_WRAP_MODULE
 {
-    // Schema-generated wraps
+    // Schema-generated wraps (names must match wrapXxx.cpp function names)
     TF_WRAP(UsdMetricsGeomMetricsAPI);
     TF_WRAP(UsdMetricsPhysicsMetricsAPI);
-    TF_WRAP(UsdMetricsApiTokens);
+    TF_WRAP(UsdMetricsTokens);
 
     // Custom wraps
     TF_WRAP(DimensionalRegistry);
