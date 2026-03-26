@@ -18,9 +18,21 @@ pxr_plugin(${PXR_PACKAGE}
     PUBLIC_HEADERS
         api.h
         dimensionalRegistry.h
+        geomMetricsAPI.h
+        physicsMetricsAPI.h
+        tokens.h
 
     CPPFILES
         dimensionalRegistry.cpp
+        geomMetricsAPI.cpp
+        physicsMetricsAPI.cpp
+        tokens.cpp
+        module.cpp
+
+    PYTHON_CPPFILES
+        wrapGeomMetricsAPI.cpp
+        wrapPhysicsMetricsAPI.cpp
+        wrapTokens.cpp
 
     PYMODULE_FILES
         __init__.py
