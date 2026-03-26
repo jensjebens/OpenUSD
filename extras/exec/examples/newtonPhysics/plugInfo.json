@@ -10,7 +10,7 @@
                     }
                 }
             },
-            "LibraryPath": "@PLUG_INFO_LIBRARY_PATH@",
+            "LibraryPath": "../../newtonPhysicsPlugin.so",
             "Name": "newtonPhysicsPlugin",
             "ResourcePath": ".",
             "Root": ".",

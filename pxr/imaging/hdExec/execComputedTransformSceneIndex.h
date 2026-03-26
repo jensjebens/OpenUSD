@@ -103,6 +103,14 @@ public:
     HDEXEC_API
     static void SetGlobalStage(const UsdStageRefPtr &stage);
 
+    /// Get the global stage (for computation callbacks that need it).
+    HDEXEC_API
+    static UsdStageRefPtr GetGlobalStage();
+
+    /// Get the current global time frame.
+    HDEXEC_API
+    static double GetGlobalTimeFrame();
+
     /// Advance time for all auto-bootstrapped instances. Called by the
     /// imaging engine on each frame to ensure exec computations re-evaluate.
     HDEXEC_API

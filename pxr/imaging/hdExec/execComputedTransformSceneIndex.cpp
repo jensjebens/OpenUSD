@@ -19,6 +19,9 @@
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/prim.h"
 
+#include "pxr/base/plug/plugin.h"
+#include "pxr/base/plug/registry.h"
+
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/envSetting.h"
@@ -42,6 +45,7 @@ UsdStageRefPtr HdExecComputedTransformSceneIndex::_sGlobalStage;
 // Track all auto-bootstrapped instances for global time advancing
 static std::mutex _sInstancesMutex;
 static std::vector<HdExecComputedTransformSceneIndex*> _sInstances;
+static std::atomic<double> _sGlobalTimeFrame{0.0};
 
 void
 HdExecComputedTransformSceneIndex::SetGlobalStage(
@@ -53,10 +57,24 @@ HdExecComputedTransformSceneIndex::SetGlobalStage(
             stage ? stage->GetRootLayer()->GetIdentifier().c_str() : "null");
 }
 
+UsdStageRefPtr
+HdExecComputedTransformSceneIndex::GetGlobalStage()
+{
+    std::lock_guard<std::mutex> lock(_sGlobalStageMutex);
+    return _sGlobalStage;
+}
+
+double
+HdExecComputedTransformSceneIndex::GetGlobalTimeFrame()
+{
+    return _sGlobalTimeFrame.load();
+}
+
 void
 HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
 {
     std::lock_guard<std::mutex> lock(_sInstancesMutex);
+    _sGlobalTimeFrame.store(time.IsDefault() ? 0.0 : time.GetValue());
     for (auto *inst : _sInstances) {
         if (inst->_bootstrapped && inst->_execSystem) {
             fprintf(stderr, "[HdExec] AdvanceGlobalTime: frame=%.1f\n",
@@ -66,6 +84,9 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
             inst->_currentTimeFrame = time.IsDefault() ? 0.0 : time.GetValue();
             
             // Dirty all computed prims so Hydra re-pulls GetPrim()
+            // Use UniversalSet to ensure the CachingSceneIndex evicts
+            // its cache (it only evicts on container-level dirty, not
+            // on specific locators like xform).
             HdSceneIndexObserver::DirtiedPrimEntries dirtyEntries;
             {
                 std::lock_guard<std::mutex> cacheLock(inst->_cacheMutex);
@@ -73,8 +94,7 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
                     if (pair.second) {
                         dirtyEntries.push_back({
                             pair.first,
-                            HdDataSourceLocatorSet{
-                                HdXformSchema::GetDefaultLocator()}});
+                            HdDataSourceLocatorSet::UniversalSet()});
                     }
                 }
             }
@@ -130,8 +150,9 @@ public:
             return mat;
         }
 
-        fprintf(stderr, "[HdExec] DataSource: %s → not GfMatrix4d\n",
-                _prim.GetPath().GetText());
+        fprintf(stderr, "[HdExec] DataSource: %s → not GfMatrix4d (type=%s)\n",
+                _prim.GetPath().GetText(),
+                val.IsEmpty() ? "empty" : val.GetTypeName().c_str());
         return GfMatrix4d(1.0);
     }
 
@@ -290,6 +311,20 @@ HdExecComputedTransformSceneIndex::_TryBootstrap() const
     fprintf(stderr, "[HdExec] _TryBootstrap: got stage @%s@\n",
             stage->GetRootLayer()->GetIdentifier().c_str());
 
+    // Force-load any exec computation plugins that are discovered.
+    // This ensures EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA runs before
+    // we create the ExecUsdSystem.
+    {
+        PlugPluginPtr newtonPlugin = 
+            PlugRegistry::GetInstance().GetPluginWithName("newtonPhysicsPlugin");
+        if (newtonPlugin && !newtonPlugin->IsLoaded()) {
+            fprintf(stderr, "[HdExec] Loading Newton physics plugin...\n");
+            newtonPlugin->Load();
+            fprintf(stderr, "[HdExec] Newton plugin loaded: %d\n", 
+                    newtonPlugin->IsLoaded());
+        }
+    }
+
     // Create the exec system for this stage.
     auto execSystem = std::make_shared<ExecUsdSystem>(stage);
 
@@ -436,13 +471,21 @@ HdExecComputedTransformSceneIndex::_CreateExecXformDataSource(
         }
     }
 
-    return HdXformSchema::Builder()
-        .SetMatrix(
-            _ExecMatrixDataSource::New(
-                _execSystem.get(), prim, activeToken))
-        .SetResetXformStack(
-            HdRetainedTypedSampledDataSource<bool>::New(_resetXformStack))
-        .Build();
+    // Wrap the xform schema container under the "xform" key so it
+    // overlays correctly at the prim level. HdXformSchema::Builder().Build()
+    // returns the INNER container (matrix + resetXformStack), but the
+    // prim-level overlay needs it keyed as "xform".
+    HdContainerDataSourceHandle xformContainer =
+        HdXformSchema::Builder()
+            .SetMatrix(
+                _ExecMatrixDataSource::New(
+                    _execSystem.get(), prim, activeToken))
+            .SetResetXformStack(
+                HdRetainedTypedSampledDataSource<bool>::New(_resetXformStack))
+            .Build();
+
+    return HdRetainedContainerDataSource::New(
+        HdXformSchemaTokens->xform, xformContainer);
 }
 
 void
