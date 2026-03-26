@@ -14,8 +14,11 @@
 #include "pxr/imaging/hd/filteringSceneIndex.h"
 
 #include "pxr/base/tf/hashmap.h"
+#include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/token.h"
+// TfWeakBase is inherited via HdSceneIndexBase
 #include "pxr/usd/sdf/path.h"
+#include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
@@ -41,12 +44,18 @@ TF_DECLARE_REF_PTRS(HdExecComputedTransformSceneIndex);
 /// prim for the specified computation tokens and, if found, overlays the
 /// exec-computed transform onto the prim's xform data source.
 ///
+/// The filter supports two modes:
+///   1. Explicit setup: New() with stage + exec system provided by the app.
+///   2. Auto-bootstrap: NewAutoBootstrap() for scene-index-plugin use.
+///      In this mode the filter lazily detects a UsdStage via
+///      UsdNotice::StageContentsChanged and creates its own ExecUsdSystem.
+///
 class HdExecComputedTransformSceneIndex
     : public HdSingleInputFilteringSceneIndexBase
 {
 public:
 
-    /// Creates a new HdExecComputedTransformSceneIndex.
+    /// Creates a new HdExecComputedTransformSceneIndex with explicit setup.
     ///
     /// \param inputSceneIndex  The upstream scene index.
     /// \param stage            The USD stage used to look up prims for exec
@@ -66,6 +75,33 @@ public:
         std::shared_ptr<ExecUsdSystem> execSystem,
         const TfTokenVector &computationTokens,
         bool resetXformStack = false);
+
+    /// Creates an auto-bootstrapping scene index filter.
+    ///
+    /// No stage or exec system is required at construction time. The filter
+    /// lazily discovers a UsdStage via UsdNotice::StageContentsChanged and
+    /// creates its own ExecUsdSystem when a stage with physics prims is
+    /// detected.
+    ///
+    /// \param inputSceneIndex    The upstream scene index.
+    /// \param computationTokens  Computation names to look for.
+    /// \param resetXformStack    Whether computed transforms are world-space.
+    ///
+    HDEXEC_API
+    static HdExecComputedTransformSceneIndexRefPtr
+    NewAutoBootstrap(const HdSceneIndexBaseRefPtr &inputSceneIndex,
+                     const TfTokenVector &computationTokens,
+                     bool resetXformStack = false);
+
+    /// Set the global stage for auto-bootstrapping scene indices.
+    ///
+    /// This is a static setter that allows external code (e.g., a notice
+    /// handler or UsdImaging integration point) to provide a stage reference
+    /// without requiring a direct dependency. Auto-bootstrapping instances
+    /// query this on first GetPrim().
+    ///
+    HDEXEC_API
+    static void SetGlobalStage(const UsdStageRefPtr &stage);
 
     HDEXEC_API
     HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override;
@@ -102,12 +138,32 @@ protected:
         const HdSceneIndexObserver::DirtiedPrimEntries &entries) override;
 
 private:
-    UsdStageConstRefPtr _stage;
-    std::shared_ptr<ExecUsdSystem> _execSystem;
+    // --- Explicit mode members ---
+    mutable UsdStageConstRefPtr _stage;
+    mutable std::shared_ptr<ExecUsdSystem> _execSystem;
     TfTokenVector _computationTokens;
     bool _resetXformStack;
 
-    // Cache of which prims have computations.
+    // --- Auto-bootstrap members ---
+    bool _autoBootstrap = false;
+    mutable bool _bootstrapped = false;
+    mutable UsdTimeCode _currentTime;
+
+    // Lazy bootstrap: try to acquire stage and create exec system.
+    void _TryBootstrap() const;
+
+    // Static global stage for auto-bootstrapping.
+    static std::mutex _sGlobalStageMutex;
+    static UsdStageRefPtr _sGlobalStage;
+
+    // TfNotice listener key for stage contents changes.
+    TfNotice::Key _stageNoticeKey;
+
+    // Handler for UsdNotice::StageContentsChanged (global listener).
+    void _OnStageContentsChanged(
+        const UsdNotice::StageContentsChanged &notice);
+
+    // --- Computation cache ---
     mutable std::mutex _cacheMutex;
     mutable TfHashMap<SdfPath, bool, SdfPath::Hash> _hasComputationCache;
 

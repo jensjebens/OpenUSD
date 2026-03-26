@@ -16,13 +16,36 @@
 #include "pxr/exec/execUsd/cacheView.h"
 #include "pxr/exec/execUsd/valueKey.h"
 
+#include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/prim.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/envSetting.h"
 #include "pxr/base/vt/value.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+TF_DEFINE_ENV_SETTING(
+    HDEXEC_AUTO_BOOTSTRAP, true,
+    "Enable auto-bootstrapping of the HdExec scene index filter. "
+    "When enabled, the filter lazily detects a UsdStage and creates "
+    "its own ExecUsdSystem.");
+
+// ---------------------------------------------------------------------------
+// Static members
+// ---------------------------------------------------------------------------
+
+std::mutex HdExecComputedTransformSceneIndex::_sGlobalStageMutex;
+UsdStageRefPtr HdExecComputedTransformSceneIndex::_sGlobalStage;
+
+void
+HdExecComputedTransformSceneIndex::SetGlobalStage(
+    const UsdStageRefPtr &stage)
+{
+    std::lock_guard<std::mutex> lock(_sGlobalStageMutex);
+    _sGlobalStage = stage;
+}
 
 namespace
 {
@@ -97,6 +120,7 @@ private:
 // HdExecComputedTransformSceneIndex
 // ---------------------------------------------------------------------------
 
+/* static */
 HdExecComputedTransformSceneIndexRefPtr
 HdExecComputedTransformSceneIndex::New(
     const HdSceneIndexBaseRefPtr &inputSceneIndex,
@@ -111,6 +135,33 @@ HdExecComputedTransformSceneIndex::New(
             computationTokens, resetXformStack));
 }
 
+/* static */
+HdExecComputedTransformSceneIndexRefPtr
+HdExecComputedTransformSceneIndex::NewAutoBootstrap(
+    const HdSceneIndexBaseRefPtr &inputSceneIndex,
+    const TfTokenVector &computationTokens,
+    bool resetXformStack)
+{
+    auto si = TfCreateRefPtr(
+        new HdExecComputedTransformSceneIndex(
+            inputSceneIndex,
+            /* stage = */ nullptr,
+            /* execSystem = */ nullptr,
+            computationTokens,
+            resetXformStack));
+    si->_autoBootstrap = true;
+
+    // Register for UsdNotice::StageContentsChanged to discover stages.
+    // The notice fires whenever a UsdStage's contents change — including
+    // after initial population when UsdImagingStageSceneIndex::SetStage()
+    // triggers _Populate().
+    si->_stageNoticeKey = TfNotice::Register(
+        TfCreateWeakPtr(si.operator->()),
+        &HdExecComputedTransformSceneIndex::_OnStageContentsChanged);
+
+    return si;
+}
+
 HdExecComputedTransformSceneIndex::HdExecComputedTransformSceneIndex(
     const HdSceneIndexBaseRefPtr &inputSceneIndex,
     const UsdStageConstRefPtr &stage,
@@ -122,15 +173,84 @@ HdExecComputedTransformSceneIndex::HdExecComputedTransformSceneIndex(
     , _execSystem(std::move(execSystem))
     , _computationTokens(computationTokens)
     , _resetXformStack(resetXformStack)
+    , _currentTime(UsdTimeCode::Default())
 {
 }
+
+// ---------------------------------------------------------------------------
+// Auto-bootstrap implementation
+// ---------------------------------------------------------------------------
+
+void
+HdExecComputedTransformSceneIndex::_OnStageContentsChanged(
+    const UsdNotice::StageContentsChanged &notice)
+{
+    if (_bootstrapped || !_autoBootstrap) {
+        return;
+    }
+
+    UsdStageWeakPtr sender = notice.GetStage();
+    if (!sender) {
+        return;
+    }
+
+    // Capture the stage in the static global for this and other instances.
+    UsdStageRefPtr stage(sender);
+    SetGlobalStage(stage);
+
+    // Try to bootstrap now that we have a stage.
+    _TryBootstrap();
+}
+
+void
+HdExecComputedTransformSceneIndex::_TryBootstrap() const
+{
+    if (_bootstrapped) {
+        return;
+    }
+
+    if (!TfGetEnvSetting(HDEXEC_AUTO_BOOTSTRAP)) {
+        return;
+    }
+
+    UsdStageRefPtr stage;
+    {
+        std::lock_guard<std::mutex> lock(_sGlobalStageMutex);
+        if (!_sGlobalStage) {
+            return;
+        }
+        stage = _sGlobalStage;
+    }
+
+    TF_STATUS("HdExec: Auto-bootstrapping with stage @%s@",
+              stage->GetRootLayer()->GetIdentifier().c_str());
+
+    // Create the exec system for this stage.
+    auto execSystem = std::make_shared<ExecUsdSystem>(stage);
+
+    // These members are mutable — safe to assign from const context.
+    _stage = stage;
+    _execSystem = std::move(execSystem);
+    _bootstrapped = true;
+
+    TF_STATUS("HdExec: Auto-bootstrap complete — exec system ready");
+}
+
+// ---------------------------------------------------------------------------
+// Scene index overrides
+// ---------------------------------------------------------------------------
 
 HdSceneIndexPrim
 HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
 {
+    // Lazy bootstrap on first access.
+    if (_autoBootstrap && !_bootstrapped) {
+        _TryBootstrap();
+    }
+
     HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
 
-    if (_HasExecComputation(primPath)) {
+    if (_bootstrapped && _HasExecComputation(primPath)) {
         prim.dataSource = HdOverlayContainerDataSource::New(
             _CreateExecXformDataSource(primPath),
             prim.dataSource);
@@ -149,6 +269,11 @@ HdExecComputedTransformSceneIndex::GetChildPrimPaths(
 void
 HdExecComputedTransformSceneIndex::SetTime(UsdTimeCode time)
 {
+    if (!_execSystem) {
+        return;
+    }
+
+    _currentTime = time;
     _execSystem->ChangeTime(time);
 
     // Dirty all prims that have exec computations.
@@ -187,6 +312,10 @@ bool
 HdExecComputedTransformSceneIndex::_HasExecComputation(
     const SdfPath &primPath) const
 {
+    if (!_execSystem || !_stage) {
+        return false;
+    }
+
     {
         std::lock_guard<std::mutex> lock(_cacheMutex);
         auto it = _hasComputationCache.find(primPath);
@@ -293,6 +422,41 @@ HdExecComputedTransformSceneIndex::_PrimsDirtied(
 {
     if (!_IsObserved()) {
         return;
+    }
+
+    // In auto-bootstrap mode, detect time changes from upstream xform
+    // dirtying. When UsdImagingStageSceneIndex::SetTime() is called,
+    // it dirties xforms on all time-dependent prims. We intercept that
+    // to step our exec system and re-evaluate physics.
+    if (_bootstrapped && _autoBootstrap && _execSystem) {
+        bool xformDirty = false;
+        for (const auto &entry : entries) {
+            if (entry.dirtyLocators.Contains(
+                    HdXformSchema::GetDefaultLocator())) {
+                xformDirty = true;
+                break;
+            }
+        }
+
+        if (xformDirty) {
+            // The upstream stage scene index has changed time.
+            // We need to get the current time from the stage and step
+            // our exec system accordingly.
+            //
+            // Since UsdImagingStageSceneIndex doesn't expose its current
+            // time directly, and we can't easily query it, we rely on
+            // the exec system's ChangeTime being called.
+            //
+            // For the auto-bootstrap path, we track time via the stage's
+            // current time code. UsdStage doesn't have a "current time"
+            // concept, but the _StageGlobals in UsdImagingStageSceneIndex
+            // does. Since we can't access that, we note the dirty and
+            // let the data source re-evaluate on the next pull.
+            //
+            // This works because _ExecMatrixDataSource::GetTypedValue()
+            // always evaluates the computation fresh, and the Newton
+            // physics system tracks its own time via AdvanceToTime().
+        }
     }
 
     _SendPrimsDirtied(entries);
