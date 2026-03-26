@@ -6,6 +6,7 @@
 //
 
 #include "pxr/imaging/hdExec/sceneIndexPlugin.h"
+#include "pxr/imaging/hdExec/execComputedTransformSceneIndex.h"
 
 #include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
 
@@ -18,6 +19,8 @@ PXR_NAMESPACE_OPEN_SCOPE
 TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
     ((sceneIndexPluginName, "HdExec_ComputedTransformSceneIndexPlugin"))
+    ((computeSimulatedTransform, "computeSimulatedTransform"))
+    ((computeLocalToWorldTransform, "computeLocalToWorldTransform"))
 );
 
 TF_REGISTRY_FUNCTION(TfType)
@@ -47,13 +50,16 @@ HdExec_ComputedTransformSceneIndexPlugin::_AppendSceneIndex(
     const HdSceneIndexBaseRefPtr &inputScene,
     const HdContainerDataSourceHandle &inputArgs)
 {
-    // The plugin creates the scene index but needs a stage + exec system.
-    // For now, return inputScene unchanged — the filter is instantiated
-    // explicitly by applications that set up the exec system.
-    //
-    // TODO: Extract stage from inputArgs when the UsdImaging pipeline
-    // supports passing it through.
-    return inputScene;
+    // Create an auto-bootstrapping filter. The filter lazily discovers
+    // a UsdStage (via UsdNotice::StageContentsChanged or the static
+    // SetGlobalStage) and creates its own ExecUsdSystem. This makes
+    // usdrecord (and any USD app) automatically get exec-computed
+    // transforms (e.g., physics simulation) without any application code.
+    return HdExecComputedTransformSceneIndex::NewAutoBootstrap(
+        inputScene,
+        {_tokens->computeSimulatedTransform,
+         _tokens->computeLocalToWorldTransform},
+        /* resetXformStack = */ true);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
