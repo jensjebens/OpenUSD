@@ -22,6 +22,9 @@ set(NEWTON_PHYSICS_LIBS
 
 if(NewtonDynamics_FOUND)
     list(APPEND NEWTON_PHYSICS_LIBS ${NEWTON_DYNAMICS_LIBRARIES})
+    include_directories(${NEWTON_DYNAMICS_INCLUDE_DIRS})
+    message(STATUS "Newton Dynamics found: ${NEWTON_DYNAMICS_LIBRARIES}")
+    message(STATUS "Newton includes: ${NEWTON_DYNAMICS_INCLUDE_DIRS}")
 endif()
 
 # Note: newtonPhysicsPlugin is a library, not a standalone test.
