@@ -11,6 +11,13 @@ PXR_NAMESPACE_OPEN_SCOPE
 namespace {
 
 // Default values matching USD conventions
+// The USD convention for metersPerUnit defaults to 0.01 (centimeters)
+// when no explicit value is authored on the stage or any ancestor prim.
+// This matches UsdGeomLinearUnits and ensures backward compatibility.
+// Note: when used in combination with an OpenExec computation that
+// assumes stageMpu=1.0 (meters), prims without GeomMetricsAPI in a
+// cm-default stage will NOT be corrected — this is intentional, as
+// those prims are already in the stage's native units.
 constexpr double _DEFAULT_METERS_PER_UNIT = 0.01;  // centimeters
 constexpr double _DEFAULT_KILOGRAMS_PER_UNIT = 1.0;
 const TfToken _DEFAULT_UP_AXIS("Y");
