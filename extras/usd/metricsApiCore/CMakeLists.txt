@@ -26,15 +26,8 @@ pxr_plugin(${PXR_PACKAGE}
     CPPFILES
         dimensionalRegistry.cpp
         metricsUtils.cpp
-        geomMetricsAPI.cpp
-        physicsMetricsAPI.cpp
-        tokens.cpp
-        module.cpp
 
-    PYTHON_CPPFILES
-        wrapGeomMetricsAPI.cpp
-        wrapPhysicsMetricsAPI.cpp
-        wrapTokens.cpp
+    PYMODULE_CPPFILES
         wrapDimensionalRegistry.cpp
         wrapMetricsUtils.cpp
 

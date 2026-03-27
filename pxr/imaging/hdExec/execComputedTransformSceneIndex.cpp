@@ -23,6 +23,7 @@
 #include "pxr/base/plug/registry.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/js/types.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/errorMark.h"
@@ -457,10 +458,55 @@ HdExecComputedTransformSceneIndex::_HasExecComputation(
     }
 
     // Check if any of the requested computations are actually registered
-    // for this prim's applied API schemas. We do a trial BuildRequest +
-    // PrepareRequest — if PrepareRequest succeeds without errors, the
-    // computation is genuinely available. BuildRequest().IsValid() alone
-    // is insufficient as it can return true for prims without the schema.
+    // for this prim's applied API schemas. We use a two-phase test:
+    //
+    // Phase 1: Quick schema check — only prims with at least one
+    // applied API schema that advertises allowsPluginComputations
+    // can possibly have exec computations.
+    //
+    // Phase 2: Trial BuildRequest + PrepareRequest to confirm the
+    // computation is genuinely compilable.
+    {
+        bool hasExecSchema = false;
+        const auto &appliedSchemas = prim.GetAppliedSchemas();
+        if (!appliedSchemas.empty()) {
+            PlugRegistry &reg = PlugRegistry::GetInstance();
+            for (const auto &plugin : reg.GetAllPlugins()) {
+                const JsObject &metadata = plugin->GetMetadata();
+                auto execIt = metadata.find("Exec");
+                if (execIt == metadata.end()) {
+                    continue;
+                }
+                if (!execIt->second.IsObject()) {
+                    continue;
+                }
+                const JsObject &execObj = execIt->second.GetJsObject();
+                auto schemasIt = execObj.find("Schemas");
+                if (schemasIt == execObj.end() ||
+                    !schemasIt->second.IsObject()) {
+                    continue;
+                }
+                const JsObject &schemas = schemasIt->second.GetJsObject();
+                for (const auto &schemaName : appliedSchemas) {
+                    if (schemas.count(schemaName.GetString())) {
+                        hasExecSchema = true;
+                        break;
+                    }
+                }
+                if (hasExecSchema) {
+                    break;
+                }
+            }
+        }
+
+        if (!hasExecSchema) {
+            std::lock_guard<std::mutex> lock(_cacheMutex);
+            _hasComputationCache[primPath] = false;
+            return false;
+        }
+    }
+
+    // Phase 2: Trial BuildRequest + PrepareRequest.
     for (const auto &token : _computationTokens) {
         std::vector<ExecUsdValueKey> keys;
         keys.emplace_back(prim, token);
