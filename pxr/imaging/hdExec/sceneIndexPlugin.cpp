@@ -37,7 +37,6 @@ public:
         const UsdNotice::StageContentsChanged &notice)
     {
         UsdStageWeakPtr sender = notice.GetStage();
-                (void*)sender.operator->());
         if (sender) {
             HdExecComputedTransformSceneIndex::SetGlobalStage(
                 UsdStageRefPtr(sender));
@@ -61,6 +60,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
     ((sceneIndexPluginName, "HdExec_ComputedTransformSceneIndexPlugin"))
     ((computeSimulatedTransform, "computeSimulatedTransform"))
+    ((computeUnitAwareLocalToWorldTransform, "computeUnitAwareLocalToWorldTransform"))
     ((computeLocalToWorldTransform, "computeLocalToWorldTransform"))
 );
 
@@ -107,7 +107,7 @@ HdExec_ComputedTransformSceneIndexPlugin::_AppendSceneIndex(
     return HdExecComputedTransformSceneIndex::NewAutoBootstrap(
         inputScene,
         {_tokens->computeSimulatedTransform,
-         _tokens->computeLocalToWorldTransform},
+         _tokens->computeUnitAwareLocalToWorldTransform},
         /* resetXformStack = */ true);
 }
 

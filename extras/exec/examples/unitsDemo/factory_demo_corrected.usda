@@ -3,9 +3,11 @@
     defaultPrim = "World"
     metersPerUnit = 1.0
     upAxis = "Y"
-    doc = """Factory floor demo scene — AFTER units resolution.
-    cm and mm assets have GeomMetricsAPI applied, enabling automatic
-    correction via OpenExec + HdExec."""
+    doc = """AFTER: Same scene WITH units resolved.
+    Transforms have been corrected to stage units (meters):
+    - Red box: (200, 25, 0) cm → (2, 0.25, 0) m, size 50cm → 0.5m
+    - Green box: (-2000, 250, 0) mm → (-2, 0.25, 0) m, size 500mm → 0.5m
+    All three cubes are now 0.5m, side by side on the factory floor."""
 )
 
 def Xform "World"
@@ -24,7 +26,6 @@ def Xform "World"
         token[] xformOpOrder = ["xformOp:rotateXYZ"]
     }
 
-    # Ground plane
     def Cube "Floor" {
         double size = 1
         double3 xformOp:scale = (20, 0.02, 20)
@@ -33,9 +34,7 @@ def Xform "World"
         color3f[] primvars:displayColor = [(0.35, 0.35, 0.38)]
     }
 
-    # ============================================================
-    # Blue reference cube: 1m, at origin. Meter-scale, no MetricsAPI.
-    # ============================================================
+    # Blue cube: 1m reference (meter-scale, unchanged)
     def Cube "MeterCube" {
         double size = 1
         double3 xformOp:translate = (0, 0.5, 0)
@@ -43,19 +42,13 @@ def Xform "World"
         color3f[] primvars:displayColor = [(0.15, 0.3, 0.85)]
     }
 
-    # ============================================================
-    # Red box: CENTIMETER-SCALE with GeomMetricsAPI
-    # Authored as 50cm cube at position (200, 25, 0) in cm
-    # With correction: 0.5m cube at (2, 0.25, 0) in m
-    # ============================================================
-    def Xform "CmBox" (
-        prepend apiSchemas = ["GeomMetricsAPI"]
-    )
-    {
-        double metrics:metersPerUnit = 0.01
+    # Red box: CORRECTED from cm to m
+    # Original: size=50cm, translate=(200, 25, 0) cm
+    # Corrected: size=0.5m, translate=(2, 0.25, 0) m
+    def Xform "CmBox" {
         uniform token[] xformOpOrder = ["xformOp:transform"]
         matrix4d xformOp:transform = (
-            (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (200, 25, 0, 1)
+            (0.01, 0, 0, 0), (0, 0.01, 0, 0), (0, 0, 0.01, 0), (2, 0.25, 0, 1)
         )
 
         def Cube "Geo" {
@@ -64,19 +57,13 @@ def Xform "World"
         }
     }
 
-    # ============================================================
-    # Green box: MILLIMETER-SCALE with GeomMetricsAPI
-    # Authored as 500mm cube at position (-2000, 250, 0) in mm
-    # With correction: 0.5m cube at (-2, 0.25, 0) in m
-    # ============================================================
-    def Xform "MmBox" (
-        prepend apiSchemas = ["GeomMetricsAPI"]
-    )
-    {
-        double metrics:metersPerUnit = 0.001
+    # Green box: CORRECTED from mm to m
+    # Original: size=500mm, translate=(-2000, 250, 0) mm
+    # Corrected: size=0.5m, translate=(-2, 0.25, 0) m
+    def Xform "MmBox" {
         uniform token[] xformOpOrder = ["xformOp:transform"]
         matrix4d xformOp:transform = (
-            (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2000, 250, 0, 1)
+            (0.001, 0, 0, 0), (0, 0.001, 0, 0), (0, 0, 0.001, 0), (-2, 0.25, 0, 1)
         )
 
         def Cube "Geo" {
@@ -85,9 +72,7 @@ def Xform "World"
         }
     }
 
-    # ============================================================
-    # Camera
-    # ============================================================
+    # Same camera
     def Camera "Camera" {
         float focalLength = 35
         float horizontalAperture = 36
