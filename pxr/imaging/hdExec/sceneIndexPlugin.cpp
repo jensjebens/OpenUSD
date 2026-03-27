@@ -37,12 +37,10 @@ public:
         const UsdNotice::StageContentsChanged &notice)
     {
         UsdStageWeakPtr sender = notice.GetStage();
-        fprintf(stderr, "[HdExec] Global listener: StageContentsChanged (stage=%p)\n",
                 (void*)sender.operator->());
         if (sender) {
             HdExecComputedTransformSceneIndex::SetGlobalStage(
                 UsdStageRefPtr(sender));
-            fprintf(stderr, "[HdExec] Global stage set!\n");
         }
     }
 };
@@ -106,7 +104,6 @@ HdExec_ComputedTransformSceneIndexPlugin::_AppendSceneIndex(
     // SetGlobalStage) and creates its own ExecUsdSystem. This makes
     // usdrecord (and any USD app) automatically get exec-computed
     // transforms (e.g., physics simulation) without any application code.
-    fprintf(stderr, "[HdExec] _AppendSceneIndex called!\n");
     return HdExecComputedTransformSceneIndex::NewAutoBootstrap(
         inputScene,
         {_tokens->computeSimulatedTransform,
