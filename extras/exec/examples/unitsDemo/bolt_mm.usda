@@ -1,0 +1,73 @@
+#usda 1.0
+(
+    defaultPrim = "Bolt"
+    metersPerUnit = 0.001
+    upAxis = "Y"
+    doc = "M10 hex bolt modeled in millimeters"
+)
+
+def Xform "Bolt" (
+    prepend apiSchemas = ["GeomMetricsAPI"]
+)
+{
+    custom double metrics:metersPerUnit = 0.001
+    
+    # Hex head (across-flats ~16mm, height 6.4mm)
+    def Cylinder "Head"
+    {
+        double height = 6.4
+        double radius = 9.24
+        float3[] extent = [(-9.24, -3.2, -9.24), (9.24, 3.2, 9.24)]
+        color3f[] primvars:displayColor = [(0.2, 0.7, 0.2)]
+        double3 xformOp:translate = (0, 3.2, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+    
+    # Shank (M10 = 10mm diameter, 30mm long)
+    def Cylinder "Shank"
+    {
+        double height = 30
+        double radius = 5
+        float3[] extent = [(-5, -15, -5), (5, 15, 5)]
+        color3f[] primvars:displayColor = [(0.15, 0.6, 0.15)]
+        double3 xformOp:translate = (0, -15, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+    
+    # Thread indicator rings
+    def Cylinder "Thread1"
+    {
+        double height = 1.5
+        double radius = 5.5
+        color3f[] primvars:displayColor = [(0.1, 0.5, 0.1)]
+        double3 xformOp:translate = (0, -5, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+    
+    def Cylinder "Thread2"
+    {
+        double height = 1.5
+        double radius = 5.5
+        color3f[] primvars:displayColor = [(0.1, 0.5, 0.1)]
+        double3 xformOp:translate = (0, -10, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+    
+    def Cylinder "Thread3"
+    {
+        double height = 1.5
+        double radius = 5.5
+        color3f[] primvars:displayColor = [(0.1, 0.5, 0.1)]
+        double3 xformOp:translate = (0, -20, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+    
+    def Cylinder "Thread4"
+    {
+        double height = 1.5
+        double radius = 5.5
+        color3f[] primvars:displayColor = [(0.1, 0.5, 0.1)]
+        double3 xformOp:translate = (0, -25, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

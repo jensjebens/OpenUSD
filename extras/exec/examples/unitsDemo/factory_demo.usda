@@ -1,0 +1,192 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1.0
+    upAxis = "Y"
+    doc = """Factory floor demo scene (meters).
+    Tests unit conversion via GeomMetricsAPI + OpenExec hdExec scene filter.
+    - Blue cube: 1m reference object at origin (meters)
+    - Red robot arm: authored in cm, referenced at (100, 0, 50) cm → should appear at (1, 0, 0.5) m
+    - Green bolt: authored in mm, referenced at (10000, 5500, 0) mm → should appear at (10, 5.5, 0) m
+    """
+)
+
+def Xform "World"
+{
+    # ========================================
+    # Lighting
+    # ========================================
+    def DomeLight "DomeLight"
+    {
+        float inputs:intensity = 1.0
+        float inputs:exposure = 1.0
+        color3f inputs:color = (0.9, 0.92, 1.0)
+    }
+
+    def DistantLight "SunLight"
+    {
+        float inputs:intensity = 2.5
+        float inputs:angle = 1.0
+        color3f inputs:color = (1.0, 0.98, 0.9)
+        double3 xformOp:rotateXYZ = (-45, 30, 0)
+        token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    # ========================================
+    # Factory Floor (ground plane)
+    # ========================================
+    def Xform "Floor"
+    {
+        def Cube "GroundPlane"
+        {
+            double size = 1
+            double3 xformOp:scale = (30, 0.05, 20)
+            double3 xformOp:translate = (5, -0.025, 0)
+            token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            color3f[] primvars:displayColor = [(0.35, 0.35, 0.38)]
+        }
+
+        # Grid lines on the floor (every 2 meters, along X)
+        def Cube "GridX1" { double size = 1; double3 xformOp:scale = (0.01, 0.052, 20); double3 xformOp:translate = (0, -0.024, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridX2" { double size = 1; double3 xformOp:scale = (0.01, 0.052, 20); double3 xformOp:translate = (2, -0.024, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridX3" { double size = 1; double3 xformOp:scale = (0.01, 0.052, 20); double3 xformOp:translate = (4, -0.024, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridX4" { double size = 1; double3 xformOp:scale = (0.01, 0.052, 20); double3 xformOp:translate = (6, -0.024, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridX5" { double size = 1; double3 xformOp:scale = (0.01, 0.052, 20); double3 xformOp:translate = (8, -0.024, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridX6" { double size = 1; double3 xformOp:scale = (0.01, 0.052, 20); double3 xformOp:translate = (10, -0.024, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+
+        # Grid lines along Z
+        def Cube "GridZ1" { double size = 1; double3 xformOp:scale = (30, 0.052, 0.01); double3 xformOp:translate = (5, -0.024, -4); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridZ2" { double size = 1; double3 xformOp:scale = (30, 0.052, 0.01); double3 xformOp:translate = (5, -0.024, -2); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridZ3" { double size = 1; double3 xformOp:scale = (30, 0.052, 0.01); double3 xformOp:translate = (5, -0.024, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridZ4" { double size = 1; double3 xformOp:scale = (30, 0.052, 0.01); double3 xformOp:translate = (5, -0.024, 2); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+        def Cube "GridZ5" { double size = 1; double3 xformOp:scale = (30, 0.052, 0.01); double3 xformOp:translate = (5, -0.024, 4); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+    }
+
+    # ========================================
+    # Reference Object: Blue Cube (1m, at origin)
+    # ========================================
+    def Cube "ReferenceCube"
+    {
+        double size = 1
+        double3 xformOp:translate = (0, 0.5, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+        color3f[] primvars:displayColor = [(0.15, 0.3, 0.85)]
+    }
+
+    # Label for the reference cube (small white cube as marker)
+    def Cube "ReferenceCubeLabel"
+    {
+        double size = 0.1
+        double3 xformOp:translate = (0, 1.2, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+        color3f[] primvars:displayColor = [(1.0, 1.0, 1.0)]
+    }
+
+    # ========================================
+    # Robot Arm (centimeter-scale asset)
+    # Position: (100, 0, 50) in cm → (1, 0, 0.5) in meters
+    # ========================================
+    def Xform "RobotArmAssembly" (
+        prepend references = @./robot_arm_cm.usda@
+    )
+    {
+        double3 xformOp:translate = (100, 0, 50)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # ========================================
+    # Bolt (millimeter-scale asset)
+    # Position: (10000, 5500, 0) in mm → (10, 5.5, 0) in meters
+    # ========================================
+    def Xform "BoltAssembly" (
+        prepend references = @./bolt_mm.usda@
+    )
+    {
+        double3 xformOp:translate = (10000, 5500, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # ========================================
+    # Additional scene elements
+    # ========================================
+    
+    # Workbench (meter-scale, near the bolt)
+    def Xform "Workbench"
+    {
+        def Cube "Top"
+        {
+            double size = 1
+            double3 xformOp:scale = (3, 0.08, 1.5)
+            double3 xformOp:translate = (10, 0.9, 0)
+            token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            color3f[] primvars:displayColor = [(0.55, 0.35, 0.2)]
+        }
+        def Cube "Leg1"
+        {
+            double size = 1
+            double3 xformOp:scale = (0.08, 0.9, 0.08)
+            double3 xformOp:translate = (8.6, 0.45, -0.65)
+            token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            color3f[] primvars:displayColor = [(0.45, 0.45, 0.45)]
+        }
+        def Cube "Leg2"
+        {
+            double size = 1
+            double3 xformOp:scale = (0.08, 0.9, 0.08)
+            double3 xformOp:translate = (11.4, 0.45, -0.65)
+            token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            color3f[] primvars:displayColor = [(0.45, 0.45, 0.45)]
+        }
+        def Cube "Leg3"
+        {
+            double size = 1
+            double3 xformOp:scale = (0.08, 0.9, 0.08)
+            double3 xformOp:translate = (8.6, 0.45, 0.65)
+            token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            color3f[] primvars:displayColor = [(0.45, 0.45, 0.45)]
+        }
+        def Cube "Leg4"
+        {
+            double size = 1
+            double3 xformOp:scale = (0.08, 0.9, 0.08)
+            double3 xformOp:translate = (11.4, 0.45, 0.65)
+            token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            color3f[] primvars:displayColor = [(0.45, 0.45, 0.45)]
+        }
+    }
+
+    # Safety pillar (bright yellow, 2m tall)
+    def Cylinder "SafetyPillar1"
+    {
+        double height = 2
+        double radius = 0.1
+        double3 xformOp:translate = (4, 1, 3)
+        token[] xformOpOrder = ["xformOp:translate"]
+        color3f[] primvars:displayColor = [(0.95, 0.85, 0.1)]
+    }
+
+    def Cylinder "SafetyPillar2"
+    {
+        double height = 2
+        double radius = 0.1
+        double3 xformOp:translate = (4, 1, -3)
+        token[] xformOpOrder = ["xformOp:translate"]
+        color3f[] primvars:displayColor = [(0.95, 0.85, 0.1)]
+    }
+
+    # ========================================
+    # Camera
+    # ========================================
+    def Camera "Camera"
+    {
+        float focalLength = 24
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float2 clippingRange = (0.1, 1000)
+        
+        # Position camera to see the whole scene
+        double3 xformOp:translate = (5, 6, 15)
+        double3 xformOp:rotateXYZ = (-20, 10, 0)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}
