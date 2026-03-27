@@ -1,0 +1,21 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Exec": {
+                    "Schemas": {
+                        "UsdMetricsGeomMetricsAPI": {
+                            "allowsPluginComputations": true
+                        }
+                    }
+                },
+                "Types": {}
+            },
+            "LibraryPath": "libexecMetricsUnits.so",
+            "Name": "execMetricsUnits",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}
