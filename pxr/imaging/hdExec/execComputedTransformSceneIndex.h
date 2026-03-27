@@ -117,28 +117,37 @@ public:
     HDEXEC_API
     static void AdvanceGlobalTime(UsdTimeCode time);
 
-    /// \name Transform Provider Callback
+    /// \name Transform Providers
     /// @{
     ///
-    /// Optional callback that physics plugins can register to provide
-    /// simulated transforms directly, bypassing exec's computation cache.
+    /// Plugins can register named callbacks to provide simulated
+    /// transforms directly, bypassing exec's computation cache.
     /// This is needed because exec caches computations whose inputs
-    /// (e.g. computePath) don't change — but physics transforms change
-    /// every frame as a side effect of stepping the simulation.
+    /// (e.g. computePath) don't change — but transforms from physics
+    /// or other side-effect-driven systems change every frame.
     ///
-    /// The callback receives a prim path and the current time in seconds,
-    /// and returns a GfMatrix4d. Return identity if the path is unknown.
+    /// Each provider receives a prim path and time in seconds, and
+    /// returns a GfMatrix4d. Return identity if the path is unknown.
+    /// Providers are consulted in registration order; the first to
+    /// return a non-identity matrix wins.
     ///
     using TransformProviderFn =
         std::function<GfMatrix4d(const SdfPath &primPath, double timeSeconds)>;
 
-    /// Register a transform provider. Only one may be active at a time.
+    /// Register a named transform provider.
     HDEXEC_API
-    static void SetTransformProvider(TransformProviderFn fn);
+    static void RegisterTransformProvider(
+        const TfToken &name, TransformProviderFn fn);
 
-    /// Query the registered transform provider.
+    /// Remove a named transform provider.
     HDEXEC_API
-    static const TransformProviderFn &GetTransformProvider();
+    static void UnregisterTransformProvider(const TfToken &name);
+
+    /// Query a transform from all registered providers.
+    /// Returns the first non-identity result, or identity if none match.
+    HDEXEC_API
+    static GfMatrix4d QueryTransformProviders(
+        const SdfPath &primPath, double timeSeconds);
     /// @}
 
     HDEXEC_API

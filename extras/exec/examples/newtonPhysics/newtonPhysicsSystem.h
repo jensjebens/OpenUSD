@@ -24,10 +24,13 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 /// \class NewtonPhysicsSystem
 ///
-/// Singleton that ties together the NewtonWorldManager and UsdToNewtonMapper.
-/// Handles lazy initialization, frame stepping, and simulated transform
-/// queries. The system initializes once per stage (or after Reset) and
-/// tracks simulation time to avoid redundant stepping.
+/// Singleton orchestrator for Newton physics simulation.
+///
+/// Coordinates NewtonWorldManager (world lifecycle) and UsdToNewtonMapper
+/// (USD→Newton body mapping). Both are singletons — initialization order
+/// is: WorldManager first (via EnsureInitialized), then Mapper. The system
+/// enforces this ordering and tracks simulation time to avoid redundant
+/// stepping.
 ///
 class NewtonPhysicsSystem
 {
