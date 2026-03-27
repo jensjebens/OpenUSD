@@ -3,9 +3,11 @@
     defaultPrim = "World"
     metersPerUnit = 1.0
     upAxis = "Y"
-    doc = """Factory floor demo scene — AFTER units resolution.
-    cm and mm assets have GeomMetricsAPI applied, enabling automatic
-    correction via OpenExec + HdExec."""
+    doc = """BEFORE: Same scene WITHOUT GeomMetricsAPI.
+    The cm and mm values are interpreted as meters:
+    - Red box at (200, 25, 0) — 200 METERS away, 50m cube
+    - Green box at (-2000, 250, 0) — 2 KILOMETERS away, 500m cube
+    Only the blue 1m reference cube is visible at this camera distance."""
 )
 
 def Xform "World"
@@ -24,7 +26,6 @@ def Xform "World"
         token[] xformOpOrder = ["xformOp:rotateXYZ"]
     }
 
-    # Ground plane
     def Cube "Floor" {
         double size = 1
         double3 xformOp:scale = (20, 0.02, 20)
@@ -33,9 +34,7 @@ def Xform "World"
         color3f[] primvars:displayColor = [(0.35, 0.35, 0.38)]
     }
 
-    # ============================================================
-    # Blue reference cube: 1m, at origin. Meter-scale, no MetricsAPI.
-    # ============================================================
+    # Blue reference cube — same in both scenes
     def Cube "MeterCube" {
         double size = 1
         double3 xformOp:translate = (0, 0.5, 0)
@@ -43,16 +42,10 @@ def Xform "World"
         color3f[] primvars:displayColor = [(0.15, 0.3, 0.85)]
     }
 
-    # ============================================================
-    # Red box: CENTIMETER-SCALE with GeomMetricsAPI
-    # Authored as 50cm cube at position (200, 25, 0) in cm
-    # With correction: 0.5m cube at (2, 0.25, 0) in m
-    # ============================================================
-    def Xform "CmBox" (
-        prepend apiSchemas = ["GeomMetricsAPI"]
-    )
+    # Red box — NO GeomMetricsAPI. Raw cm values treated as meters.
+    # 50-unit cube at (200, 25, 0) → 50m cube at 200m away!
+    def Xform "CmBox"
     {
-        double metrics:metersPerUnit = 0.01
         uniform token[] xformOpOrder = ["xformOp:transform"]
         matrix4d xformOp:transform = (
             (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (200, 25, 0, 1)
@@ -64,16 +57,10 @@ def Xform "World"
         }
     }
 
-    # ============================================================
-    # Green box: MILLIMETER-SCALE with GeomMetricsAPI
-    # Authored as 500mm cube at position (-2000, 250, 0) in mm
-    # With correction: 0.5m cube at (-2, 0.25, 0) in m
-    # ============================================================
-    def Xform "MmBox" (
-        prepend apiSchemas = ["GeomMetricsAPI"]
-    )
+    # Green box — NO GeomMetricsAPI. Raw mm values treated as meters.
+    # 500-unit cube at (-2000, 250, 0) → 500m cube at 2km away!
+    def Xform "MmBox"
     {
-        double metrics:metersPerUnit = 0.001
         uniform token[] xformOpOrder = ["xformOp:transform"]
         matrix4d xformOp:transform = (
             (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2000, 250, 0, 1)
@@ -85,9 +72,7 @@ def Xform "World"
         }
     }
 
-    # ============================================================
-    # Camera
-    # ============================================================
+    # Same camera as the "after" scene
     def Camera "Camera" {
         float focalLength = 35
         float horizontalAperture = 36
