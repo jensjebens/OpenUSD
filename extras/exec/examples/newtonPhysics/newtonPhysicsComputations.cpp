@@ -44,7 +44,8 @@ TF_DEFINE_PRIVATE_TOKENS(
 namespace {
 struct _TransformProviderRegistrar {
     _TransformProviderRegistrar() {
-        HdExecComputedTransformSceneIndex::SetTransformProvider(
+        HdExecComputedTransformSceneIndex::RegisterTransformProvider(
+            TfToken("newtonPhysics"),
             [](const SdfPath &primPath, double timeSeconds) -> GfMatrix4d {
                 NewtonPhysicsSystem &sys =
                     NewtonPhysicsSystem::GetInstance();
