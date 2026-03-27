@@ -8,13 +8,13 @@ When assets authored in different unit systems (centimeters, millimeters) are re
 
 ### Before: No units resolution
 
-![Before — uncorrected](factory_demo_before_render.png)
+![Before — uncorrected](before_units_resolution.png)
 
 *Only the blue 1m reference cube is visible. The red cm-scale box is 200m away, the green mm-scale box is 2km away — both invisible at this camera distance.*
 
 ### After: With units resolution
 
-![After — corrected](factory_demo_render.png)
+![After — corrected](after_units_resolution.png)
 
 *All three cubes are visible: blue (1m, meters), red (50cm → 0.5m, corrected from centimeters), green (500mm → 0.5m, corrected from millimeters). Correct positions, correct sizes.*
 
