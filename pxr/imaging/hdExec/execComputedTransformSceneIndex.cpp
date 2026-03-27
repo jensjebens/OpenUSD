@@ -18,12 +18,14 @@
 
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/schemaRegistry.h"
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
 
+#include "pxr/base/js/json.h"
+
 #include "pxr/base/gf/matrix4d.h"
-#include "pxr/base/js/types.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/errorMark.h"
@@ -49,22 +51,50 @@ static std::mutex _sInstancesMutex;
 static std::vector<HdExecComputedTransformSceneIndex*> _sInstances;
 static std::atomic<double> _sGlobalTimeFrame{0.0};
 
-// Static transform provider callback
+// Static transform provider registry (keyed by name)
 static std::mutex _sTransformProviderMutex;
-static HdExecComputedTransformSceneIndex::TransformProviderFn _sTransformProvider;
+static std::vector<std::pair<TfToken,
+    HdExecComputedTransformSceneIndex::TransformProviderFn>> _sTransformProviders;
 
 void
-HdExecComputedTransformSceneIndex::SetTransformProvider(TransformProviderFn fn)
+HdExecComputedTransformSceneIndex::RegisterTransformProvider(
+    const TfToken &name, TransformProviderFn fn)
 {
     std::lock_guard<std::mutex> lock(_sTransformProviderMutex);
-    _sTransformProvider = std::move(fn);
+    // Replace if name already exists.
+    for (auto &entry : _sTransformProviders) {
+        if (entry.first == name) {
+            entry.second = std::move(fn);
+            return;
+        }
+    }
+    _sTransformProviders.emplace_back(name, std::move(fn));
 }
 
-const HdExecComputedTransformSceneIndex::TransformProviderFn &
-HdExecComputedTransformSceneIndex::GetTransformProvider()
+void
+HdExecComputedTransformSceneIndex::UnregisterTransformProvider(
+    const TfToken &name)
 {
     std::lock_guard<std::mutex> lock(_sTransformProviderMutex);
-    return _sTransformProvider;
+    _sTransformProviders.erase(
+        std::remove_if(_sTransformProviders.begin(), _sTransformProviders.end(),
+            [&](const auto &entry) { return entry.first == name; }),
+        _sTransformProviders.end());
+}
+
+GfMatrix4d
+HdExecComputedTransformSceneIndex::QueryTransformProviders(
+    const SdfPath &primPath, double timeSeconds)
+{
+    static const GfMatrix4d identity(1.0);
+    std::lock_guard<std::mutex> lock(_sTransformProviderMutex);
+    for (const auto &entry : _sTransformProviders) {
+        GfMatrix4d result = entry.second(primPath, timeSeconds);
+        if (result != identity) {
+            return result;
+        }
+    }
+    return identity;
 }
 
 void
@@ -147,10 +177,10 @@ public:
 
     GfMatrix4d GetTypedValue(const Time shutterOffset) override
     {
-        // Prefer the direct transform provider (physics plugin callback).
-        const auto &provider =
-            HdExecComputedTransformSceneIndex::GetTransformProvider();
-        if (provider) {
+        // Query registered transform providers (e.g. physics engines).
+        // Providers bypass exec's computation cache for side-effect-driven
+        // transforms that change every frame.
+        {
             double frame =
                 HdExecComputedTransformSceneIndex::GetGlobalTimeFrame();
             double fps = 60.0;
@@ -160,8 +190,13 @@ public:
             }
             double timeSeconds = frame / fps;
 
-            GfMatrix4d mat = provider(_primPath, timeSeconds);
-            return mat;
+            static const GfMatrix4d identity(1.0);
+            GfMatrix4d mat =
+                HdExecComputedTransformSceneIndex::QueryTransformProviders(
+                    _primPath, timeSeconds);
+            if (mat != identity) {
+                return mat;
+            }
         }
 
         // Fallback: exec system evaluation (may be cached).
@@ -457,27 +492,27 @@ HdExecComputedTransformSceneIndex::_HasExecComputation(
         return false;
     }
 
-    // Check if any of the requested computations are actually registered
-    // for this prim's applied API schemas. We use a two-phase test:
+    // Check if the prim has an applied API schema that is registered
+    // for exec computations. We inspect plugin metadata for
+    // "allowsPluginComputations" entries to determine which schemas
+    // provide computations, then check if the prim has any of them.
     //
-    // Phase 1: Quick schema check — only prims with at least one
-    // applied API schema that advertises allowsPluginComputations
-    // can possibly have exec computations.
-    //
-    // Phase 2: Trial BuildRequest + PrepareRequest to confirm the
-    // computation is genuinely compilable.
+    // This is more reliable than BuildRequest/PrepareRequest probing,
+    // which can succeed for prims that don't actually have the schema,
+    // leading to exec compilation failures at render time.
     {
-        bool hasExecSchema = false;
-        const auto &appliedSchemas = prim.GetAppliedSchemas();
-        if (!appliedSchemas.empty()) {
-            PlugRegistry &reg = PlugRegistry::GetInstance();
-            for (const auto &plugin : reg.GetAllPlugins()) {
-                const JsObject &metadata = plugin->GetMetadata();
+        static std::mutex sSchemasMutex;
+        static std::vector<TfToken> sComputationSchemas;
+        static bool sLoaded = false;
+
+        std::lock_guard<std::mutex> schemasLock(sSchemasMutex);
+        if (!sLoaded) {
+            for (const auto &plugin :
+                     PlugRegistry::GetInstance().GetAllPlugins()) {
+                JsObject metadata = plugin->GetMetadata();
                 auto execIt = metadata.find("Exec");
-                if (execIt == metadata.end()) {
-                    continue;
-                }
-                if (!execIt->second.IsObject()) {
+                if (execIt == metadata.end() ||
+                    !execIt->second.IsObject()) {
                     continue;
                 }
                 const JsObject &execObj = execIt->second.GetJsObject();
@@ -486,40 +521,60 @@ HdExecComputedTransformSceneIndex::_HasExecComputation(
                     !schemasIt->second.IsObject()) {
                     continue;
                 }
-                const JsObject &schemas = schemasIt->second.GetJsObject();
-                for (const auto &schemaName : appliedSchemas) {
-                    if (schemas.count(schemaName.GetString())) {
-                        hasExecSchema = true;
+                for (const auto &entry :
+                         schemasIt->second.GetJsObject()) {
+                    if (entry.second.IsObject()) {
+                        const JsObject &schemaObj =
+                            entry.second.GetJsObject();
+                        auto apcIt =
+                            schemaObj.find("allowsPluginComputations");
+                        if (apcIt != schemaObj.end() &&
+                            apcIt->second.IsBool() &&
+                            apcIt->second.GetBool()) {
+                            sComputationSchemas.push_back(
+                                TfToken(entry.first));
+                        }
+                    }
+                }
+            }
+            sLoaded = true;
+        }
+
+        bool hasSchema = false;
+        TfTokenVector appliedSchemas = prim.GetAppliedSchemas();
+        for (const auto &schemaClassName : sComputationSchemas) {
+            // plugInfo uses C++ class names (e.g. "UsdPhysicsRigidBodyAPI").
+            // Prim's applied schemas use short identifiers (e.g.
+            // "PhysicsRigidBodyAPI"). Look up via TfType → SchemaRegistry.
+            const TfType &schemaType =
+                TfType::FindByName(schemaClassName.GetString());
+            if (!schemaType.IsUnknown()) {
+                const UsdSchemaRegistry::SchemaInfo *info =
+                    UsdSchemaRegistry::FindSchemaInfo(schemaType);
+                if (info) {
+                    if (prim.HasAPI(info->identifier)) {
+                        hasSchema = true;
                         break;
                     }
                 }
-                if (hasExecSchema) {
-                    break;
-                }
             }
         }
-
-        if (!hasExecSchema) {
+        if (!hasSchema) {
             std::lock_guard<std::mutex> lock(_cacheMutex);
             _hasComputationCache[primPath] = false;
             return false;
         }
     }
 
-    // Phase 2: Trial BuildRequest + PrepareRequest.
+    // Try each computation token via exec.
     for (const auto &token : _computationTokens) {
         std::vector<ExecUsdValueKey> keys;
         keys.emplace_back(prim, token);
         ExecUsdRequest req = _execSystem->BuildRequest(std::move(keys));
         if (req.IsValid()) {
-            TfErrorMark mark;
-            _execSystem->PrepareRequest(req);
-            if (mark.IsClean()) {
-                std::lock_guard<std::mutex> lock(_cacheMutex);
-                _hasComputationCache[primPath] = true;
-                return true;
-            }
-            mark.Clear();
+            std::lock_guard<std::mutex> lock(_cacheMutex);
+            _hasComputationCache[primPath] = true;
+            return true;
         }
     }
 
