@@ -3,11 +3,11 @@
     defaultPrim = "World"
     metersPerUnit = 1.0
     upAxis = "Y"
-    doc = """BEFORE: Same scene WITHOUT GeomMetricsAPI.
-    The cm and mm values are interpreted as meters:
-    - Red box at (200, 25, 0) — 200 METERS away, 50m cube
-    - Green box at (-2000, 250, 0) — 2 KILOMETERS away, 500m cube
-    Only the blue 1m reference cube is visible at this camera distance."""
+    doc = """BEFORE: Same factory WITHOUT units resolution.
+    The cm robot arm is at (100, 0, 0) — 100 METERS away.
+    The mm bolt is at (3000, 940, 0) — 3 KILOMETERS away.
+    Both are invisible. Only the blue reference cube, workbench,
+    and safety pillars are visible."""
 )
 
 def Xform "World"
@@ -34,52 +34,64 @@ def Xform "World"
         color3f[] primvars:displayColor = [(0.35, 0.35, 0.38)]
     }
 
-    # Blue reference cube — same in both scenes
+    def Cube "GridX0" { double size = 1; double3 xformOp:scale = (0.005, 0.022, 20); double3 xformOp:translate = (-4, -0.009, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+    def Cube "GridX1" { double size = 1; double3 xformOp:scale = (0.005, 0.022, 20); double3 xformOp:translate = (-2, -0.009, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+    def Cube "GridX2" { double size = 1; double3 xformOp:scale = (0.005, 0.022, 20); double3 xformOp:translate = (0, -0.009, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]; }
+    def Cube "GridX3" { double size = 1; double3 xformOp:scale = (0.005, 0.022, 20); double3 xformOp:translate = (2, -0.009, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+    def Cube "GridX4" { double size = 1; double3 xformOp:scale = (0.005, 0.022, 20); double3 xformOp:translate = (4, -0.009, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]; }
+
+    # Blue reference cube (1m) — same position
     def Cube "MeterCube" {
         double size = 1
-        double3 xformOp:translate = (0, 0.5, 0)
+        double3 xformOp:translate = (-3, 0.5, 0)
         token[] xformOpOrder = ["xformOp:translate"]
         color3f[] primvars:displayColor = [(0.15, 0.3, 0.85)]
     }
 
-    # Red box — NO GeomMetricsAPI. Raw cm values treated as meters.
-    # 50-unit cube at (200, 25, 0) → 50m cube at 200m away!
-    def Xform "CmBox"
+    # Robot arm — NO correction. Raw cm values as meters.
+    # translate (100, 0, 0) → 100 METERS away, geometry 100x too large
+    def Xform "RobotArm" (
+        prepend references = @./robot_arm_cm_nofix.usda@
+    )
     {
-        uniform token[] xformOpOrder = ["xformOp:transform"]
-        matrix4d xformOp:transform = (
-            (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (200, 25, 0, 1)
-        )
-
-        def Cube "Geo" {
-            double size = 50
-            color3f[] primvars:displayColor = [(0.85, 0.15, 0.1)]
-        }
+        double3 xformOp:translate = (100, 0, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    # Green box — NO GeomMetricsAPI. Raw mm values treated as meters.
-    # 500-unit cube at (-2000, 250, 0) → 500m cube at 2km away!
-    def Xform "MmBox"
+    # Bolt — NO correction. Raw mm values as meters.
+    # translate (3000, 940, 0) → 3 KILOMETERS away, geometry 1000x too large
+    def Xform "Bolt" (
+        prepend references = @./bolt_mm_nofix.usda@
+    )
     {
-        uniform token[] xformOpOrder = ["xformOp:transform"]
-        matrix4d xformOp:transform = (
-            (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2000, 250, 0, 1)
-        )
-
-        def Cube "Geo" {
-            double size = 500
-            color3f[] primvars:displayColor = [(0.15, 0.7, 0.2)]
-        }
+        double3 xformOp:translate = (3000, 940, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    # Same camera as the "after" scene
+    # Workbench — same as corrected
+    def Cube "WorkbenchTop" {
+        double size = 1
+        double3 xformOp:scale = (2, 0.06, 1)
+        double3 xformOp:translate = (3, 0.9, 0)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        color3f[] primvars:displayColor = [(0.55, 0.35, 0.2)]
+    }
+    def Cube "WBLeg1" { double size = 1; double3 xformOp:scale = (0.06, 0.87, 0.06); double3 xformOp:translate = (2.1, 0.435, -0.4); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.4, 0.4, 0.4)]; }
+    def Cube "WBLeg2" { double size = 1; double3 xformOp:scale = (0.06, 0.87, 0.06); double3 xformOp:translate = (3.9, 0.435, -0.4); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.4, 0.4, 0.4)]; }
+    def Cube "WBLeg3" { double size = 1; double3 xformOp:scale = (0.06, 0.87, 0.06); double3 xformOp:translate = (2.1, 0.435, 0.4); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.4, 0.4, 0.4)]; }
+    def Cube "WBLeg4" { double size = 1; double3 xformOp:scale = (0.06, 0.87, 0.06); double3 xformOp:translate = (3.9, 0.435, 0.4); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.4, 0.4, 0.4)]; }
+
+    def Cylinder "SafetyPillar1" { double height = 1.5; double radius = 0.08; double3 xformOp:translate = (-1, 0.75, 2); token[] xformOpOrder = ["xformOp:translate"]; color3f[] primvars:displayColor = [(0.95, 0.85, 0.1)]; }
+    def Cylinder "SafetyPillar2" { double height = 1.5; double radius = 0.08; double3 xformOp:translate = (-1, 0.75, -2); token[] xformOpOrder = ["xformOp:translate"]; color3f[] primvars:displayColor = [(0.95, 0.85, 0.1)]; }
+
+    # Same camera
     def Camera "Camera" {
-        float focalLength = 35
+        float focalLength = 28
         float horizontalAperture = 36
         float verticalAperture = 24
-        float2 clippingRange = (0.1, 10000)
-        double3 xformOp:translate = (0, 3, 8)
-        double3 xformOp:rotateXYZ = (-15, 0, 0)
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (1, 2.5, 7)
+        double3 xformOp:rotateXYZ = (-15, 5, 0)
         token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }
