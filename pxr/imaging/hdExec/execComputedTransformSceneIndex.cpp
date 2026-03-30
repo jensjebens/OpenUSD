@@ -31,7 +31,110 @@
 #include "pxr/base/tf/errorMark.h"
 #include "pxr/base/vt/value.h"
 
+#include <optional>
+
 PXR_NAMESPACE_OPEN_SCOPE
+
+// ---------------------------------------------------------------------------
+// Schema metadata cache — loaded once from plugInfo.json across all plugins.
+// Stores which schemas have exec computations and their per-schema settings.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct _ExecSchemaEntry {
+    TfToken className;       // C++ class name from plugInfo (e.g. "UsdPhysicsRigidBodyAPI")
+    TfToken identifier;      // Short schema identifier for HasAPI (e.g. "PhysicsRigidBodyAPI")
+    bool resetXformStack = false;  // Per-schema: world-space (true) or local (false)
+};
+
+static std::mutex _sSchemaRegistryMutex;
+static std::vector<_ExecSchemaEntry> _sExecSchemas;
+static bool _sSchemasLoaded = false;
+
+/// Lazily load schema metadata from all plugins' plugInfo.json.
+/// Thread-safe; only loads once.
+static const std::vector<_ExecSchemaEntry> &
+_GetExecSchemas()
+{
+    std::lock_guard<std::mutex> lock(_sSchemaRegistryMutex);
+    if (_sSchemasLoaded) {
+        return _sExecSchemas;
+    }
+
+    for (const auto &plugin :
+             PlugRegistry::GetInstance().GetAllPlugins()) {
+        JsObject metadata = plugin->GetMetadata();
+        auto execIt = metadata.find("Exec");
+        if (execIt == metadata.end() ||
+            !execIt->second.IsObject()) {
+            continue;
+        }
+        const JsObject &execObj = execIt->second.GetJsObject();
+        auto schemasIt = execObj.find("Schemas");
+        if (schemasIt == execObj.end() ||
+            !schemasIt->second.IsObject()) {
+            continue;
+        }
+        for (const auto &entry : schemasIt->second.GetJsObject()) {
+            if (!entry.second.IsObject()) {
+                continue;
+            }
+            const JsObject &schemaObj = entry.second.GetJsObject();
+
+            auto apcIt = schemaObj.find("allowsPluginComputations");
+            if (apcIt == schemaObj.end() ||
+                !apcIt->second.IsBool() ||
+                !apcIt->second.GetBool()) {
+                continue;
+            }
+
+            _ExecSchemaEntry se;
+            se.className = TfToken(entry.first);
+
+            // Resolve C++ class name → short schema identifier.
+            const TfType &schemaType =
+                TfType::FindByName(se.className.GetString());
+            if (!schemaType.IsUnknown()) {
+                const UsdSchemaRegistry::SchemaInfo *info =
+                    UsdSchemaRegistry::FindSchemaInfo(schemaType);
+                if (info) {
+                    se.identifier = info->identifier;
+                }
+            }
+            if (se.identifier.IsEmpty()) {
+                continue;
+            }
+
+            // Per-schema resetXformStack (default: false).
+            auto rxsIt = schemaObj.find("resetXformStack");
+            if (rxsIt != schemaObj.end() && rxsIt->second.IsBool()) {
+                se.resetXformStack = rxsIt->second.GetBool();
+            }
+
+            _sExecSchemas.push_back(std::move(se));
+        }
+    }
+    _sSchemasLoaded = true;
+    return _sExecSchemas;
+}
+
+/// Look up the resetXformStack setting for a prim based on its applied
+/// schemas. Returns the value from the first matching schema entry, or
+/// the filter's default if no schema-specific setting is found.
+static bool
+_GetResetXformStackForPrim(const UsdPrim &prim, bool filterDefault)
+{
+    const auto &schemas = _GetExecSchemas();
+    for (const auto &se : schemas) {
+        if (prim.HasAPI(se.identifier)) {
+            return se.resetXformStack;
+        }
+    }
+    return filterDefault;
+}
+
+} // anonymous namespace
 
 TF_DEFINE_ENV_SETTING(
     HDEXEC_AUTO_BOOTSTRAP, true,
@@ -82,19 +185,18 @@ HdExecComputedTransformSceneIndex::UnregisterTransformProvider(
         _sTransformProviders.end());
 }
 
-GfMatrix4d
+std::optional<GfMatrix4d>
 HdExecComputedTransformSceneIndex::QueryTransformProviders(
     const SdfPath &primPath, double timeSeconds)
 {
-    static const GfMatrix4d identity(1.0);
     std::lock_guard<std::mutex> lock(_sTransformProviderMutex);
     for (const auto &entry : _sTransformProviders) {
-        GfMatrix4d result = entry.second(primPath, timeSeconds);
-        if (result != identity) {
+        std::optional<GfMatrix4d> result = entry.second(primPath, timeSeconds);
+        if (result) {
             return result;
         }
     }
-    return identity;
+    return std::nullopt;
 }
 
 void
@@ -177,7 +279,7 @@ public:
 
     GfMatrix4d GetTypedValue(const Time shutterOffset) override
     {
-        // Query registered transform providers (e.g. physics engines).
+        // Query registered transform providers (e.g. physics, DSO).
         // Providers bypass exec's computation cache for side-effect-driven
         // transforms that change every frame.
         {
@@ -190,12 +292,11 @@ public:
             }
             double timeSeconds = frame / fps;
 
-            static const GfMatrix4d identity(1.0);
-            GfMatrix4d mat =
+            std::optional<GfMatrix4d> mat =
                 HdExecComputedTransformSceneIndex::QueryTransformProviders(
                     _primPath, timeSeconds);
-            if (mat != identity) {
-                return mat;
+            if (mat) {
+                return *mat;
             }
         }
 
@@ -493,70 +594,15 @@ HdExecComputedTransformSceneIndex::_HasExecComputation(
     }
 
     // Check if the prim has an applied API schema that is registered
-    // for exec computations. We inspect plugin metadata for
-    // "allowsPluginComputations" entries to determine which schemas
-    // provide computations, then check if the prim has any of them.
-    //
-    // This is more reliable than BuildRequest/PrepareRequest probing,
-    // which can succeed for prims that don't actually have the schema,
-    // leading to exec compilation failures at render time.
+    // for exec computations via plugInfo metadata.
     {
-        static std::mutex sSchemasMutex;
-        static std::vector<TfToken> sComputationSchemas;
-        static bool sLoaded = false;
-
-        std::lock_guard<std::mutex> schemasLock(sSchemasMutex);
-        if (!sLoaded) {
-            for (const auto &plugin :
-                     PlugRegistry::GetInstance().GetAllPlugins()) {
-                JsObject metadata = plugin->GetMetadata();
-                auto execIt = metadata.find("Exec");
-                if (execIt == metadata.end() ||
-                    !execIt->second.IsObject()) {
-                    continue;
-                }
-                const JsObject &execObj = execIt->second.GetJsObject();
-                auto schemasIt = execObj.find("Schemas");
-                if (schemasIt == execObj.end() ||
-                    !schemasIt->second.IsObject()) {
-                    continue;
-                }
-                for (const auto &entry :
-                         schemasIt->second.GetJsObject()) {
-                    if (entry.second.IsObject()) {
-                        const JsObject &schemaObj =
-                            entry.second.GetJsObject();
-                        auto apcIt =
-                            schemaObj.find("allowsPluginComputations");
-                        if (apcIt != schemaObj.end() &&
-                            apcIt->second.IsBool() &&
-                            apcIt->second.GetBool()) {
-                            sComputationSchemas.push_back(
-                                TfToken(entry.first));
-                        }
-                    }
-                }
-            }
-            sLoaded = true;
-        }
+        const auto &schemas = _GetExecSchemas();
 
         bool hasSchema = false;
-        TfTokenVector appliedSchemas = prim.GetAppliedSchemas();
-        for (const auto &schemaClassName : sComputationSchemas) {
-            // plugInfo uses C++ class names (e.g. "UsdPhysicsRigidBodyAPI").
-            // Prim's applied schemas use short identifiers (e.g.
-            // "PhysicsRigidBodyAPI"). Look up via TfType → SchemaRegistry.
-            const TfType &schemaType =
-                TfType::FindByName(schemaClassName.GetString());
-            if (!schemaType.IsUnknown()) {
-                const UsdSchemaRegistry::SchemaInfo *info =
-                    UsdSchemaRegistry::FindSchemaInfo(schemaType);
-                if (info) {
-                    if (prim.HasAPI(info->identifier)) {
-                        hasSchema = true;
-                        break;
-                    }
-                }
+        for (const auto &se : schemas) {
+            if (prim.HasAPI(se.identifier)) {
+                hasSchema = true;
+                break;
             }
         }
         if (!hasSchema) {
@@ -601,6 +647,11 @@ HdExecComputedTransformSceneIndex::_CreateExecXformDataSource(
         }
     }
 
+    // Determine resetXformStack from per-schema plugInfo metadata.
+    // Physics and DSO want true (world-space), units wants false (local).
+    bool resetXformStack =
+        _GetResetXformStackForPrim(prim, _resetXformStack);
+
     // Wrap the xform schema container under the "xform" key so it
     // overlays correctly at the prim level. HdXformSchema::Builder().Build()
     // returns the INNER container (matrix + resetXformStack), but the
@@ -611,7 +662,7 @@ HdExecComputedTransformSceneIndex::_CreateExecXformDataSource(
                 _ExecMatrixDataSource::New(
                     _execSystem.get(), prim, activeToken))
             .SetResetXformStack(
-                HdRetainedTypedSampledDataSource<bool>::New(_resetXformStack))
+                HdRetainedTypedSampledDataSource<bool>::New(resetXformStack))
             .Build();
 
     return HdRetainedContainerDataSource::New(
