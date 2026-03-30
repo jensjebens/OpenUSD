@@ -72,6 +72,12 @@ UsdToNewtonMapper::GetBodyCount() const
     return _bodyMap.size();
 }
 
+bool
+UsdToNewtonMapper::HasBody(const SdfPath &path) const
+{
+    return _bodyMap.count(path) > 0;
+}
+
 size_t
 UsdToNewtonMapper::GetDynamicBodyCount() const
 {

@@ -5,7 +5,8 @@
                 "Exec" : {
                     "Schemas": {
                         "UsdPhysicsRigidBodyAPI": {
-                            "allowsPluginComputations": true
+                            "allowsPluginComputations": true,
+                            "resetXformStack": true
                         }
                     }
                 }
