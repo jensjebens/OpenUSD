@@ -25,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -120,19 +121,21 @@ public:
     /// \name Transform Providers
     /// @{
     ///
-    /// Plugins can register named callbacks to provide simulated
-    /// transforms directly, bypassing exec's computation cache.
-    /// This is needed because exec caches computations whose inputs
-    /// (e.g. computePath) don't change — but transforms from physics
-    /// or other side-effect-driven systems change every frame.
+    /// Plugins can register named callbacks to provide transforms
+    /// directly, bypassing exec's computation cache. This is needed
+    /// because exec caches computations whose declared inputs don't
+    /// change — but physics and DSO transforms change every frame as
+    /// a side effect of stepping.
     ///
-    /// Each provider receives a prim path and time in seconds, and
-    /// returns a GfMatrix4d. Return identity if the path is unknown.
+    /// Each provider receives a prim path and time in seconds.
+    /// Return `std::nullopt` if the provider does not own the prim.
+    /// Return a `GfMatrix4d` to claim the prim's transform.
     /// Providers are consulted in registration order; the first to
-    /// return a non-identity matrix wins.
+    /// return a value wins.
     ///
     using TransformProviderFn =
-        std::function<GfMatrix4d(const SdfPath &primPath, double timeSeconds)>;
+        std::function<std::optional<GfMatrix4d>(
+            const SdfPath &primPath, double timeSeconds)>;
 
     /// Register a named transform provider.
     HDEXEC_API
@@ -144,9 +147,10 @@ public:
     static void UnregisterTransformProvider(const TfToken &name);
 
     /// Query a transform from all registered providers.
-    /// Returns the first non-identity result, or identity if none match.
+    /// Returns the first non-nullopt result, or nullopt if no
+    /// provider claims the prim.
     HDEXEC_API
-    static GfMatrix4d QueryTransformProviders(
+    static std::optional<GfMatrix4d> QueryTransformProviders(
         const SdfPath &primPath, double timeSeconds);
     /// @}
 
