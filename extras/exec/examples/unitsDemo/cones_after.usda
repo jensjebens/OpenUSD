@@ -3,19 +3,7 @@
     defaultPrim = "World"
     metersPerUnit = 0.01
     upAxis = "Y"
-    doc = """After units resolution: same three cones with GeomMetricsAPI.
-    
-    The raw authored data is UNCHANGED.
-    
-    The root World prim declares the stage context:
-      metersPerUnit=0.01, upAxis="Y"
-    
-    Each mismatched cone declares its source coordinate system:
-    - MeterCone: metersPerUnit=1.0 → scale = 100×
-    - ZUpCone: upAxis="Z" → rotation -90° around X
-    
-    The OpenExec computation corrects transforms at render time via
-    NamespaceAncestor traversal. All three cones now match."""
+    doc = "After units resolution: GeomMetricsAPI corrects the meter cone."
 )
 
 def Xform "World" (
@@ -23,13 +11,11 @@ def Xform "World" (
 )
 {
     double metrics:metersPerUnit = 0.01
-    token metrics:upAxis = "Y"
 
     def DomeLight "DomeLight" {
         float inputs:intensity = 0.8
         color3f inputs:color = (0.85, 0.88, 0.95)
     }
-
     def DistantLight "KeyLight" {
         float inputs:intensity = 3.0
         float inputs:angle = 1.0
@@ -37,25 +23,18 @@ def Xform "World" (
         double3 xformOp:rotateXYZ = (-40, 30, 0)
         token[] xformOpOrder = ["xformOp:rotateXYZ"]
     }
-
-    # Ground plane (in cm)
     def Mesh "Ground" {
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 1, 2, 3]
         point3f[] points = [(-400, 0, -300), (400, 0, -300), (400, 0, 300), (-400, 0, 300)]
         color3f[] primvars:displayColor = [(0.3, 0.3, 0.32)]
     }
+    def Cube "GridN2" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-200, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+    def Cube "GridN1" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-100, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+    def Cube "Grid0"  { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (0, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.55, 0.55, 0.55)]; }
+    def Cube "GridP1" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (100, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+    def Cube "GridP2" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (200, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
 
-    # Grid lines every 100cm
-    def Cube "GridX_n3" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-300, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
-    def Cube "GridX_n2" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-200, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
-    def Cube "GridX_n1" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-100, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
-    def Cube "GridX_0"  { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (0, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.55, 0.55, 0.55)]; }
-    def Cube "GridX_p1" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (100, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
-    def Cube "GridX_p2" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (200, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
-    def Cube "GridX_p3" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (300, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
-
-    # ── CORRECT CONE (cm, Y-up — unchanged) ──────────────────
     def Cone "CorrectCone" {
         double height = 100
         double radius = 30
@@ -63,10 +42,6 @@ def Xform "World" (
         token[] xformOpOrder = ["xformOp:translate"]
         color3f[] primvars:displayColor = [(0.2, 0.75, 0.3)]
     }
-
-    # ── METER CONE (with GeomMetricsAPI) ─────────────────────
-    # SAME raw values. GeomMetricsAPI declares metersPerUnit=1.0.
-    # Computation: scale = 1.0/0.01 = 100×
     def Cone "MeterCone" (
         prepend apiSchemas = ["GeomMetricsAPI"]
     )
@@ -79,32 +54,13 @@ def Xform "World" (
         color3f[] primvars:displayColor = [(0.9, 0.35, 0.2)]
     }
 
-    # ── Z-UP CONE (with GeomMetricsAPI) ──────────────────────
-    # SAME raw values and rotation. GeomMetricsAPI declares upAxis="Z".
-    # Computation: rotates -90° around X to convert Z-up → Y-up.
-    # The 90° rotation in the authored data gets cancelled out,
-    # leaving the cone upright.
-    def Cone "ZUpCone" (
-        prepend apiSchemas = ["GeomMetricsAPI"]
-    )
-    {
-        token metrics:upAxis = "Z"
-        double height = 100
-        double radius = 30
-        double3 xformOp:translate = (200, 30, 0)
-        double3 xformOp:rotateXYZ = (90, 0, 0)
-        token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
-        color3f[] primvars:displayColor = [(0.25, 0.45, 0.9)]
-    }
-
-    # Camera (in cm) — same framing as before scene
     def Camera "Camera" {
-        float focalLength = 28
+        float focalLength = 35
         float horizontalAperture = 36
         float verticalAperture = 24
         float2 clippingRange = (1, 50000)
-        double3 xformOp:translate = (0, 100, 500)
-        double3 xformOp:rotateXYZ = (-8, 0, 0)
+        double3 xformOp:translate = (-80, 100, 400)
+        double3 xformOp:rotateXYZ = (-8, -5, 0)
         token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }

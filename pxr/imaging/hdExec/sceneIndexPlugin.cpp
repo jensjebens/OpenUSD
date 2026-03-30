@@ -102,8 +102,8 @@ HdExec_ComputedTransformSceneIndexPlugin::_AppendSceneIndex(
     // transforms (e.g., physics simulation) without any application code.
     return HdExecComputedTransformSceneIndex::NewAutoBootstrap(
         inputScene,
-        {_tokens->computeSimulatedTransform,
-         _tokens->computeUnitAwareLocalToWorldTransform},
+        {_tokens->computeUnitAwareLocalToWorldTransform,
+         _tokens->computeSimulatedTransform},
         /* resetXformStack = */ true);
 }
 

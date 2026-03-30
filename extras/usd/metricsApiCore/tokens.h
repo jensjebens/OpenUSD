@@ -59,7 +59,7 @@ struct UsdMetricsTokensType {
     const TfToken metricsUpAxis;
     /// \brief "Y"
     /// 
-    /// Possible value for UsdMetricsGeomMetricsAPI::GetUpAxisAttr()
+    /// Fallback value for UsdMetricsGeomMetricsAPI::GetUpAxisAttr()
     const TfToken Y;
     /// \brief "Z"
     /// 

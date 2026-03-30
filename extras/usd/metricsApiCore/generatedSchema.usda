@@ -10,12 +10,12 @@ class "GeomMetricsAPI" (
     }
 )
 {
-    double metrics:metersPerUnit (
+    double metrics:metersPerUnit = 0.01 (
         customData = {
             string userDocBrief = "Scale factor from the prim's linear unit to meters."
         }
     )
-    token metrics:upAxis (
+    token metrics:upAxis = "Y" (
         allowedTokens = ["Y", "Z"]
         customData = {
             string userDocBrief = "Vertical axis convention for the prim's subtree."

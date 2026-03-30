@@ -52,22 +52,24 @@ class "GeomMetricsAPI" (
     proposed in PR #45 (Revise Use of Layer Metadata)."""
 )
 {
-    double metrics:metersPerUnit (
+    double metrics:metersPerUnit = 0.01 (
         customData = {
             string apiName = "metersPerUnit"
         }
         doc = """Scale factor from the prim's linear unit to meters.
         0.001 = millimeters, 0.01 = centimeters, 1.0 = meters.
-        Inherited by descendants until overridden."""
+        Inherited by descendants until overridden.
+        Default: 0.01 (centimeters, the USD convention)."""
     )
 
-    token metrics:upAxis (
+    token metrics:upAxis = "Y" (
         customData = {
             string apiName = "upAxis"
         }
         allowedTokens = ["Y", "Z"]
         doc = """Vertical axis convention for the prim's subtree.
-        Inherited by descendants until overridden."""
+        Inherited by descendants until overridden.
+        Default: Y (the USD convention)."""
     )
 }
 

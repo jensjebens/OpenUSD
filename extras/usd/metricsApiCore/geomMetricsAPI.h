@@ -171,10 +171,11 @@ public:
     /// Scale factor from the prim's linear unit to meters.
     /// 0.001 = millimeters, 0.01 = centimeters, 1.0 = meters.
     /// Inherited by descendants until overridden.
+    /// Default: 0.01 (centimeters, the USD convention).
     ///
     /// | ||
     /// | -- | -- |
-    /// | Declaration | `double metrics:metersPerUnit` |
+    /// | Declaration | `double metrics:metersPerUnit = 0.01` |
     /// | C++ Type | double |
     /// | \ref Usd_Datatypes "Usd Type" | SdfValueTypeNames->Double |
     USDMETRICSAPI_API
@@ -194,10 +195,11 @@ public:
     // --------------------------------------------------------------------- //
     /// Vertical axis convention for the prim's subtree.
     /// Inherited by descendants until overridden.
+    /// Default: Y (the USD convention).
     ///
     /// | ||
     /// | -- | -- |
-    /// | Declaration | `token metrics:upAxis` |
+    /// | Declaration | `token metrics:upAxis = "Y"` |
     /// | C++ Type | TfToken |
     /// | \ref Usd_Datatypes "Usd Type" | SdfValueTypeNames->Token |
     /// | \ref UsdMetricsTokens "Allowed Values" | Y, Z |

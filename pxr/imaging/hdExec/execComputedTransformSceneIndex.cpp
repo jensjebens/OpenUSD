@@ -93,6 +93,7 @@ _GetExecSchemas()
             se.className = TfToken(entry.first);
 
             // Resolve C++ class name → short schema identifier.
+            // First try TfType lookup (works if plugin is already loaded).
             const TfType &schemaType =
                 TfType::FindByName(se.className.GetString());
             if (!schemaType.IsUnknown()) {
@@ -102,6 +103,19 @@ _GetExecSchemas()
                     se.identifier = info->identifier;
                 }
             }
+
+            // If TfType lookup failed (plugin not yet loaded), try using
+            // the key directly as a schema identifier. This allows
+            // plugInfo.json to use either the C++ class name or the short
+            // schema identifier.
+            if (se.identifier.IsEmpty()) {
+                const UsdSchemaRegistry::SchemaInfo *info =
+                    UsdSchemaRegistry::FindSchemaInfo(se.className);
+                if (info) {
+                    se.identifier = info->identifier;
+                }
+            }
+
             if (se.identifier.IsEmpty()) {
                 continue;
             }
@@ -513,9 +527,12 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
     HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
 
     if (_bootstrapped && _HasExecComputation(primPath)) {
-        prim.dataSource = HdOverlayContainerDataSource::New(
-            _CreateExecXformDataSource(primPath),
-            prim.dataSource);
+        auto execDs = _CreateExecXformDataSource(primPath);
+        if (execDs) {
+            prim.dataSource = HdOverlayContainerDataSource::New(
+                execDs,
+                prim.dataSource);
+        }
     }
 
     return prim;
@@ -645,6 +662,12 @@ HdExecComputedTransformSceneIndex::_CreateExecXformDataSource(
             activeToken = token;
             break;
         }
+    }
+
+    // If no computation token is valid for this prim, return nullptr
+    // to avoid creating a bogus xform overlay.
+    if (activeToken.IsEmpty()) {
+        return nullptr;
     }
 
     // Determine resetXformStack from per-schema plugInfo metadata.
