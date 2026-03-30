@@ -115,7 +115,7 @@ class NewtonEngine:
                 break
 
         # Build the model from USD.
-        self._builder = newton.ModelBuilder(device=self._device)
+        self._builder = newton.ModelBuilder()
         parse_result = self._builder.add_usd(stage)
 
         # Finalize the model.
