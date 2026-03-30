@@ -1,148 +1,134 @@
 #!/usr/bin/env python3
 """
-newtonRecord — render USD physics scenes with Newton GPU.
+newtonRecord — render USD physics with Newton GPU through the live
+HdExec TransformProvider pipeline (no baking).
 
-Like usdrecord, but steps Newton GPU physics each frame and writes
-body transforms to a session layer before rendering with Storm.
+Registers a Newton GPU TransformProvider, then invokes usdrecord.
+The provider is called by HdExec's _ExecMatrixDataSource on each
+frame for each physics prim.
 
 Usage:
-    python newtonRecord.py --frames 0:120 --camera /World/DemoCamera \
-        demoScene.usda /tmp/frames/frame.####.png
+    python newtonRecord.py [usdrecord args...] input.usda output.####.png
 """
 
-import argparse
-import math
 import os
 import sys
+import subprocess
 
-# Ensure our USD build is on the path.
+# Ensure USD Python is on path.
 USD_BUILD = os.environ.get("USD_BUILD",
-    os.path.join(os.path.dirname(__file__), "../../../../usd_build"))
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "../../../../usd_build"))
 sys.path.insert(0, os.path.join(USD_BUILD, "lib", "python"))
 
-from pxr import Usd, UsdGeom, UsdPhysics, Sdf, Gf, Vt
+from pxr import Usd, Sdf, Gf, HdExec
 
 import newton
 import warp as wp
 
 
-def quat_to_matrix(px, py, pz, qx, qy, qz, qw):
-    """Convert position + quaternion to GfMatrix4d."""
-    quat = Gf.Quatd(float(qw), float(qx), float(qy), float(qz))
-    mat = Gf.Matrix4d()
-    mat.SetRotate(quat)
-    mat.SetTranslateOnly(Gf.Vec3d(float(px), float(py), float(pz)))
-    return mat
+def setup_provider(usda_path, solver_name="xpbd", device="cuda:0"):
+    """Initialize Newton GPU and register the TransformProvider."""
 
-
-def main():
-    parser = argparse.ArgumentParser(description="Render USD with Newton GPU physics")
-    parser.add_argument("usdFile", help="USD file to render")
-    parser.add_argument("outputPattern", help="Output path with #### for frame number")
-    parser.add_argument("--frames", default="0:120",
-                        help="Frame range START:END (default: 0:120)")
-    parser.add_argument("--camera", default=None, help="Camera prim path")
-    parser.add_argument("--solver", default="xpbd",
-                        help="Newton solver (xpbd, mujoco, featherstone, ...)")
-    parser.add_argument("--fps", type=float, default=60.0, help="Frames per second")
-    parser.add_argument("--width", type=int, default=480, help="Image width")
-    parser.add_argument("--device", default="cuda:0", help="Warp device")
-    args = parser.parse_args()
-
-    # Parse frame range.
-    start, end = map(int, args.frames.split(":"))
-    dt = 1.0 / args.fps
-
-    # Open the stage.
-    stage = Usd.Stage.Open(args.usdFile)
+    stage = Usd.Stage.Open(usda_path)
     if not stage:
-        print(f"ERROR: Could not open {args.usdFile}")
-        return 1
+        print(f"[Newton GPU] ERROR: cannot open {usda_path}")
+        return None
 
-    # Build Newton model from USD.
-    print(f"[Newton GPU] Loading {args.usdFile}...")
     builder = newton.ModelBuilder()
     builder.add_usd(stage)
-    model = builder.finalize(device=args.device)
+    model = builder.finalize(device=device)
 
-    # Build path → index mapping.
     body_map = {}
     for idx, label in enumerate(builder.body_label):
         body_map[Sdf.Path(label)] = idx
-    print(f"[Newton GPU] {len(body_map)} bodies, solver={args.solver}")
 
-    # Create solver.
     solver_map = {
         "xpbd": newton.solvers.SolverXPBD,
         "mujoco": newton.solvers.SolverMuJoCo,
         "featherstone": newton.solvers.SolverFeatherstone,
         "semi_implicit": newton.solvers.SolverSemiImplicit,
     }
-    solver_cls = solver_map.get(args.solver, newton.solvers.SolverXPBD)
-    solver = solver_cls(model)
+    solver = solver_map.get(solver_name, newton.solvers.SolverXPBD)(model)
 
-    state_0 = model.state()
-    state_1 = model.state()
+    # Use two state objects and a list to track which is current.
+    states = [model.state(), model.state()]
+    sim_state = {"current": 0, "time": 0.0}
 
-    # Create a session layer for writing transforms.
-    session = Sdf.Layer.CreateAnonymous("newton_physics")
-    stage.GetSessionLayer().subLayerPaths.append(session.identifier)
+    fps = stage.GetTimeCodesPerSecond()
+    if fps <= 0:
+        fps = 60.0
+    dt = 1.0 / fps
 
-    # Ensure output directory exists.
-    out_dir = os.path.dirname(args.outputPattern)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    def provider(prim_path, time_seconds):
+        s = sim_state
+        cur = s["current"]
 
-    print(f"[Newton GPU] Rendering frames {start}–{end} at {args.fps}fps...")
+        while s["time"] < time_seconds - dt * 0.5:
+            nxt = 1 - cur
+            contacts = model.collide(states[cur])
+            solver.step(states[cur], states[nxt],
+                        control=None, contacts=contacts, dt=dt)
+            cur = nxt
+            s["current"] = cur
+            s["time"] += dt
 
-    for frame in range(start, end + 1):
-        # Step physics.
-        contacts = model.collide(state_0)
-        solver.step(state_0, state_1, control=None, contacts=contacts, dt=dt)
-        state_0, state_1 = state_1, state_0
+        idx = body_map.get(prim_path)
+        if idx is None:
+            return None
 
-        # Write transforms to session layer.
-        body_q = state_0.body_q.numpy()
-        for path, idx in body_map.items():
-            tf = body_q[idx]
-            mat = quat_to_matrix(tf[0], tf[1], tf[2], tf[3], tf[4], tf[5], tf[6])
+        tf = states[cur].body_q.numpy()[idx]
+        px, py, pz = float(tf[0]), float(tf[1]), float(tf[2])
+        qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
 
-            prim = stage.GetPrimAtPath(path)
-            if prim:
-                xformable = UsdGeom.Xformable(prim)
-                xformable.MakeMatrixXform().Set(mat, Usd.TimeCode(frame))
+        quat = Gf.Quatd(qw, qx, qy, qz)
+        mat = Gf.Matrix4d()
+        mat.SetRotate(quat)
+        mat.SetTranslateOnly(Gf.Vec3d(px, py, pz))
+        return mat
 
-        # Generate output filename.
-        num_hashes = args.outputPattern.count("#")
-        frame_str = str(frame).zfill(num_hashes)
-        out_path = args.outputPattern.replace("#" * num_hashes, frame_str)
+    HdExec.RegisterTransformProvider("newtonGPU", provider)
+    HdExec.SetGlobalStage(stage)
 
-        if frame % 30 == 0 or frame == end:
-            sample_pos = body_q[0] if len(body_q) > 0 else [0,0,0]
-            print(f"  Frame {frame}: body0=({sample_pos[0]:.2f}, "
-                  f"{sample_pos[1]:.2f}, {sample_pos[2]:.2f})")
+    print(f"[Newton GPU] {len(body_map)} bodies, solver={solver_name}, "
+          f"device={device}, fps={fps}")
+    return stage
 
-    # Now render with usdrecord (reuse the stage with session layer).
-    # Export the baked stage to a temp file and render it.
-    baked_path = "/tmp/newton_baked.usda"
-    stage.GetRootLayer().Export(baked_path)
 
-    import subprocess
-    usdrecord = os.path.join(USD_BUILD, "bin", "usdrecord")
-    cmd = [usdrecord,
-           "--frames", args.frames,
-           "--imageWidth", str(args.width),
-           "--renderer", "GL"]
-    if args.camera:
-        cmd += ["--camera", args.camera]
-    cmd += [args.usdFile, args.outputPattern]
+def main():
+    # Find the USD file in argv (last .usda/.usd/.usdc arg before output).
+    usda_path = None
+    for arg in sys.argv[1:]:
+        if arg.endswith((".usda", ".usd", ".usdc")):
+            usda_path = arg
+            break
 
-    print(f"\n[Newton GPU] Rendering with usdrecord...")
-    # Note: this renders the original stage. For full integration,
-    # we'd need the TransformProvider C++ bridge. For now, the
-    # session-layer baked transforms above demonstrate the pipeline.
-    print("[Newton GPU] (Session layer baking used for rendering — "
-          "TransformProvider C++ bridge needed for live pipeline)")
+    if not usda_path:
+        print("Usage: newtonRecord.py [usdrecord args] input.usda output.####.png")
+        return 1
+
+    # Set up Newton provider.
+    setup_provider(usda_path)
+
+    # Run usdrecord in-process so the registered provider persists.
+    usdrecord_path = os.path.join(USD_BUILD, "bin", "usdrecord")
+
+    # Patch sys.argv for usdrecord's argparse.
+    orig_argv = sys.argv
+    sys.argv = ["usdrecord"] + orig_argv[1:]
+
+    try:
+        with open(usdrecord_path) as f:
+            code = f.read()
+        # Remove the if __name__ == "__main__" guard and sys.exit wrapper
+        # so we can exec it in our process.
+        exec(compile(code, usdrecord_path, "exec"), {"__name__": "__main__"})
+    except SystemExit as e:
+        return e.code or 0
+    finally:
+        sys.argv = orig_argv
+
+    return 0
 
 
 if __name__ == "__main__":
