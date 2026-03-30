@@ -1,0 +1,95 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    doc = """After units resolution: same cones, now with GeomMetricsAPI.
+    
+    The raw authored data is UNCHANGED — same meter-scale values.
+    
+    Two additions:
+    1. World root prim: GeomMetricsAPI with metersPerUnit=0.01 (stage context)
+    2. MeterCone: GeomMetricsAPI with metersPerUnit=1.0 (declares its units)
+    
+    The OpenExec computation reads the ancestor's metersPerUnit via
+    NamespaceAncestor, computes scale = 1.0/0.01 = 100×, and corrects
+    the L2W transform at render time. No stage metadata access needed."""
+)
+
+def Xform "World" (
+    prepend apiSchemas = ["GeomMetricsAPI"]
+)
+{
+    double metrics:metersPerUnit = 0.01
+
+    def DomeLight "DomeLight" {
+        float inputs:intensity = 0.8
+        color3f inputs:color = (0.85, 0.88, 0.95)
+    }
+
+    def DistantLight "KeyLight" {
+        float inputs:intensity = 3.0
+        float inputs:angle = 1.0
+        color3f inputs:color = (1.0, 0.98, 0.93)
+        double3 xformOp:rotateXYZ = (-40, 30, 0)
+        token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    # Ground plane (in cm)
+    def Mesh "Ground" {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-400, 0, -300), (400, 0, -300), (400, 0, 300), (-400, 0, 300)]
+        color3f[] primvars:displayColor = [(0.3, 0.3, 0.32)]
+    }
+
+    # Grid lines every 100cm
+    def Cube "GridX_n3" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-300, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+    def Cube "GridX_n2" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-200, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+    def Cube "GridX_n1" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-100, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+    def Cube "GridX_0"  { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (0, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.55, 0.55, 0.55)]; }
+    def Cube "GridX_p1" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (100, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+    def Cube "GridX_p2" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (200, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+    def Cube "GridX_p3" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (300, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
+
+    # ── CORRECT CONE (cm, no MetricsAPI needed) ──────────────
+    def Cone "CorrectCone" {
+        double height = 100
+        double radius = 30
+        double3 xformOp:translate = (0, 50, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+        color3f[] primvars:displayColor = [(0.2, 0.75, 0.3)]
+    }
+
+    # ── METER CONE (with GeomMetricsAPI) ─────────────────────
+    # SAME raw values as before: height=1, radius=0.3,
+    # translate=(-2, 0.5, 0). Nothing changed in the authored data.
+    #
+    # GeomMetricsAPI declares metersPerUnit=1.0.
+    # Computation reads ancestor (World) mPU=0.01 via NamespaceAncestor.
+    # scale = primMPU / ancestorMPU = 1.0 / 0.01 = 100
+    # translate (-2, 0.5, 0) × 100 = (-200, 50, 0) cm ✓
+    # 3x3 × 100 → 1m cone renders as 100cm ✓
+    def Cone "MeterCone" (
+        prepend apiSchemas = ["GeomMetricsAPI"]
+    )
+    {
+        double metrics:metersPerUnit = 1.0
+        double height = 1
+        double radius = 0.3
+        double3 xformOp:translate = (-2, 0.5, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.2)]
+    }
+
+    # Camera (in cm) — same framing as before scene
+    def Camera "Camera" {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float2 clippingRange = (1, 50000)
+        double3 xformOp:translate = (-80, 100, 400)
+        double3 xformOp:rotateXYZ = (-8, -5, 0)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

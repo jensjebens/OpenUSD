@@ -2,17 +2,19 @@
 // execMetricsUnits.cpp — Unit-aware transform computation using MetricsAPI.
 //
 // Reads metersPerUnit from UsdGeomMetricsAPI (via metrics:metersPerUnit
-// attribute) and corrects the transform. Replaces the old
-// UnitsResolutionAPI approach with proper prim-level schema attributes.
+// attribute) and corrects the transform relative to the nearest ancestor
+// that also declares metersPerUnit.
 //
 // The computation:
 // 1. Reads computeLocalToWorldTransform from execGeom (same prim)
-// 2. Reads metrics:metersPerUnit from this prim (authored by GeomMetricsAPI)
-// 3. Reads metrics:stageMetersPerUnit from the nearest ancestor or defaults
-//    to 0.01 (centimeters, the USD default)
-// 4. Applies uniform scaling: translation AND upper-left 3x3 are both
-//    scaled by (prim_mpu / stage_mpu). This ensures both position and
-//    size are corrected (a 20cm cube in a meter stage renders as 0.2m).
+// 2. Reads metrics:metersPerUnit from this prim (via GeomMetricsAPI)
+// 3. Reads the nearest ancestor's metersPerUnit via NamespaceAncestor
+//    (typically the stage root prim with GeomMetricsAPI applied)
+// 4. Applies uniform scaling by (primMPU / ancestorMPU) to position
+//    and the upper-left 3x3 of the L2W matrix.
+//
+// No stage metadata access needed — everything is declared in-scene
+// via GeomMetricsAPI applied to the root prim and individual assets.
 //
 // Registration: on GeomMetricsAPI schema — the computation only runs
 // for prims that have GeomMetricsAPI applied.
@@ -32,24 +34,38 @@ PXR_NAMESPACE_USING_DIRECTIVE
 TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
 
-    // Our computation name
+    // Our computation names
     (computeUnitAwareLocalToWorldTransform)
+    (computeMetersPerUnit)
 
     // The standard L2W from execGeom
     (computeLocalToWorldTransform)
 
-    // MetricsAPI attributes (from GeomMetricsAPI schema)
+    // MetricsAPI attribute (from GeomMetricsAPI schema)
     ((metersPerUnit, "metrics:metersPerUnit"))
 
-    // Stage-level metersPerUnit — resolved by ancestor walk.
-    // If the prim's nearest ancestor with GeomMetricsAPI provides
-    // the stage context, we read it via NamespaceAncestor. Otherwise
-    // we fall back to the USD default (0.01 = centimeters).
-    ((ancestorMetersPerUnit, "computeUnitAwareLocalToWorldTransform"))
+    // Input name for ancestor's metersPerUnit
+    (ancestorMetersPerUnit)
 );
 
 // USD default: centimeters (metersPerUnit = 0.01)
 static constexpr double _USD_DEFAULT_METERS_PER_UNIT = 0.01;
+
+
+// Helper computation: outputs this prim's metersPerUnit.
+// Allows NamespaceAncestor to walk up and find the nearest ancestor's MPU.
+static double
+_ComputeMetersPerUnit(const VdfContext &ctx)
+{
+    const double *const mpuPtr =
+        ctx.GetInputValuePtr<double>(_tokens->metersPerUnit);
+
+    if (mpuPtr && *mpuPtr > 0.0) {
+        return *mpuPtr;
+    }
+
+    return _USD_DEFAULT_METERS_PER_UNIT;
+}
 
 
 static GfMatrix4d
@@ -77,47 +93,17 @@ _ComputeUnitAwareLocalToWorldTransform(const VdfContext &ctx)
 
     const double primMpu = *primMpuPtr;
 
-    // Get the stage-level metersPerUnit.
-    // In the full MetricsAPI design, this would come from walking
-    // up to the stage root's effective metersPerUnit. For now, we
-    // read it from the HdExec global stage if available, otherwise
-    // fall back to the USD default (0.01 = centimeters).
-    //
-    // Note: When MetricsAPI (PR #45) is fully integrated, the stage
-    // root prim will have GeomMetricsAPI applied, and we can use
-    // NamespaceAncestor to find it. For now, we use a helper that
-    // checks the global stage.
+    // Get the stage/ancestor metersPerUnit via NamespaceAncestor.
+    // This walks up the prim hierarchy to find the nearest ancestor
+    // with GeomMetricsAPI that provides computeMetersPerUnit.
+    // If no ancestor declares it, fall back to USD default (0.01 = cm).
     double stageMpu = _USD_DEFAULT_METERS_PER_UNIT;
 
-    // Try to get stage metersPerUnit from the global stage.
-    // This is set by UsdImagingGLEngine via SetGlobalStage().
-    // Import is deferred to avoid a hard link dependency.
-    {
-        // We can't call UsdGeomGetStageMetersPerUnit from inside a
-        // VdfContext (no stage access). Instead, we read the prim's
-        // own metersPerUnit and assume the correction target is the
-        // stage default. The stage-level mPU is effectively 1.0 for
-        // meter-scale stages (the most common case for cross-industry
-        // workflows) and 0.01 for cm-scale stages.
-        //
-        // The correct long-term solution is a stage-level computation
-        // that provides stageMpu as a Stage().Computation<double> input.
-        // For now, if the prim's mPU equals the USD default (0.01), no
-        // correction is applied — the prim is already in the stage's
-        // native units.
-        //
-        // For stages with explicit metersPerUnit != 0.01, consumers
-        // should author GeomMetricsAPI on the stage root prim to declare
-        // the target unit system. The computation will then use the
-        // ratio between source and target.
+    const double *const ancestorMpuPtr =
+        ctx.GetInputValuePtr<double>(_tokens->ancestorMetersPerUnit);
 
-        // Heuristic: if a prim declares mPU and it matches the stage
-        // default, skip correction. Otherwise correct toward meters (1.0).
-        // This works for the two most common cases:
-        //   - cm prim (0.01) in cm stage (0.01): ratio = 1.0, no correction
-        //   - cm prim (0.01) in m stage (1.0): ratio = 0.01, corrects
-        //   - mm prim (0.001) in m stage (1.0): ratio = 0.001, corrects
-        stageMpu = 1.0;
+    if (ancestorMpuPtr && *ancestorMpuPtr > 0.0) {
+        stageMpu = *ancestorMpuPtr;
     }
 
     if (primMpu == stageMpu) {
@@ -126,14 +112,15 @@ _ComputeUnitAwareLocalToWorldTransform(const VdfContext &ctx)
 
     // Apply UNIFORM scaling — both translation and the upper-left 3x3.
     //
-    // A prim authored in centimeters and referenced into a meter-scale
-    // stage needs:
-    //   - Translation scaled: (100, 0, 50) cm → (1, 0, 0.5) m
-    //   - Size scaled: a 20cm cube → 0.2m cube
+    // A prim authored in meters referenced into a centimeter stage:
+    //   primMPU = 1.0, stageMPU = 0.01 → scale = 100
+    //   translate (−2, 0.5, 0) × 100 = (−200, 50, 0) cm
+    //   3×3 scaled 100× → 1m cone appears as 100cm ✓
     //
-    // This is equivalent to pre-multiplying by a uniform scale matrix:
-    //   result = GfMatrix4d().SetScale(scale) * result
-    // But we do it component-wise to be explicit.
+    // A prim authored in cm referenced into a meter stage:
+    //   primMPU = 0.01, stageMPU = 1.0 → scale = 0.01
+    //   translate (100, 0, 50) × 0.01 = (1, 0, 0.5) m
+    //   3×3 scaled 0.01× → 100cm cone appears as 1m ✓
     const double scale = primMpu / stageMpu;
 
     // Scale the upper-left 3x3 (rotation + scale components)
@@ -155,6 +142,16 @@ _ComputeUnitAwareLocalToWorldTransform(const VdfContext &ctx)
 // Register on GeomMetricsAPI — only runs for prims with the schema applied
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdMetricsGeomMetricsAPI)
 {
+    // Helper computation: outputs this prim's metersPerUnit.
+    // Used by NamespaceAncestor to provide ancestor context.
+    self.PrimComputation(_tokens->computeMetersPerUnit)
+        .Callback<double>(&_ComputeMetersPerUnit)
+        .Inputs(
+            AttributeValue<double>(_tokens->metersPerUnit)
+        );
+
+    // Main computation: corrects the L2W transform based on the ratio
+    // of this prim's metersPerUnit to the nearest ancestor's.
     self.PrimComputation(_tokens->computeUnitAwareLocalToWorldTransform)
         .Callback<GfMatrix4d>(&_ComputeUnitAwareLocalToWorldTransform)
         .Inputs(
@@ -164,6 +161,11 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdMetricsGeomMetricsAPI)
 
             // metersPerUnit from GeomMetricsAPI (prim attribute)
             AttributeValue<double>(
-                _tokens->metersPerUnit)
+                _tokens->metersPerUnit),
+
+            // Nearest ancestor's metersPerUnit (via NamespaceAncestor)
+            NamespaceAncestor<double>(
+                _tokens->computeMetersPerUnit)
+                .InputName(_tokens->ancestorMetersPerUnit)
         );
 }
