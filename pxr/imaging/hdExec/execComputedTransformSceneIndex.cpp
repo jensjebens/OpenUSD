@@ -159,6 +159,14 @@ static std::mutex _sTransformProviderMutex;
 static std::vector<std::pair<TfToken,
     HdExecComputedTransformSceneIndex::TransformProviderFn>> _sTransformProviders;
 
+// Static transform cache — written by Python on the main thread,
+// read by TBB workers without the GIL.  Uses shared_ptr swap for
+// lock-free reads on the hot path.
+using _TransformMap = TfHashMap<SdfPath, GfMatrix4d, SdfPath::Hash>;
+static std::mutex _sCacheMutex;
+static std::shared_ptr<const _TransformMap> _sCachedTransforms =
+    std::make_shared<const _TransformMap>();
+
 void
 HdExecComputedTransformSceneIndex::RegisterTransformProvider(
     const TfToken &name, TransformProviderFn fn)
@@ -199,6 +207,69 @@ HdExecComputedTransformSceneIndex::QueryTransformProviders(
     return std::nullopt;
 }
 
+// ---------------------------------------------------------------------------
+// Static Transform Cache
+// ---------------------------------------------------------------------------
+
+void
+HdExecComputedTransformSceneIndex::SetCachedTransform(
+    const SdfPath &primPath, const GfMatrix4d &matrix)
+{
+    std::lock_guard<std::mutex> lock(_sCacheMutex);
+    auto newMap = std::make_shared<_TransformMap>(*_sCachedTransforms);
+    (*newMap)[primPath] = matrix;
+    _sCachedTransforms = std::move(newMap);
+}
+
+void
+HdExecComputedTransformSceneIndex::ClearCachedTransform(
+    const SdfPath &primPath)
+{
+    std::lock_guard<std::mutex> lock(_sCacheMutex);
+    auto newMap = std::make_shared<_TransformMap>(*_sCachedTransforms);
+    newMap->erase(primPath);
+    _sCachedTransforms = std::move(newMap);
+}
+
+void
+HdExecComputedTransformSceneIndex::ClearAllCachedTransforms()
+{
+    std::lock_guard<std::mutex> lock(_sCacheMutex);
+    _sCachedTransforms = std::make_shared<const _TransformMap>();
+}
+
+std::optional<GfMatrix4d>
+HdExecComputedTransformSceneIndex::GetCachedTransform(
+    const SdfPath &primPath)
+{
+    // Lock-free read: grab shared_ptr, then look up.
+    // The shared_ptr copy is atomic on most platforms; the underlying
+    // map is immutable once published.
+    std::shared_ptr<const _TransformMap> cache;
+    {
+        std::lock_guard<std::mutex> lock(_sCacheMutex);
+        cache = _sCachedTransforms;
+    }
+    auto it = cache->find(primPath);
+    if (it != cache->end()) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
+void
+HdExecComputedTransformSceneIndex::SetCachedTransforms(
+    const std::vector<std::pair<SdfPath, GfMatrix4d>> &transforms)
+{
+    auto newMap = std::make_shared<_TransformMap>();
+    newMap->reserve(transforms.size());
+    for (const auto &pair : transforms) {
+        (*newMap)[pair.first] = pair.second;
+    }
+    std::lock_guard<std::mutex> lock(_sCacheMutex);
+    _sCachedTransforms = std::move(newMap);
+}
+
 void
 HdExecComputedTransformSceneIndex::SetGlobalStage(
     const UsdStageRefPtr &stage)
@@ -225,30 +296,51 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
 {
     std::lock_guard<std::mutex> lock(_sInstancesMutex);
     _sGlobalTimeFrame.store(time.IsDefault() ? 0.0 : time.GetValue());
+
+    // Collect prim paths that need dirtying: any prim that has an exec
+    // computation OR has a cached transform from a physics engine.
+    std::shared_ptr<const _TransformMap> cachedTransforms;
+    {
+        std::lock_guard<std::mutex> cacheLock(_sCacheMutex);
+        cachedTransforms = _sCachedTransforms;
+    }
+
     for (auto *inst : _sInstances) {
-        if (inst->_bootstrapped && inst->_execSystem) {
+        if (!inst->_bootstrapped) {
+            continue;
+        }
+
+        if (inst->_execSystem) {
             inst->_execSystem->ChangeTime(time);
             inst->_currentTime = time;
             inst->_currentTimeFrame = time.IsDefault() ? 0.0 : time.GetValue();
-            
-            // Dirty all computed prims so Hydra re-pulls GetPrim()
-            // Use UniversalSet to ensure the CachingSceneIndex evicts
-            // its cache (it only evicts on container-level dirty, not
-            // on specific locators like xform).
-            HdSceneIndexObserver::DirtiedPrimEntries dirtyEntries;
-            {
-                std::lock_guard<std::mutex> cacheLock(inst->_cacheMutex);
-                for (const auto &pair : inst->_hasComputationCache) {
-                    if (pair.second) {
-                        dirtyEntries.push_back({
-                            pair.first,
-                            HdDataSourceLocatorSet::UniversalSet()});
-                    }
+        }
+
+        HdSceneIndexObserver::DirtiedPrimEntries dirtyEntries;
+
+        // Dirty prims with exec computations.
+        {
+            std::lock_guard<std::mutex> cacheLock(inst->_cacheMutex);
+            for (const auto &pair : inst->_hasComputationCache) {
+                if (pair.second) {
+                    dirtyEntries.push_back({
+                        pair.first,
+                        HdDataSourceLocatorSet::UniversalSet()});
                 }
             }
-            if (!dirtyEntries.empty()) {
-                inst->_SendPrimsDirtied(dirtyEntries);
+        }
+
+        // Dirty prims with cached transforms (from Python physics).
+        if (cachedTransforms) {
+            for (const auto &pair : *cachedTransforms) {
+                dirtyEntries.push_back({
+                    pair.first,
+                    HdDataSourceLocatorSet::UniversalSet()});
             }
+        }
+
+        if (!dirtyEntries.empty()) {
+            inst->_SendPrimsDirtied(dirtyEntries);
         }
     }
 }
@@ -279,9 +371,18 @@ public:
 
     GfMatrix4d GetTypedValue(const Time shutterOffset) override
     {
-        // Query registered transform providers (e.g. physics, DSO).
-        // Providers bypass exec's computation cache for side-effect-driven
-        // transforms that change every frame.
+        // 1. Check the static transform cache first (no GIL needed).
+        //    Python physics engines write here from the main thread.
+        {
+            std::optional<GfMatrix4d> cached =
+                HdExecComputedTransformSceneIndex::GetCachedTransform(
+                    _primPath);
+            if (cached) {
+                return *cached;
+            }
+        }
+
+        // 2. Query registered transform providers (e.g. C++ physics).
         {
             double frame =
                 HdExecComputedTransformSceneIndex::GetGlobalTimeFrame();
@@ -517,18 +618,23 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
             _CreateExecXformDataSource(primPath),
             prim.dataSource);
     } else {
-        // Even without an exec computation, check if a TransformProvider
-        // claims this prim. This supports Python-only physics engines
-        // (like Newton GPU) that register providers without a C++ exec
-        // computation plugin.
-        double frame = _sGlobalTimeFrame.load();
-        double fps = 60.0;
-        if (_stage) {
-            fps = _stage->GetTimeCodesPerSecond();
-            if (fps <= 0) fps = 60.0;
-        }
+        // Even without an exec computation, check the static transform
+        // cache and then TransformProvider callbacks.  The cache is
+        // the preferred path for Python physics engines — it avoids
+        // calling into Python from TBB threads entirely.
         std::optional<GfMatrix4d> providerResult =
-            QueryTransformProviders(primPath, frame / fps);
+            GetCachedTransform(primPath);
+
+        if (!providerResult) {
+            double frame = _sGlobalTimeFrame.load();
+            double fps = 60.0;
+            if (_stage) {
+                fps = _stage->GetTimeCodesPerSecond();
+                if (fps <= 0) fps = 60.0;
+            }
+            providerResult = QueryTransformProviders(primPath, frame / fps);
+        }
+
         if (providerResult) {
             // Create a simple xform overlay with the provider's matrix.
             bool resetXformStack = _resetXformStack;

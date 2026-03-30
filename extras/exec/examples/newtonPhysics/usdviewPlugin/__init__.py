@@ -178,8 +178,7 @@ class NewtonPhysicsPlugin(PluginContainer):
             "fps": fps,
         }
 
-        # Register TransformProvider.
-        HdExec.RegisterTransformProvider("newtonGPU", self._provider)
+        # Register with HdExec so the scene index knows about our stage.
         HdExec.SetGlobalStage(stage)
 
         # Start a QTimer on the main thread to step physics and refresh.
@@ -204,7 +203,7 @@ class NewtonPhysicsPlugin(PluginContainer):
             self._sim_timer.stop()
             self._sim_timer = None
         if HAS_HDEXEC:
-            HdExec.UnregisterTransformProvider("newtonGPU")
+            HdExec.ClearAllCachedTransforms()
 
     def _simStep(self):
         """Called by QTimer on the main thread — step physics + refresh."""
@@ -234,12 +233,25 @@ class NewtonPhysicsPlugin(PluginContainer):
         e["current"] = nxt
         e["time"] += e["dt"]
 
-        # Cache the numpy readback for the TransformProvider callback.
-        # This avoids repeated GPU→CPU copies when Hydra queries each prim.
-        e["body_q_cache"] = e["states"][nxt].body_q.numpy()
+        # Cache the numpy readback and push transforms to HdExec's C++
+        # cache.  This avoids Python callbacks from TBB threads entirely.
+        body_q = e["states"][nxt].body_q.numpy()
+
+        transforms = []
+        for path, idx in e["body_map"].items():
+            tf = body_q[idx]
+            px, py, pz = float(tf[0]), float(tf[1]), float(tf[2])
+            qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
+
+            quat = Gf.Quatd(qw, qx, qy, qz)
+            mat = Gf.Matrix4d()
+            mat.SetRotate(quat)
+            mat.SetTranslateOnly(Gf.Vec3d(px, py, pz))
+            transforms.append((path, mat))
+
+        HdExec.SetCachedTransforms(transforms)
 
         # Log every ~1 second
-        body_q = e["body_q_cache"]
         if int(e["time"] * 24) % 24 == 0:
             tf = body_q[0] if len(body_q) > 0 else [0,0,0,0,0,0,1]
             _log.info(f"Step t={e['time']:.2f}s pos=({tf[0]:.2f}, {tf[1]:.2f}, {tf[2]:.2f})")
@@ -252,47 +264,7 @@ class NewtonPhysicsPlugin(PluginContainer):
         # worker threads can call back into the Python TransformProvider
         # without deadlocking on the GIL.
         if self._stageView:
-            import ctypes
-            _save = ctypes.pythonapi.PyEval_SaveThread
-            _save.restype = ctypes.c_void_p
-            _restore = ctypes.pythonapi.PyEval_RestoreThread
-            _restore.argtypes = [ctypes.c_void_p]
-
-            tstate = _save()
-            try:
-                self._stageView.updateGL()
-            finally:
-                _restore(tstate)
-
-    def _provider(self, prim_path, time_seconds):
-        """TransformProvider callback — returns body transforms.
-
-        Called from C++ TBB threads via PyGILState_Ensure.  The main thread
-        releases the GIL before updateGL(), so TBB workers can acquire it.
-        We read from body_q_cache (populated once per step on the main
-        thread) to avoid repeated GPU→CPU transfers.
-        """
-        if not self._engine:
-            return None
-
-        e = self._engine
-        idx = e["body_map"].get(prim_path)
-        if idx is None:
-            return None
-
-        body_q = e.get("body_q_cache")
-        if body_q is None:
-            return None
-
-        tf = body_q[idx]
-        px, py, pz = float(tf[0]), float(tf[1]), float(tf[2])
-        qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
-
-        quat = Gf.Quatd(qw, qx, qy, qz)
-        mat = Gf.Matrix4d()
-        mat.SetRotate(quat)
-        mat.SetTranslateOnly(Gf.Vec3d(px, py, pz))
-        return mat
+            self._stageView.updateGL()
 
     # ------------------------------------------------------------------
     # Qt event filter for grab mode

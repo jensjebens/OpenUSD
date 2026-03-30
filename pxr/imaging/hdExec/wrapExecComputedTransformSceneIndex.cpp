@@ -95,6 +95,37 @@ _UnregisterTransformProvider(const TfToken &name)
     HdExecComputedTransformSceneIndex::UnregisterTransformProvider(name);
 }
 
+void
+_SetCachedTransform(const SdfPath &primPath, const GfMatrix4d &matrix)
+{
+    HdExecComputedTransformSceneIndex::SetCachedTransform(primPath, matrix);
+}
+
+void
+_ClearCachedTransform(const SdfPath &primPath)
+{
+    HdExecComputedTransformSceneIndex::ClearCachedTransform(primPath);
+}
+
+void
+_ClearAllCachedTransforms()
+{
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+}
+
+void
+_SetCachedTransforms(const list &pyTransforms)
+{
+    std::vector<std::pair<SdfPath, GfMatrix4d>> transforms;
+    for (int i = 0; i < len(pyTransforms); ++i) {
+        tuple t = extract<tuple>(pyTransforms[i]);
+        SdfPath path = extract<SdfPath>(t[0]);
+        GfMatrix4d mat = extract<GfMatrix4d>(t[1]);
+        transforms.emplace_back(std::move(path), mat);
+    }
+    HdExecComputedTransformSceneIndex::SetCachedTransforms(transforms);
+}
+
 } // anonymous namespace
 
 void wrapExecComputedTransformSceneIndex()
@@ -124,4 +155,22 @@ void wrapExecComputedTransformSceneIndex()
     def("AdvanceGlobalTime", &_AdvanceGlobalTime,
         (arg("timeCode")),
         "Advance time for all auto-bootstrapped instances.");
+
+    def("SetCachedTransform", &_SetCachedTransform,
+        (arg("primPath"), arg("matrix")),
+        "Store a transform for a prim path in the static cache.\n"
+        "Thread-safe. Use from the main thread before triggering a render.");
+
+    def("ClearCachedTransform", &_ClearCachedTransform,
+        (arg("primPath")),
+        "Remove a cached transform.");
+
+    def("ClearAllCachedTransforms", &_ClearAllCachedTransforms,
+        "Clear all cached transforms.");
+
+    def("SetCachedTransforms", &_SetCachedTransforms,
+        (arg("transforms")),
+        "Batch-set transforms. Takes a list of (Sdf.Path, Gf.Matrix4d) tuples.\n"
+        "Atomically replaces the entire cache. Preferred for physics engines\n"
+        "that update all body transforms each frame.");
 }

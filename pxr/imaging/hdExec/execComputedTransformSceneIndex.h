@@ -152,6 +152,42 @@ public:
     HDEXEC_API
     static std::optional<GfMatrix4d> QueryTransformProviders(
         const SdfPath &primPath, double timeSeconds);
+
+    /// \name Static Transform Cache
+    /// @{
+    ///
+    /// A thread-safe cache for pre-computed transforms. Python physics
+    /// engines write transforms here from the main thread (with the GIL
+    /// held), then Hydra's TBB workers read without needing the GIL.
+    /// This avoids the GIL-from-TBB-thread problem entirely.
+    ///
+
+    /// Store a transform for a prim path. Thread-safe.
+    HDEXEC_API
+    static void SetCachedTransform(
+        const SdfPath &primPath, const GfMatrix4d &matrix);
+
+    /// Remove a cached transform. Thread-safe.
+    HDEXEC_API
+    static void ClearCachedTransform(const SdfPath &primPath);
+
+    /// Clear all cached transforms. Thread-safe.
+    HDEXEC_API
+    static void ClearAllCachedTransforms();
+
+    /// Query a cached transform. Returns nullopt if not cached.
+    /// Thread-safe (lock-free read path via shared_ptr swap).
+    HDEXEC_API
+    static std::optional<GfMatrix4d> GetCachedTransform(
+        const SdfPath &primPath);
+
+    /// Batch-set transforms. Atomically replaces the entire cache.
+    /// This is the preferred API for physics engines that update all
+    /// body transforms each frame.
+    HDEXEC_API
+    static void SetCachedTransforms(
+        const std::vector<std::pair<SdfPath, GfMatrix4d>> &transforms);
+
     /// @}
 
     HDEXEC_API
