@@ -20,6 +20,13 @@ pxr_library(hdExec
         execComputedTransformSceneIndex
         sceneIndexPlugin
 
+    PYMODULE_CPPFILES
+        module.cpp
+        wrapExecComputedTransformSceneIndex.cpp
+
+    PYMODULE_FILES
+        __init__.py
+
     RESOURCE_FILES
         plugInfo.json
 
