@@ -9,6 +9,7 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 UsdMetricsTokensType::UsdMetricsTokensType() :
+    inherited("inherited", TfToken::Immortal),
     metricsKilogramsPerUnit("metrics:kilogramsPerUnit", TfToken::Immortal),
     metricsMetersPerUnit("metrics:metersPerUnit", TfToken::Immortal),
     metricsUpAxis("metrics:upAxis", TfToken::Immortal),
@@ -17,6 +18,7 @@ UsdMetricsTokensType::UsdMetricsTokensType() :
     GeomMetricsAPI("GeomMetricsAPI", TfToken::Immortal),
     PhysicsMetricsAPI("PhysicsMetricsAPI", TfToken::Immortal),
     allTokens({
+        inherited,
         metricsKilogramsPerUnit,
         metricsMetersPerUnit,
         metricsUpAxis,

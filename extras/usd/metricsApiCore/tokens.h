@@ -41,10 +41,14 @@ PXR_NAMESPACE_OPEN_SCOPE
 /// Use UsdMetricsTokens like so:
 ///
 /// \code
-///     gprim.GetMyTokenValuedAttr().Set(UsdMetricsTokens->metricsKilogramsPerUnit);
+///     gprim.GetMyTokenValuedAttr().Set(UsdMetricsTokens->inherited);
 /// \endcode
 struct UsdMetricsTokensType {
     USDMETRICSAPI_API UsdMetricsTokensType();
+    /// \brief "inherited"
+    /// 
+    /// Fallback value for UsdMetricsGeomMetricsAPI::GetUpAxisAttr()
+    const TfToken inherited;
     /// \brief "metrics:kilogramsPerUnit"
     /// 
     /// UsdMetricsPhysicsMetricsAPI
@@ -59,7 +63,7 @@ struct UsdMetricsTokensType {
     const TfToken metricsUpAxis;
     /// \brief "Y"
     /// 
-    /// Fallback value for UsdMetricsGeomMetricsAPI::GetUpAxisAttr()
+    /// Possible value for UsdMetricsGeomMetricsAPI::GetUpAxisAttr()
     const TfToken Y;
     /// \brief "Z"
     /// 

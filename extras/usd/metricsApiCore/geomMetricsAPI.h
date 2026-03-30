@@ -170,12 +170,13 @@ public:
     // --------------------------------------------------------------------- //
     /// Scale factor from the prim's linear unit to meters.
     /// 0.001 = millimeters, 0.01 = centimeters, 1.0 = meters.
+    /// Default 0 means 'inherited' — use nearest ancestor's value,
+    /// falling back to the USD convention (0.01 = centimeters).
     /// Inherited by descendants until overridden.
-    /// Default: 0.01 (centimeters, the USD convention).
     ///
     /// | ||
     /// | -- | -- |
-    /// | Declaration | `double metrics:metersPerUnit = 0.01` |
+    /// | Declaration | `double metrics:metersPerUnit = 0` |
     /// | C++ Type | double |
     /// | \ref Usd_Datatypes "Usd Type" | SdfValueTypeNames->Double |
     USDMETRICSAPI_API
@@ -194,15 +195,16 @@ public:
     // UPAXIS 
     // --------------------------------------------------------------------- //
     /// Vertical axis convention for the prim's subtree.
+    /// Default 'inherited' — use nearest ancestor's value,
+    /// falling back to the USD convention (Y-up).
     /// Inherited by descendants until overridden.
-    /// Default: Y (the USD convention).
     ///
     /// | ||
     /// | -- | -- |
-    /// | Declaration | `token metrics:upAxis = "Y"` |
+    /// | Declaration | `token metrics:upAxis = "inherited"` |
     /// | C++ Type | TfToken |
     /// | \ref Usd_Datatypes "Usd Type" | SdfValueTypeNames->Token |
-    /// | \ref UsdMetricsTokens "Allowed Values" | Y, Z |
+    /// | \ref UsdMetricsTokens "Allowed Values" | Y, Z, inherited |
     USDMETRICSAPI_API
     UsdAttribute GetUpAxisAttr() const;
 

@@ -26,9 +26,7 @@ def Xform "World"
         color3f[] primvars:displayColor = [(0.3, 0.3, 0.32)]
     }
     def Cube "GridN2" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-200, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
-    def Cube "GridN1" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (-100, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
     def Cube "Grid0"  { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (0, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.55, 0.55, 0.55)]; }
-    def Cube "GridP1" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (100, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
     def Cube "GridP2" { double size = 1; double3 xformOp:scale = (0.3, 1.5, 600); double3 xformOp:translate = (200, 0, 0); token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]; color3f[] primvars:displayColor = [(0.42, 0.42, 0.42)]; }
 
     def Cone "CorrectCone" {

@@ -2,16 +2,15 @@
 // execMetricsUnits.cpp — Unit-aware transform computation using MetricsAPI.
 //
 // Corrects transforms for prims with mismatched metersPerUnit relative
-// to the stage context declared on an ancestor prim.
+// to the stage context, using inherited resolution via self-referencing
+// NamespaceAncestor (same pattern as execGeom's L2W computation).
 //
-// The computation:
-// 1. Reads computeLocalToWorldTransform from execGeom (same prim)
-// 2. Reads metrics:metersPerUnit from this prim (via GeomMetricsAPI)
-// 3. Reads the nearest ancestor's metersPerUnit via NamespaceAncestor
-// 4. Applies uniform scaling by (primMPU / ancestorMPU) to the L2W.
+// Inheritance semantics:
+//   metersPerUnit = 0 → "inherited" (use ancestor's value)
+//   Falls back to USD default: 0.01 (cm)
 //
-// No stage metadata access needed — everything is declared in-scene
-// via GeomMetricsAPI applied to the root prim and individual assets.
+// upAxis correction is deferred pending fix for multi-prim exec graph
+// compilation conflict (see metrics-inherited-attrs-plan.md).
 //
 #include "pxr/pxr.h"
 
@@ -28,83 +27,86 @@ PXR_NAMESPACE_USING_DIRECTIVE
 TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
 
-    // Computation names
     (computeUnitAwareLocalToWorldTransform)
-    (computeMetersPerUnit)
+    (computeEffectiveMetersPerUnit)
 
-    // The standard L2W from execGeom
     (computeLocalToWorldTransform)
 
-    // MetricsAPI attribute
     ((metersPerUnit, "metrics:metersPerUnit"))
 
-    // Input name for ancestor's metersPerUnit
-    (ancestorMetersPerUnit)
+    (ancestorEffectiveMpu)
 );
 
-// USD default: centimeters (metersPerUnit = 0.01)
-static constexpr double _USD_DEFAULT_METERS_PER_UNIT = 0.01;
+static constexpr double _USD_DEFAULT_MPU = 0.01;
 
 
-// Helper computation: outputs this prim's metersPerUnit.
+// Effective metersPerUnit: self-referencing NamespaceAncestor for
+// inheritance resolution. Returns own value if > 0, else ancestor's,
+// else USD default (0.01 = centimeters).
 static double
-_ComputeMetersPerUnit(const VdfContext &ctx)
+_ComputeEffectiveMetersPerUnit(const VdfContext &ctx)
 {
-    const double *const mpuPtr =
+    const double *const myMpuPtr =
         ctx.GetInputValuePtr<double>(_tokens->metersPerUnit);
 
-    if (mpuPtr && *mpuPtr > 0.0) {
-        return *mpuPtr;
+    if (myMpuPtr && *myMpuPtr > 0.0) {
+        return *myMpuPtr;
     }
-    return _USD_DEFAULT_METERS_PER_UNIT;
+
+    const double *const ancestorPtr =
+        ctx.GetInputValuePtr<double>(
+            _tokens->computeEffectiveMetersPerUnit);
+
+    if (ancestorPtr && *ancestorPtr > 0.0) {
+        return *ancestorPtr;
+    }
+
+    return _USD_DEFAULT_MPU;
 }
 
 
 static GfMatrix4d
 _ComputeUnitAwareLocalToWorldTransform(const VdfContext &ctx)
 {
-    const GfMatrix4d *const localToWorldPtr =
+    const GfMatrix4d *const l2wPtr =
         ctx.GetInputValuePtr<GfMatrix4d>(
             _tokens->computeLocalToWorldTransform);
 
-    if (!localToWorldPtr) {
+    if (!l2wPtr) {
         return GfMatrix4d(1.0);
     }
 
-    GfMatrix4d result = *localToWorldPtr;
+    GfMatrix4d result = *l2wPtr;
 
-    // Get prim's metersPerUnit
+    double primMpu = 0.0;
+    double stageMpu = 0.0;
+
     const double *const primMpuPtr =
-        ctx.GetInputValuePtr<double>(_tokens->metersPerUnit);
-
-    if (!primMpuPtr || *primMpuPtr <= 0.0) {
-        return result;
+        ctx.GetInputValuePtr<double>(
+            _tokens->computeEffectiveMetersPerUnit);
+    if (primMpuPtr && *primMpuPtr > 0.0) {
+        primMpu = *primMpuPtr;
     }
 
-    const double primMpu = *primMpuPtr;
-
-    // Get ancestor's metersPerUnit via NamespaceAncestor
-    double stageMpu = _USD_DEFAULT_METERS_PER_UNIT;
     const double *const ancestorMpuPtr =
-        ctx.GetInputValuePtr<double>(_tokens->ancestorMetersPerUnit);
+        ctx.GetInputValuePtr<double>(
+            _tokens->ancestorEffectiveMpu);
     if (ancestorMpuPtr && *ancestorMpuPtr > 0.0) {
         stageMpu = *ancestorMpuPtr;
     }
 
-    if (primMpu == stageMpu) {
+    if (primMpu <= 0.0 || stageMpu <= 0.0 || primMpu == stageMpu) {
         return result;
     }
 
     const double scale = primMpu / stageMpu;
 
-    // Scale the upper-left 3x3
     for (int row = 0; row < 3; ++row) {
         for (int col = 0; col < 3; ++col) {
             result[row][col] *= scale;
         }
     }
 
-    // Scale the translation
     GfVec3d translate = result.ExtractTranslation();
     translate *= scale;
     result.SetRow3(3, translate);
@@ -115,21 +117,25 @@ _ComputeUnitAwareLocalToWorldTransform(const VdfContext &ctx)
 
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdMetricsGeomMetricsAPI)
 {
-    self.PrimComputation(_tokens->computeMetersPerUnit)
-        .Callback<double>(&_ComputeMetersPerUnit)
+    // Effective metersPerUnit with self-referencing NamespaceAncestor
+    self.PrimComputation(_tokens->computeEffectiveMetersPerUnit)
+        .Callback<double>(&_ComputeEffectiveMetersPerUnit)
         .Inputs(
-            AttributeValue<double>(_tokens->metersPerUnit)
+            AttributeValue<double>(_tokens->metersPerUnit),
+            NamespaceAncestor<double>(
+                _tokens->computeEffectiveMetersPerUnit)
         );
 
+    // Main transform computation
     self.PrimComputation(_tokens->computeUnitAwareLocalToWorldTransform)
         .Callback<GfMatrix4d>(&_ComputeUnitAwareLocalToWorldTransform)
         .Inputs(
             Computation<GfMatrix4d>(
                 _tokens->computeLocalToWorldTransform),
-            AttributeValue<double>(
-                _tokens->metersPerUnit),
+            Computation<double>(
+                _tokens->computeEffectiveMetersPerUnit),
             NamespaceAncestor<double>(
-                _tokens->computeMetersPerUnit)
-                .InputName(_tokens->ancestorMetersPerUnit)
+                _tokens->computeEffectiveMetersPerUnit)
+                .InputName(_tokens->ancestorEffectiveMpu)
         );
 }

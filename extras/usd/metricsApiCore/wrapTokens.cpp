@@ -17,6 +17,7 @@ void wrapUsdMetricsTokens()
 {
     pxr_boost::python::class_<UsdMetricsTokensType, pxr_boost::python::noncopyable>
         cls("Tokens", pxr_boost::python::no_init);
+    _ADD_TOKEN(cls, inherited);
     _ADD_TOKEN(cls, metricsKilogramsPerUnit);
     _ADD_TOKEN(cls, metricsMetersPerUnit);
     _ADD_TOKEN(cls, metricsUpAxis);
