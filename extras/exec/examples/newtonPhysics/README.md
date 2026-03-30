@@ -1,183 +1,120 @@
 # Newton Physics OpenExec Plugin
 
 An OpenExec plugin that integrates
-[Newton Dynamics 4](https://github.com/MADEAPPS/newton-dynamics) with
-OpenUSD for rigid-body simulation driven by `UsdPhysicsRigidBodyAPI`.
+[Newton](https://github.com/newton-physics/newton) (GPU-accelerated,
+Disney/DeepMind/NVIDIA) with OpenUSD for rigid-body simulation driven
+by `UsdPhysicsRigidBodyAPI` schemas.
 
 ![Falling box collides with ground plane](demo.gif)
 
-*Rendered by `usdrecord` + Storm. Transforms driven live by Newton through
-OpenExec → HdExec → Hydra — no baking, no session layer.*
+*Rendered by `usdrecord` + Storm. Newton GPU (XPBD solver, NVIDIA L40)
+drives transforms live through HdExec → Hydra — no baking, no session layer.*
 
 ## Architecture
 
 ```
-Newton World  →  NewtonPhysicsSystem  →  TransformProvider  →  HdExec Filter  →  Hydra
-  (ndWorld)       (stores transforms      (callback from          (HdXformSchema    (Storm
-   step()          per SdfPath)            plugin to filter)       overlay)           renders)
+USD Stage (single open)
+  → Newton GPU: ModelBuilder.add_usd(stage) → Model (GPU)
+    → solver.step() → state.body_q (Warp CUDA buffer)
+      → body_q.numpy() → Python TransformProvider
+        → pxr.HdExec.RegisterTransformProvider
+          → HdExecComputedTransformSceneIndex → Hydra Storm
 ```
 
-### NewtonPhysicsSystem
+### Newton GPU Engine (`python/engine.py`)
 
-Singleton orchestrator:
+`NewtonEngine` wraps Newton's `ModelBuilder` → `Model` → `Solver` → `State`:
 
-1. **EnsureInitialized(stage)** — reads `PhysicsScene`, creates `ndWorld`, maps bodies
-2. **AdvanceToTime(seconds)** — steps Newton, pulls transforms into cache
-3. **GetSimulatedTransform(path)** — returns cached `GfMatrix4d` (thread-safe)
+1. **`initialize(stage)`** — `ModelBuilder.add_usd(stage)` parses all
+   `UsdPhysics` schemas (bodies, shapes, joints, materials)
+2. **`step(dt)`** — `model.collide()` + `solver.step()` on GPU
+3. **`get_transform(path)`** — reads `body_q` → converts to `GfMatrix4d`
 
-### OpenExec Computation
+### Solver Backends
 
-`computeSimulatedTransform` registered via
-`EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(UsdPhysicsRigidBodyAPI)`.
-Uses `ExecBuiltinComputations->computePath` to resolve the prim's `SdfPath`,
-queries `NewtonPhysicsSystem` for the transform.
+8 GPU-accelerated solvers, all with the same `step()` interface:
 
-### HdExec Scene Index Filter
+| Solver | Best for |
+|--------|----------|
+| `SolverXPBD` | Real-time rigid bodies (default) |
+| `SolverMuJoCo` | Robotics, articulations |
+| `SolverFeatherstone` | Precise joint dynamics |
+| `SolverSemiImplicit` | Fast, simple |
+| `SolverVBD` | Deformables |
+| `SolverImplicitMPM` | Soft bodies, granular |
+| `SolverKamino` | Fluids |
+| `SolverStyle3D` | Cloth |
 
-`HdExecComputedTransformSceneIndex` overlays simulated transforms onto
-Hydra's `HdXformSchema`. A `TransformProvider` callback bypasses exec's
-computation cache (which doesn't invalidate for side-effect-driven physics).
-The Newton plugin registers this callback at load time.
+Configure via [Newton USD schemas](https://github.com/newton-physics/newton-usd-schemas):
 
-### Body Mapping
+```usda
+def PhysicsScene "PhysicsScene" (
+    prepend apiSchemas = ["NewtonSceneAPI", "NewtonXpbdSceneAPI"]
+) {
+    int newton:timeStepsPerSecond = 1000
+    float newton:xpbd:rigidContactRelaxation = 0.8
+}
+```
 
-`UsdToNewtonMapper` traverses the stage:
+### Interactive Picking
 
-| USD Schema | Newton Body |
-|-----------|------------|
-| `PhysicsRigidBodyAPI` (dynamic) | `ndBodyDynamic` with gravity callback |
-| `PhysicsRigidBodyAPI` (kinematic) | `ndBodyKinematic` |
-| `PhysicsCollisionAPI` only | `ndBodyKinematic` (static) |
+Newton GPU includes GPU-accelerated ray casting and spring-damper
+force application for interactive body dragging. Exposed via
+`engine.begin_pick()` / `update_pick()` / `release_pick()`.
 
-### Collision Shapes
+## Usage
 
-| USD Prim Type | Newton Shape |
-|---------------|--------------|
-| `UsdGeomCube` | `ndShapeBox` |
-| `UsdGeomSphere` | `ndShapeSphere` |
-| `UsdGeomCapsule` | `ndShapeCapsule` |
-| Other | `ndShapeBox` (1×1×1 fallback) |
+### Render with usdrecord
 
-### Gravity
+```bash
+python newtonRecord.py \
+  --camera /World/DemoCamera \
+  --frames 0:120 \
+  --renderer GL \
+  scene.usda output/frame.####.png
+```
 
-Newton 4 applies gravity per-body via `ndBodyNotify::OnApplyExternalForce()`.
-Gravity direction and magnitude are read from `UsdPhysicsScene`.
+### Python API
+
+```python
+from pxr import HdExec, Sdf, Gf
+
+engine = NewtonEngine(device="cuda:0")
+engine.initialize(stage, solver_name="xpbd")
+
+def provider(prim_path, time_seconds):
+    engine.advance_to_time(time_seconds)
+    return engine.get_transform(prim_path)
+
+HdExec.RegisterTransformProvider("newtonGPU", provider)
+```
 
 ## Directory Structure
 
 ```
 newtonPhysics/
-├── CMakeLists.txt                  Build configuration
-├── cmake/FindNewtonDynamics.cmake  CMake find module for Newton 4
-├── plugInfo.json                   Exec plugin registration
-├── newtonTypes.h                   Newton↔USD type conversions
-├── newtonWorldManager.h/.cpp       ndWorld lifecycle
-├── usdToNewtonMapper.h/.cpp        USD → Newton body mapping
-├── newtonPhysicsSystem.h/.cpp      Central orchestrator (singleton)
-├── newtonPhysicsComputations.cpp   OpenExec computation + TransformProvider
+├── README.md
+├── demo.gif
+├── python/
+│   ├── __init__.py              Newton GPU integration package
+│   ├── engine.py                NewtonEngine wrapper
+│   ├── provider.py              TransformProvider registration
+│   └── newtonRecord.py          usdrecord with Newton GPU
 └── testenv/
-    ├── testPluginLoads.cpp         Plugin load/registration
-    ├── testWorldCreation.cpp       World lifecycle
-    ├── testBodyMapping.cpp         Body mapping
-    ├── testShapeMapping.cpp        Shape type mapping
-    ├── testMassProperties.cpp      Mass/density handling
-    ├── testFallingBox.cpp          Falling box integration
-    ├── testGroundCollision.cpp     Ground collision/settlement
-    ├── testMultiBody.cpp           Multi-body/multi-shape
-    ├── testMaterialFriction.cpp    Friction properties
-    ├── testRestitution.cpp         Restitution properties
-    ├── testExecTransformWithPhysics.cpp  Full pipeline integration
-    ├── fallingBox.usda             Single falling box
-    ├── demoScene.usda              Camera + scene for usdrecord
-    ├── stackedBoxes.usda           Three stacked boxes
-    ├── mixedShapes.usda            Sphere, box, capsule
-    ├── kinematicAndDynamic.usda    Kinematic + dynamic interaction
-    └── materialFriction.usda       Friction material test
+    ├── fallingBox.usda           Single falling box
+    ├── demoScene.usda            Camera + scene for rendering
+    ├── stackedBoxes.usda         Three stacked boxes
+    ├── mixedShapes.usda          Sphere, box, capsule
+    ├── kinematicAndDynamic.usda  Kinematic + dynamic interaction
+    └── materialFriction.usda     Friction material test
 ```
-
-## Usage
-
-```cpp
-#include "pxr/imaging/hdExec/execComputedTransformSceneIndex.h"
-
-// Insert the HdExec filter into the scene index chain
-auto physicsFilter = HdExecComputedTransformSceneIndex::New(
-    inputSceneIndex, stage, execSystem,
-    {TfToken("computeSimulatedTransform")},
-    /* resetXformStack = */ true);
-
-// Each frame:
-NewtonPhysicsSystem::GetInstance().AdvanceToTime(seconds);
-physicsFilter->SetTime(currentTime);
-```
-
-## Building
-
-### With Newton Dynamics
-
-```bash
-cmake -DNEWTON_DYNAMICS_ROOT=/path/to/newton4 ...
-```
-
-### Without Newton (stub mode)
-
-Compiles without Newton installed. Physics code is guarded by
-`#ifdef NEWTON_DYNAMICS_FOUND` — stubs return initial transforms.
 
 ## Dependencies
 
-- **OpenUSD** (with OpenExec — `exec`, `execUsd`, `vdf`)
-- **UsdPhysics** schemas (`usdPhysics`, `usdGeom`)
-- **Newton Dynamics 4** (optional)
-
-## Lessons Learned
-
-### Newton Dynamics 4
-
-- **`CollisionUpdate(dt)` before `Update(dt)`**: Broadphase/narrowphase
-  must run before the solver. Without it, zero contact pairs → bodies
-  pass through each other. Sequence: `CollisionUpdate` → `Update` → `Sync`.
-
-- **Gravity is per-body, not per-world**: Applied via
-  `ndBodyNotify::OnApplyExternalForce()` with `F = mass * gravity`.
-
-- **Shapes are shared, bodies own the matrix**: `ndShapeInstance` wraps
-  the base shape. `SetMatrix()` on the body controls world placement.
-
-### OpenExec
-
-- **`computePath` is the key builtin**: Use
-  `ExecBuiltinComputations->computePath` to get the prim's `SdfPath`
-  inside computation callbacks.
-
-- **Exec caches side-effect-driven computations**: If a computation's
-  inputs don't change (e.g. `computePath` is constant), exec caches the
-  result forever. Physics transforms change every frame but exec doesn't
-  know. Fix: `TransformProvider` callback that bypasses exec's cache.
-
-- **`BuildRequest().IsValid()` returns true for prims without the
-  schema**: Guard with `prim.HasAPI<T>()` before querying exec.
-
-### Hydra / Scene Index
-
-- **Wrap xform under `"xform"` key**: `HdXformSchema::Builder().Build()`
-  returns the inner container. Overlay needs it keyed as `"xform"` via
-  `HdRetainedContainerDataSource`.
-
-- **`UniversalSet` for cache eviction**: `CachingSceneIndex` ignores
-  locator-specific dirty. Use `HdDataSourceLocatorSet::UniversalSet()`.
-
-- **Bootstrap timing**: The scene index filter auto-bootstraps on stage
-  discovery. Listen for both `StageContentsChanged` and `_PrimsAdded` to
-  catch the stage regardless of initialization order.
-
-### plugInfo.json
-
-- **No `Type` field** for exec computation plugins — conflicts with exec
-  registration. Only `LibraryPath` and `Info`.
-
-- **`loadWithRenderer: GL`** for scene index plugins active during
-  `usdrecord` headless rendering.
+- **[Newton](https://github.com/newton-physics/newton)** — `pip install newton`
+- **[NVIDIA Warp](https://github.com/NVIDIA/warp)** — installed with Newton
+- **NVIDIA GPU** (Maxwell+) with CUDA 12+ drivers
+- **OpenUSD** with OpenExec + HdExec Python bindings
 
 ## License
 

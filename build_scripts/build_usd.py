@@ -1705,33 +1705,6 @@ EMBREE = Dependency("Embree", InstallEmbree,
                     "include/embree4/rtcore.h")
 
 ############################################################
-# Newton Dynamics 4
-
-def InstallNewtonDynamics(context, force, buildArgs):
-    NEWTON_URL = "https://github.com/MADEAPPS/newton-dynamics/archive/a9c460c3509c935e65c5b1196b955d56627c3ffa.zip"
-
-    with CurrentWorkingDirectory(DownloadURL(NEWTON_URL, context, force)):
-        # Newton's top-level cmake is one level up from newton-4.00/
-        # The archive extracts to newton-dynamics-<hash>/newton-4.00/
-        newtonRoot = os.path.join(os.getcwd(), "newton-4.00")
-        if os.path.isdir(newtonRoot):
-            os.chdir(newtonRoot)
-
-        extraArgs = [
-            '-DNEWTON_BUILD_SANDBOX_DEMOS=OFF',
-            '-DNEWTON_BUILD_PROFILER=OFF',
-            '-DNEWTON_BUILD_SHARED_LIBS=ON',
-            '-DCMAKE_INSTALL_PREFIX="{instDir}"'.format(
-                instDir=context.instDir),
-        ]
-        extraArgs += buildArgs
-
-        RunCMake(context, force, extraArgs)
-
-NEWTON_DYNAMICS = Dependency("Newton Dynamics", InstallNewtonDynamics,
-                             "source/ndNewton.h")
-
-############################################################
 # AnimX
 
 # This GitHub project has no releases, so we fixed on the latest commit as of
@@ -1929,10 +1902,6 @@ def InstallUSD(context, force, buildArgs):
             extraArgs.append('-DDRACO_ROOT="{}"'.format(draco_root))
         else:
             extraArgs.append('-DPXR_BUILD_DRACO_PLUGIN=OFF')
-
-        if context.buildNewton:
-            extraArgs.append('-DNEWTON_DYNAMICS_ROOT="{instDir}"'
-                             .format(instDir=context.instDir))
 
         if context.buildMaterialX:
             extraArgs.append('-DPXR_ENABLE_MATERIALX_SUPPORT=ON')
@@ -2333,14 +2302,6 @@ subgroup.add_argument("--no-draco", dest="build_draco", action="store_false",
 group.add_argument("--draco-location", type=str,
                    help="Directory where Draco is installed.")
 
-group = parser.add_argument_group(title="Newton Physics Options")
-subgroup = group.add_mutually_exclusive_group()
-subgroup.add_argument("--newton", dest="build_newton", action="store_true",
-                      default=False,
-                      help="Build Newton Dynamics 4 physics plugin for OpenExec")
-subgroup.add_argument("--no-newton", dest="build_newton", action="store_false",
-                      help="Do not build Newton Dynamics plugin (default)")
-
 group = parser.add_argument_group(title="MaterialX Options")
 subgroup = group.add_mutually_exclusive_group()
 subgroup.add_argument("--materialx", dest="build_materialx", action="store_true", 
@@ -2530,9 +2491,6 @@ class InstallContext:
         self.dracoLocation = (os.path.abspath(args.draco_location)
                                 if args.draco_location else None)
 
-        # - Newton Dynamics
-        self.buildNewton = args.build_newton
-
         # - MaterialX
         self.buildMaterialX = args.build_materialx and not self.targetWasm
 
@@ -2609,9 +2567,6 @@ if context.buildImaging:
 
     if context.buildEmbree:
         requiredDependencies += [TBB, EMBREE]
-
-    if context.buildNewton:
-        requiredDependencies += [NEWTON_DYNAMICS]
                              
 if context.buildUsdview:
     requiredDependencies += [PYOPENGL, PYSIDE]
@@ -2862,7 +2817,6 @@ summaryMsg += """\
     Tutorials                   {buildTutorials}
     Tools                       {buildTools}
     Alembic Plugin              {buildAlembic}
-    Newton Physics              {buildNewton}
     Draco Plugin                {buildDraco}
 
   Dependencies                  {dependencies}"""
@@ -2942,7 +2896,6 @@ summaryMsg = summaryMsg.format(
     buildTools=("On" if context.buildTools else "Off"),
     buildUsdValidation=("On" if context.buildUsdValidation else "Off"),
     buildAlembic=("On" if context.buildAlembic else "Off"),
-    buildNewton=("On" if context.buildNewton else "Off"),
     buildDraco=("On" if context.buildDraco else "Off"),
     buildMaterialX=("On" if context.buildMaterialX else "Off"),
     omittedSchemaGenScripts=(", ".join(omittedSchemaGenScripts)))
