@@ -5,7 +5,8 @@
                 "Exec": {
                     "Schemas": {
                         "GeomMetricsAPI": {
-                            "allowsPluginComputations": true
+                            "allowsPluginComputations": true,
+                            "resetXformStack": false
                         }
                     }
                 },
