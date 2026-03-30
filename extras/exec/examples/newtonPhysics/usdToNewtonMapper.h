@@ -67,6 +67,9 @@ public:
     /// Get total body count (dynamic + kinematic + static).
     size_t GetBodyCount() const;
 
+    /// Returns true if the prim at \p path is mapped as a body.
+    bool HasBody(const SdfPath &path) const;
+
     /// Get the number of dynamic (non-kinematic) rigid bodies.
     size_t GetDynamicBodyCount() const;
 

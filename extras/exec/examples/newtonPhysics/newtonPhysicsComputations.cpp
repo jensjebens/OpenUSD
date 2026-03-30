@@ -28,6 +28,8 @@
 
 #include "pxr/imaging/hdExec/execComputedTransformSceneIndex.h"
 
+#include <optional>
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 TF_DEFINE_PRIVATE_TOKENS(
@@ -46,7 +48,8 @@ struct _TransformProviderRegistrar {
     _TransformProviderRegistrar() {
         HdExecComputedTransformSceneIndex::RegisterTransformProvider(
             TfToken("newtonPhysics"),
-            [](const SdfPath &primPath, double timeSeconds) -> GfMatrix4d {
+            [](const SdfPath &primPath,
+               double timeSeconds) -> std::optional<GfMatrix4d> {
                 NewtonPhysicsSystem &sys =
                     NewtonPhysicsSystem::GetInstance();
 
@@ -56,12 +59,19 @@ struct _TransformProviderRegistrar {
                     if (stage) {
                         sys.EnsureInitialized(stage);
                     } else {
-                        return GfMatrix4d(1.0);
+                        return std::nullopt;
                     }
                 }
 
                 sys.AdvanceToTime(timeSeconds);
-                return sys.GetSimulatedTransform(primPath);
+
+                // Only claim prims that Newton is actively simulating.
+                GfMatrix4d mat = sys.GetSimulatedTransform(primPath);
+                static const GfMatrix4d identity(1.0);
+                if (mat == identity && !sys.GetMapper().HasBody(primPath)) {
+                    return std::nullopt;  // Not ours.
+                }
+                return mat;
             });
     }
 };
