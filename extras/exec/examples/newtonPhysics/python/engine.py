@@ -86,14 +86,32 @@ class NewtonEngine:
         self._stage = stage
         self._solver_name = solver_name
 
-        # Read solver preference from PhysicsScene if present.
+        # Read solver config from NewtonSceneAPI / solver-specific APIs
+        # on the PhysicsScene prim (newton-usd-schemas).
+        self._time_steps_per_second = 1000
         for prim in stage.Traverse():
             if prim.IsA(UsdPhysics.Scene):
+                # newton:timeStepsPerSecond from NewtonSceneAPI
+                ts_attr = prim.GetAttribute("newton:timeStepsPerSecond")
+                if ts_attr and ts_attr.HasAuthoredValue():
+                    self._time_steps_per_second = int(ts_attr.Get())
+
+                # Detect solver from applied API schemas.
+                # NewtonXpbdSceneAPI → xpbd, NewtonKaminoSceneAPI → kamino
+                schemas = prim.GetAppliedSchemas()
+                for schema in schemas:
+                    s = str(schema)
+                    if "XpbdScene" in s:
+                        self._solver_name = "xpbd"
+                    elif "KaminoScene" in s:
+                        self._solver_name = "kamino"
+
+                # Explicit override via custom attribute (backward compat).
                 solver_attr = prim.GetAttribute("newton:solver")
                 if solver_attr and solver_attr.HasAuthoredValue():
-                    val = solver_attr.Get()
-                    if val and str(val) in _SOLVER_MAP:
-                        self._solver_name = str(val)
+                    val = str(solver_attr.Get())
+                    if val in _SOLVER_MAP:
+                        self._solver_name = val
                 break
 
         # Build the model from USD.
@@ -134,10 +152,15 @@ class NewtonEngine:
         self._current_time = 0.0
         self._initialized = True
 
-    def step(self, dt: float = 1.0 / 60.0):
-        """Advance the simulation by dt seconds."""
+    def step(self, dt: float = None):
+        """Advance the simulation by dt seconds.
+        
+        If dt is None, uses 1/timeStepsPerSecond from NewtonSceneAPI.
+        """
         if not self._initialized:
             return
+        if dt is None:
+            dt = 1.0 / self._time_steps_per_second
 
         # Collision detection.
         if self._contacts is not None:
@@ -162,7 +185,7 @@ class NewtonEngine:
         """Step to reach the given simulation time."""
         if not self._initialized:
             return
-        dt = 1.0 / 60.0
+        dt = 1.0 / self._time_steps_per_second
         while self._current_time < time_seconds - dt * 0.5:
             self.step(dt)
 
