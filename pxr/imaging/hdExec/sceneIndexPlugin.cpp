@@ -61,6 +61,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((sceneIndexPluginName, "HdExec_ComputedTransformSceneIndexPlugin"))
     ((computeSimulatedTransform, "computeSimulatedTransform"))
     ((computeUnitAwareLocalToWorldTransform, "computeUnitAwareLocalToWorldTransform"))
+    ((computeEffectiveWorldTransform, "computeEffectiveWorldTransform"))
     ((computeLocalToWorldTransform, "computeLocalToWorldTransform"))
 );
 
@@ -107,7 +108,8 @@ HdExec_ComputedTransformSceneIndexPlugin::_AppendSceneIndex(
     return HdExecComputedTransformSceneIndex::NewAutoBootstrap(
         inputScene,
         {_tokens->computeSimulatedTransform,
-         _tokens->computeUnitAwareLocalToWorldTransform},
+         _tokens->computeUnitAwareLocalToWorldTransform,
+         _tokens->computeEffectiveWorldTransform},
         /* resetXformStack = */ true);
 }
 

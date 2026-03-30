@@ -1,0 +1,43 @@
+#usda 1.0
+(
+    subLayers = [
+        @usd/schema.usda@
+    ]
+)
+
+over "GLOBAL" (
+    customData = {
+        string libraryName = "dso"
+        string libraryPath = "."
+        bool skipCodeGeneration = true
+    }
+) {}
+
+class "DynamicOwnershipAPI" (
+    inherits = </APISchemaBase>
+    doc = "API schema for computation-driven carrier attachment with animated switching."
+    customData = {
+        token apiSchemaType = "singleApply"
+    }
+)
+{
+    rel dynamicOwnership:carriers (
+        doc = """Ordered list of potential carrier prims. Targets are pre-authored
+        at scene build time and do not change during evaluation. The active
+        carrier is selected by activeCarrierIndex."""
+    )
+    int dynamicOwnership:activeCarrierIndex = 0 (
+        doc = """Selects the active carrier from the carriers relationship
+        (0-based index). Time-sampled to animate carrier switching without
+        structural edits. Value -1 or out-of-range means no active carrier
+        (falls back to authored hierarchical transform)."""
+    )
+    matrix4d dynamicOwnership:localOffset = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """Local offset in carrier space. Time-sampled — keyframed at
+        each switching point to preserve world-space position continuity."""
+    )
+    token dynamicOwnership:ownershipMode = "carrier" (
+        allowedTokens = ["carrier", "authored", "physics"]
+        doc = "Transform resolution mode: carrier (DSO-driven), authored (hierarchy), physics (engine-driven)."
+    )
+}

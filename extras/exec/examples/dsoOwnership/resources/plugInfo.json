@@ -1,0 +1,22 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Exec": {
+                    "Schemas": {
+                        "DsoDynamicOwnershipAPI": {
+                            "allowsPluginComputations": true,
+                            "resetXformStack": true
+                        }
+                    }
+                },
+                "Types": {}
+            },
+            "LibraryPath": "libexecDsoOwnership.so",
+            "Name": "execDsoOwnership",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}
