@@ -118,10 +118,30 @@ class NewtonPhysicsPlugin(PluginContainer):
             _log.info("Grab mode enabled — right-click-drag to grab bodies.")
 
     def _resetPhysics(self, usdviewApi):
+        # Capture body paths before teardown.
+        body_paths = []
+        if self._engine:
+            body_paths = list(self._engine["body_map"].keys())
+
         self._stopSim()
         if self._engine:
             self._engine = None
             self._picking = None
+
+        # After _stopSim clears the transform cache, we need to dirty
+        # the physics prims so Hydra re-pulls GetPrim() and falls back
+        # to the original USD transforms.  Momentarily write identity
+        # matrices into the cache just to trigger the dirty pass.
+        if HAS_HDEXEC and body_paths:
+            dummy = [(p, Gf.Matrix4d(1.0)) for p in body_paths]
+            HdExec.SetCachedTransforms(dummy)
+            HdExec.AdvanceGlobalTime(0.0)
+            HdExec.ClearAllCachedTransforms()
+
+        # Repaint to show restored original poses.
+        if hasattr(self, '_stageView') and self._stageView:
+            self._stageView.updateGL()
+
         _log.info("Simulation reset.")
 
     # ------------------------------------------------------------------
