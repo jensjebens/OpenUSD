@@ -2,11 +2,11 @@
     "Plugins": [
         {
             "Type": "python",
-            "Name": "newtonPhysicsViewPlugin",
+            "Name": "usdviewPlugin",
             "Info": {
                 "Types": {
-                    "NewtonPhysicsPlugin": {
-                        "bases": ["PXR_NS.Usdviewq.PluginContainer"],
+                    "usdviewPlugin.NewtonPhysicsPlugin": {
+                        "bases": ["pxr.Usdviewq.plugin.PluginContainer"],
                         "displayName": "Newton GPU Physics"
                     }
                 }

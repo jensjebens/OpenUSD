@@ -73,16 +73,9 @@ TF_REGISTRY_FUNCTION(TfType)
 TF_REGISTRY_FUNCTION(HdSceneIndexPlugin)
 {
     // Register for all renderers via empty string.
+    // A single registration covers Storm, Embree, RenderMan, etc.
     HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
         /* rendererDisplayName = */ "",
-        _tokens->sceneIndexPluginName,
-        /* inputArgs = */ nullptr,
-        /* insertionPhase = */ 1,
-        HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
-
-    // Also register explicitly for Storm ("GL") to ensure loading.
-    HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
-        /* rendererDisplayName = */ "GL",
         _tokens->sceneIndexPluginName,
         /* inputArgs = */ nullptr,
         /* insertionPhase = */ 1,

@@ -516,6 +516,43 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
         prim.dataSource = HdOverlayContainerDataSource::New(
             _CreateExecXformDataSource(primPath),
             prim.dataSource);
+    } else {
+        // Even without an exec computation, check if a TransformProvider
+        // claims this prim. This supports Python-only physics engines
+        // (like Newton GPU) that register providers without a C++ exec
+        // computation plugin.
+        double frame = _sGlobalTimeFrame.load();
+        double fps = 60.0;
+        if (_stage) {
+            fps = _stage->GetTimeCodesPerSecond();
+            if (fps <= 0) fps = 60.0;
+        }
+        std::optional<GfMatrix4d> providerResult =
+            QueryTransformProviders(primPath, frame / fps);
+        if (providerResult) {
+            // Create a simple xform overlay with the provider's matrix.
+            bool resetXformStack = _resetXformStack;
+            if (_stage) {
+                UsdPrim usdPrim = _stage->GetPrimAtPath(primPath);
+                if (usdPrim) {
+                    resetXformStack =
+                        _GetResetXformStackForPrim(usdPrim, _resetXformStack);
+                }
+            }
+            HdContainerDataSourceHandle xformContainer =
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            *providerResult))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(
+                            resetXformStack))
+                    .Build();
+            prim.dataSource = HdOverlayContainerDataSource::New(
+                HdRetainedContainerDataSource::New(
+                    HdXformSchemaTokens->xform, xformContainer),
+                prim.dataSource);
+        }
     }
 
     return prim;

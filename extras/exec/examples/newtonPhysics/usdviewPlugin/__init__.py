@@ -11,10 +11,22 @@
 #   usdview scene.usda
 
 import os
-import time
-import threading
+import sys
+import logging
+import traceback
 
-from pxr import Tf, Sdf, Gf, Usd, UsdPhysics
+# File logger for debugging — usdview swallows stdout/stderr.
+_LOG_PATH = "/tmp/newton_plugin.log"
+logging.basicConfig(
+    filename=_LOG_PATH,
+    level=logging.DEBUG,
+    format="%(asctime)s [Newton] %(message)s",
+    datefmt="%H:%M:%S",
+)
+_log = logging.getLogger("newton_usdview")
+_log.info("Plugin module loaded")
+
+from pxr import Tf, Sdf, Gf, Usd, UsdGeom, UsdPhysics
 
 try:
     from pxr import HdExec
@@ -36,6 +48,7 @@ class NewtonPhysicsPlugin(PluginContainer):
     """UsdView plugin for interactive Newton GPU physics."""
 
     def registerPlugins(self, plugRegistry, plugCtx):
+        _log.info("registerPlugins called!")
         self._ctx = plugCtx
         self._engine = None
         self._picking = None
@@ -46,23 +59,35 @@ class NewtonPhysicsPlugin(PluginContainer):
         self._toggle_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.togglePhysics",
             "Start/Stop Physics",
-            self._togglePhysics)
+            lambda ctx: self._safeCall(self._togglePhysics, ctx))
 
         self._grab_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.toggleGrab",
             "Enable/Disable Grab Mode",
-            self._toggleGrab)
+            lambda ctx: self._safeCall(self._toggleGrab, ctx))
 
         self._reset_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.resetPhysics",
             "Reset Simulation",
-            self._resetPhysics)
+            lambda ctx: self._safeCall(self._resetPhysics, ctx))
 
     def configureView(self, plugRegistry, plugUIBuilder):
+        _log.info("configureView called!")
+        _log.info(f"  _toggle_cmd = {self._toggle_cmd}")
+        _log.info(f"  _toggle_cmd.displayName = {self._toggle_cmd.displayName}")
         menu = plugUIBuilder.findOrCreateMenu("Physics")
+        _log.info(f"  menu = {menu}")
         menu.addItem(self._toggle_cmd)
         menu.addItem(self._grab_cmd)
         menu.addItem(self._reset_cmd)
+        _log.info("  menu items added")
+
+    def _safeCall(self, fn, ctx):
+        try:
+            _log.info(f"Menu action: {fn.__name__}")
+            fn(ctx)
+        except Exception:
+            _log.error(f"Error in {fn.__name__}:\n{traceback.format_exc()}")
 
     # ------------------------------------------------------------------
     # Commands
@@ -70,10 +95,10 @@ class NewtonPhysicsPlugin(PluginContainer):
 
     def _togglePhysics(self, usdviewApi):
         if not HAS_NEWTON:
-            print("[Newton] Error: newton not installed. pip install newton")
+            _log.info("Error: newton not installed. pip install newton")
             return
         if not HAS_HDEXEC:
-            print("[Newton] Error: pxr.HdExec not available.")
+            _log.info("Error: pxr.HdExec not available.")
             return
 
         if self._running:
@@ -84,30 +109,36 @@ class NewtonPhysicsPlugin(PluginContainer):
     def _toggleGrab(self, usdviewApi):
         if self._event_filter:
             self._removeEventFilter(usdviewApi)
-            print("[Newton] Grab mode disabled.")
+            _log.info("Grab mode disabled.")
         else:
             if not self._engine:
-                print("[Newton] Start physics first.")
+                _log.info("Start physics first.")
                 return
             self._installEventFilter(usdviewApi)
-            print("[Newton] Grab mode enabled — right-click-drag to grab bodies.")
+            _log.info("Grab mode enabled — right-click-drag to grab bodies.")
 
     def _resetPhysics(self, usdviewApi):
         self._stopSim()
         if self._engine:
             self._engine = None
             self._picking = None
-        print("[Newton] Simulation reset.")
+        _log.info("Simulation reset.")
 
     # ------------------------------------------------------------------
     # Simulation
     # ------------------------------------------------------------------
 
     def _startSim(self, usdviewApi):
+        try:
+            self._startSimInner(usdviewApi)
+        except Exception:
+            _log.error("Failed to start sim:\n%s", traceback.format_exc())
+
+    def _startSimInner(self, usdviewApi):
         stage = usdviewApi.stage
         device = "cuda:0" if wp.is_cuda_available() else "cpu"
 
-        print(f"[Newton] Initializing on {device}...")
+        _log.info(f"Initializing on {device}...")
 
         builder = newton.ModelBuilder()
         builder.add_usd(stage)
@@ -117,9 +148,10 @@ class NewtonPhysicsPlugin(PluginContainer):
         body_map = {}
         for idx, label in enumerate(builder.body_label):
             body_map[Sdf.Path(label)] = idx
+            _log.info(f"  Body {idx}: {label}")
 
         if not body_map:
-            print("[Newton] No physics bodies found.")
+            _log.info("No physics bodies found.")
             return
 
         # Solver — default XPBD.
@@ -142,58 +174,104 @@ class NewtonPhysicsPlugin(PluginContainer):
             "body_map": body_map,
             "dt": dt,
             "time": 0.0,
+            "stage": stage,
+            "fps": fps,
         }
 
         # Register TransformProvider.
         HdExec.RegisterTransformProvider("newtonGPU", self._provider)
         HdExec.SetGlobalStage(stage)
 
-        # Start simulation loop in background thread.
-        self._running = True
-        self._sim_thread = threading.Thread(
-            target=self._simLoop, args=(usdviewApi,), daemon=True)
-        self._sim_thread.start()
+        # Start a QTimer on the main thread to step physics and refresh.
+        # (Background threads can't trigger GL repaints.)
+        try:
+            from PySide6 import QtCore
+        except ImportError:
+            from PySide2 import QtCore
 
-        print(f"[Newton] Running — {len(body_map)} bodies at {fps}fps")
+        self._running = True
+        self._stageView = usdviewApi._UsdviewApi__appController._stageView
+        self._sim_timer = QtCore.QTimer()
+        self._sim_timer.timeout.connect(lambda: self._simStep())
+        interval_ms = max(1, int(dt * 1000))
+        self._sim_timer.start(interval_ms)
+
+        _log.info(f"Running — {len(body_map)} bodies at {fps}fps")
 
     def _stopSim(self):
         self._running = False
-        if self._sim_thread:
-            self._sim_thread.join(timeout=2.0)
-            self._sim_thread = None
+        if hasattr(self, '_sim_timer') and self._sim_timer:
+            self._sim_timer.stop()
+            self._sim_timer = None
         if HAS_HDEXEC:
             HdExec.UnregisterTransformProvider("newtonGPU")
 
-    def _simLoop(self, usdviewApi):
-        """Background thread: step physics and trigger viewport redraw."""
-        while self._running and self._engine:
-            e = self._engine
-            cur = e["current"]
-            nxt = 1 - cur
+    def _simStep(self):
+        """Called by QTimer on the main thread — step physics + refresh."""
+        try:
+            self._simStepInner()
+        except Exception:
+            _log.error("simStep error:\n%s", traceback.format_exc())
+            self._running = False
 
-            # Apply picking forces.
-            if self._picking and self._picking.is_picking():
-                self._picking._apply_picking_force(e["states"][cur])
+    def _simStepInner(self):
+        if not self._running or not self._engine:
+            return
 
-            # Step.
-            contacts = e["model"].collide(e["states"][cur])
-            e["solver"].step(
-                e["states"][cur], e["states"][nxt],
-                control=None, contacts=contacts, dt=e["dt"])
-            e["current"] = nxt
-            e["time"] += e["dt"]
+        e = self._engine
+        cur = e["current"]
+        nxt = 1 - cur
 
-            # Trigger viewport redraw (from main thread via Qt).
+        # Apply picking forces.
+        if self._picking and self._picking.is_picking():
+            self._picking._apply_picking_force(e["states"][cur])
+
+        # Step.
+        contacts = e["model"].collide(e["states"][cur])
+        e["solver"].step(
+            e["states"][cur], e["states"][nxt],
+            control=None, contacts=contacts, dt=e["dt"])
+        e["current"] = nxt
+        e["time"] += e["dt"]
+
+        # Cache the numpy readback for the TransformProvider callback.
+        # This avoids repeated GPU→CPU copies when Hydra queries each prim.
+        e["body_q_cache"] = e["states"][nxt].body_q.numpy()
+
+        # Log every ~1 second
+        body_q = e["body_q_cache"]
+        if int(e["time"] * 24) % 24 == 0:
+            tf = body_q[0] if len(body_q) > 0 else [0,0,0,0,0,0,1]
+            _log.info(f"Step t={e['time']:.2f}s pos=({tf[0]:.2f}, {tf[1]:.2f}, {tf[2]:.2f})")
+
+        # Dirty the HdExec scene index so Hydra re-pulls transforms.
+        # Advance global time so the TransformProvider sees the new frame.
+        HdExec.AdvanceGlobalTime(e["time"] * e.get("fps", 24.0))
+
+        # Refresh viewport.  Release the GIL first so that Hydra's TBB
+        # worker threads can call back into the Python TransformProvider
+        # without deadlocking on the GIL.
+        if self._stageView:
+            import ctypes
+            _save = ctypes.pythonapi.PyEval_SaveThread
+            _save.restype = ctypes.c_void_p
+            _restore = ctypes.pythonapi.PyEval_RestoreThread
+            _restore.argtypes = [ctypes.c_void_p]
+
+            tstate = _save()
             try:
-                stageView = usdviewApi._UsdviewApi__appController._stageView
-                stageView.update()
-            except Exception:
-                pass
-
-            time.sleep(e["dt"] * 0.8)  # Slightly faster than real-time
+                self._stageView.updateGL()
+            finally:
+                _restore(tstate)
 
     def _provider(self, prim_path, time_seconds):
-        """TransformProvider callback — returns body transforms."""
+        """TransformProvider callback — returns body transforms.
+
+        Called from C++ TBB threads via PyGILState_Ensure.  The main thread
+        releases the GIL before updateGL(), so TBB workers can acquire it.
+        We read from body_q_cache (populated once per step on the main
+        thread) to avoid repeated GPU→CPU transfers.
+        """
         if not self._engine:
             return None
 
@@ -202,8 +280,11 @@ class NewtonPhysicsPlugin(PluginContainer):
         if idx is None:
             return None
 
-        cur = e["current"]
-        tf = e["states"][cur].body_q.numpy()[idx]
+        body_q = e.get("body_q_cache")
+        if body_q is None:
+            return None
+
+        tf = body_q[idx]
         px, py, pz = float(tf[0]), float(tf[1]), float(tf[2])
         qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
 
@@ -244,7 +325,7 @@ class NewtonPhysicsPlugin(PluginContainer):
             (x / w) * 2.0 - 1.0,
             -((y / h) * 2.0 - 1.0))
 
-        ray = frustum.ComputeRay(ndc)
+        ray = frustum.ComputePickRay(ndc)
         origin = Gf.Vec3f(
             float(ray.startPoint[0]),
             float(ray.startPoint[1]),
@@ -270,7 +351,7 @@ class NewtonPhysicsPlugin(PluginContainer):
             wp.vec3f(direction[0], direction[1], direction[2]))
 
         if self._picking.is_picking():
-            print("[Newton] Grabbed body!")
+            _log.info("Grabbed body!")
             return True
         return False
 
@@ -287,7 +368,7 @@ class NewtonPhysicsPlugin(PluginContainer):
         """Release the grabbed body."""
         if self._picking and self._picking.is_picking():
             self._picking.release()
-            print("[Newton] Released body.")
+            _log.info("Released body.")
 
 
 # Qt event filter
