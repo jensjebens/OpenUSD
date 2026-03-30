@@ -72,17 +72,13 @@ TF_REGISTRY_FUNCTION(TfType)
 
 TF_REGISTRY_FUNCTION(HdSceneIndexPlugin)
 {
-    // Register for all renderers via empty string.
+    // Register for all renderers. The plugInfo.json "loadWithRenderer": "GL"
+    // ensures the plugin library is preloaded for Storm; this registration
+    // then applies the filter universally. Do NOT also register for "GL"
+    // explicitly — Storm collects from both the "" and "GL" buckets,
+    // which would create two filter instances and break the pipeline.
     HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
         /* rendererDisplayName = */ "",
-        _tokens->sceneIndexPluginName,
-        /* inputArgs = */ nullptr,
-        /* insertionPhase = */ 1,
-        HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
-
-    // Also register explicitly for Storm ("GL") to ensure loading.
-    HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
-        /* rendererDisplayName = */ "GL",
         _tokens->sceneIndexPluginName,
         /* inputArgs = */ nullptr,
         /* insertionPhase = */ 1,
