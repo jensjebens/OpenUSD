@@ -1,0 +1,85 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1.0
+    upAxis = "Y"
+    doc = """BEFORE: Same scene WITHOUT GeomMetricsAPI.
+    The cm and mm values are interpreted as meters:
+    - Red box at (200, 25, 0) — 200 METERS away, 50m cube
+    - Green box at (-2000, 250, 0) — 2 KILOMETERS away, 500m cube
+    Only the blue 1m reference cube is visible at this camera distance."""
+)
+
+def Xform "World"
+{
+    def DomeLight "DomeLight" {
+        float inputs:intensity = 1.0
+        float inputs:exposure = 1.0
+        color3f inputs:color = (0.9, 0.92, 1.0)
+    }
+
+    def DistantLight "SunLight" {
+        float inputs:intensity = 2.5
+        float inputs:angle = 1.0
+        color3f inputs:color = (1.0, 0.98, 0.9)
+        double3 xformOp:rotateXYZ = (-45, 30, 0)
+        token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Cube "Floor" {
+        double size = 1
+        double3 xformOp:scale = (20, 0.02, 20)
+        double3 xformOp:translate = (0, -0.01, 0)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        color3f[] primvars:displayColor = [(0.35, 0.35, 0.38)]
+    }
+
+    # Blue reference cube — same in both scenes
+    def Cube "MeterCube" {
+        double size = 1
+        double3 xformOp:translate = (0, 0.5, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+        color3f[] primvars:displayColor = [(0.15, 0.3, 0.85)]
+    }
+
+    # Red box — NO GeomMetricsAPI. Raw cm values treated as meters.
+    # 50-unit cube at (200, 25, 0) → 50m cube at 200m away!
+    def Xform "CmBox"
+    {
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        matrix4d xformOp:transform = (
+            (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (200, 25, 0, 1)
+        )
+
+        def Cube "Geo" {
+            double size = 50
+            color3f[] primvars:displayColor = [(0.85, 0.15, 0.1)]
+        }
+    }
+
+    # Green box — NO GeomMetricsAPI. Raw mm values treated as meters.
+    # 500-unit cube at (-2000, 250, 0) → 500m cube at 2km away!
+    def Xform "MmBox"
+    {
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        matrix4d xformOp:transform = (
+            (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2000, 250, 0, 1)
+        )
+
+        def Cube "Geo" {
+            double size = 500
+            color3f[] primvars:displayColor = [(0.15, 0.7, 0.2)]
+        }
+    }
+
+    # Same camera as the "after" scene
+    def Camera "Camera" {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float2 clippingRange = (0.1, 10000)
+        double3 xformOp:translate = (0, 3, 8)
+        double3 xformOp:rotateXYZ = (-15, 0, 0)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}
