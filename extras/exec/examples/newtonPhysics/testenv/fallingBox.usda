@@ -1,14 +1,12 @@
 #usda 1.0
-# Single falling box test scene for Newton physics plugin.
-# A 1m cube at y=10 should fall under gravity onto a static ground plane.
 (
     defaultPrim = "World"
     endTimeCode = 240
-    metersPerUnit = 1.0
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
     startTimeCode = 0
     timeCodesPerSecond = 24
     upAxis = "Y"
-    kilogramsPerUnit = 1.0
 )
 
 def Xform "World"
@@ -19,26 +17,26 @@ def Xform "World"
         float physics:gravityMagnitude = 9.81
     }
 
-    # Dynamic rigid body — 1m cube starting at y=10.
     def Cube "FallingBox" (
         prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
     )
     {
         color3f[] primvars:displayColor = [(0.2784314, 0.4117647, 1)]
-        double size = 1.0
+        double size = 1
         double3 xformOp:translate = (0, 10, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    # Static ground plane — flat box at y=0.
     def Cube "Ground" (
-        prepend apiSchemas = ["PhysicsCollisionAPI"]
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
     )
     {
+        bool physics:kinematicEnabled = 1
         color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]
-        double size = 1.0
+        double size = 1
         float3 xformOp:scale = (50, 0.1, 50)
         double3 xformOp:translate = (0, -0.05, 0)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
     }
 }
+
