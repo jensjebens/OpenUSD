@@ -9,9 +9,11 @@
 | 2026-03-30 | HdExec `AdvanceGlobalTime` doesn't dirty prims without exec computations → transforms not re-pulled | Major | Fixed | `6d4c5205f` |
 | 2026-03-30 | Duplicate scene index plugin registration ("" + "GL") → two filter instances in Hydra chain | Minor | Fixed | `eea778e77` |
 | 2026-03-30 | Physics Reset doesn't restore original transforms (Hydra cache stale after `ClearAllCachedTransforms`) | Major | Fixed | `77bfd9529` |
-| 2026-03-31 | Newton GPU `add_usd()` crashes in `LoadUsdPhysicsFromRange` when sharing UsdStage with Hydra/ExecUsd | Critical | Fixed — use separate stage | `a0a92a042` |
-| 2026-03-31 | Newton GPU auto-start from `threading.Thread` → SEGV (USD stage not thread-safe for physics parsing) | Major | Fixed — use `QTimer.singleShot` | N/A (autostart script) |
-| 2026-03-31 | xdotool synthetic events don't trigger Qt popup menu actions | Minor | Won't fix — Qt limitation | N/A |
+| 2026-03-31 | Grab mode: Shift+left-click consumed by UsdView multi-select | Minor | Fixed — use middle-click fallback | `473e25245` |
+| 2026-03-31 | Newton GPU uses Z-up internally for Y-up USD stages | Major | Fixed — quaternion-based conversion (q_undo = -90° X) | `819dd9bc6` |
+| 2026-03-31 | Newton Picking spiral: coordinate conversion mismatch in spring target | Major | Fixed — replaced with custom velocity-based grab | `1f2359829` |
+| 2026-03-31 | Force-based grab overwrites Newton's body_f (gravity/contacts lost) | Major | Fixed — velocity-based tracking instead | `1f2359829` |
+| 2026-03-31 | ALAB `LoadUsdPhysicsFromRange` crash in UsdView (shared stage) | Critical | Fixed — separate stage (flaky, sometimes still crashes) | `a0a92a042` |
 
 ## Architecture Decisions
 
@@ -49,10 +51,10 @@ Newton GPU (Python/CUDA)
 
 | Issue | Impact | Notes |
 |-------|--------|-------|
-| Newton GPU axis convention — `body_q` positions appear Z-up in logs but render correctly | Low | Likely internal coordinate system; quaternion handles mapping. Need to verify with rotated bodies. |
 | 90s init time for ALAB workbench | Medium | CoACD convex decomposition runs per-mesh at load time. Could pre-cache decompositions. |
-| Grab mode untested interactively | Low | Code reviewed, structurally sound. Needs manual right-click-drag testing in UsdView. |
 | `resetXformStack` per-schema — physics uses `true` (world-space) | Info | Correct for rigid body transforms. Units computation uses `false` (local-space). |
+| ALAB `LoadUsdPhysicsFromRange` crash is flaky | Low | Sometimes crashes in `moveDescsToDict` even with separate stage. Retry usually works. |
+| Screen capture (x11grab/scrot) can't capture Qt/OpenGL frames for GIF | Low | Use `usdrecord` or Qt `grabFrameBuffer()` for animated demos. |
 
 ## Files
 
