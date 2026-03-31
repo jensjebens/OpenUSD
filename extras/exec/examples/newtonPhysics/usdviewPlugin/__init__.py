@@ -58,12 +58,12 @@ class NewtonPhysicsPlugin(PluginContainer):
 
         self._toggle_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.togglePhysics",
-            "Start/Stop Physics",
+            "Start Physics",
             lambda ctx: self._safeCall(self._togglePhysics, ctx))
 
         self._grab_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.toggleGrab",
-            "Enable/Disable Grab Mode",
+            "Enable Grab Mode",
             lambda ctx: self._safeCall(self._toggleGrab, ctx))
 
         self._reset_cmd = plugRegistry.registerCommandPlugin(
@@ -73,13 +73,10 @@ class NewtonPhysicsPlugin(PluginContainer):
 
     def configureView(self, plugRegistry, plugUIBuilder):
         _log.info("configureView called!")
-        _log.info(f"  _toggle_cmd = {self._toggle_cmd}")
-        _log.info(f"  _toggle_cmd.displayName = {self._toggle_cmd.displayName}")
         menu = plugUIBuilder.findOrCreateMenu("Physics")
-        _log.info(f"  menu = {menu}")
-        menu.addItem(self._toggle_cmd)
-        menu.addItem(self._grab_cmd)
-        menu.addItem(self._reset_cmd)
+        self._toggle_action = menu.addItem(self._toggle_cmd)
+        self._grab_action = menu.addItem(self._grab_cmd)
+        self._reset_action = menu.addItem(self._reset_cmd)
         _log.info("  menu items added")
 
     def _safeCall(self, fn, ctx):
@@ -103,19 +100,27 @@ class NewtonPhysicsPlugin(PluginContainer):
 
         if self._running:
             self._stopSim()
+            if hasattr(self, '_toggle_action') and self._toggle_action:
+                self._toggle_action.setText("Start Physics")
         else:
             self._startSim(usdviewApi)
+            if hasattr(self, '_toggle_action') and self._toggle_action:
+                self._toggle_action.setText("Stop Physics")
 
     def _toggleGrab(self, usdviewApi):
         if self._event_filter:
             self._removeEventFilter(usdviewApi)
+            if hasattr(self, '_grab_action') and self._grab_action:
+                self._grab_action.setText("Enable Grab Mode")
             _log.info("Grab mode disabled.")
         else:
             if not self._engine:
                 _log.info("Start physics first.")
                 return
             self._installEventFilter(usdviewApi)
-            _log.info("Grab mode enabled — right-click-drag to grab bodies.")
+            if hasattr(self, '_grab_action') and self._grab_action:
+                self._grab_action.setText("Disable Grab Mode")
+            _log.info("Grab mode enabled — shift+left-click-drag to grab bodies.")
 
     def _resetPhysics(self, usdviewApi):
         # Capture body paths before teardown.
