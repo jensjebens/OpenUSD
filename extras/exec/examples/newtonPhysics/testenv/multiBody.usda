@@ -1,0 +1,596 @@
+#usda 1.0
+# Multi-body physics test scene: 50+ objects falling onto shelves.
+# Tests collision detection, stacking, and performance at scale.
+# Inspired by the ALAB lab workbench cluttered-shelf aesthetic.
+(
+    defaultPrim = "World"
+    endTimeCode = 480
+    metersPerUnit = 1.0
+    startTimeCode = 0
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+    kilogramsPerUnit = 1.0
+)
+
+def Xform "World"
+{
+    def PhysicsScene "PhysicsScene"
+    {
+        vector3f physics:gravityDirection = (0, -1, 0)
+        float physics:gravityMagnitude = 9.81
+    }
+
+    # --- Ground plane ---
+    def Cube "Ground" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.3, 0.3, 0.3)]
+        double size = 1.0
+        float3 xformOp:scale = (30, 0.2, 30)
+        double3 xformOp:translate = (0, -0.1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # --- Shelf structure (static colliders) ---
+    def Cube "Shelf1" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.45, 0.32, 0.18)]
+        double size = 1.0
+        float3 xformOp:scale = (8, 0.15, 3)
+        double3 xformOp:translate = (0, 2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "Shelf2" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.45, 0.32, 0.18)]
+        double size = 1.0
+        float3 xformOp:scale = (8, 0.15, 3)
+        double3 xformOp:translate = (0, 5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "Shelf3" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.45, 0.32, 0.18)]
+        double size = 1.0
+        float3 xformOp:scale = (8, 0.15, 3)
+        double3 xformOp:translate = (0, 8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # Back wall for the shelves
+    def Cube "BackWall" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]
+        double size = 1.0
+        float3 xformOp:scale = (8, 10, 0.2)
+        double3 xformOp:translate = (0, 5, -1.6)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # Side walls
+    def Cube "LeftWall" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]
+        double size = 1.0
+        float3 xformOp:scale = (0.2, 10, 3)
+        double3 xformOp:translate = (-4.1, 5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "RightWall" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]
+        double size = 1.0
+        float3 xformOp:scale = (0.2, 10, 3)
+        double3 xformOp:translate = (4.1, 5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # =====================================================================
+    # Dynamic bodies — Row 1: Boxes on Shelf 3 (top), dropped from above
+    # =====================================================================
+
+    def Cube "Box_01" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.9, 0.2, 0.2)]
+        double size = 0.5
+        double3 xformOp:translate = (-3, 10, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Box_02" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.2, 0.9, 0.2)]
+        double size = 0.5
+        double3 xformOp:translate = (-2, 10.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Box_03" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.2, 0.2, 0.9)]
+        double size = 0.5
+        double3 xformOp:translate = (-1, 10.2, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Box_04" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.9, 0.9, 0.2)]
+        double size = 0.5
+        double3 xformOp:translate = (0, 10.7, -0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Box_05" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.9, 0.5, 0.2)]
+        double size = 0.5
+        double3 xformOp:translate = (1, 10.3, 0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Box_06" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.5, 0.2, 0.9)]
+        double size = 0.5
+        double3 xformOp:translate = (2, 10.1, -0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Box_07" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.2, 0.9, 0.9)]
+        double size = 0.5
+        double3 xformOp:translate = (3, 10.6, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # =====================================================================
+    # Row 2: Spheres (bottles) dropping onto Shelf 2
+    # =====================================================================
+
+    def Sphere "Bottle_01" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.1, 0.5, 0.1)]
+        double radius = 0.2
+        double3 xformOp:translate = (-3.5, 7, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Bottle_02" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.1, 0.1, 0.5)]
+        double radius = 0.25
+        double3 xformOp:translate = (-2.5, 7.3, 0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Bottle_03" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.5, 0.1, 0.1)]
+        double radius = 0.2
+        double3 xformOp:translate = (-1.5, 7.1, -0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Bottle_04" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.5, 0.5, 0.1)]
+        double radius = 0.15
+        double3 xformOp:translate = (-0.5, 7.5, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Bottle_05" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.1, 0.5, 0.5)]
+        double radius = 0.2
+        double3 xformOp:translate = (0.5, 7.2, -0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Bottle_06" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.8, 0.4, 0.1)]
+        double radius = 0.25
+        double3 xformOp:translate = (1.5, 7.4, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Bottle_07" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.4, 0.1, 0.8)]
+        double radius = 0.2
+        double3 xformOp:translate = (2.5, 7.1, -0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Bottle_08" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.1, 0.8, 0.4)]
+        double radius = 0.15
+        double3 xformOp:translate = (3.5, 7.6, 0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # =====================================================================
+    # Row 3: Capsules (test tubes) dropping onto Shelf 1
+    # =====================================================================
+
+    def Capsule "Tube_01" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.8, 0.8, 0.9)]
+        double height = 0.6
+        double radius = 0.08
+        double3 xformOp:translate = (-3, 4, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "Tube_02" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.8, 0.8, 0.9)]
+        double height = 0.6
+        double radius = 0.08
+        double3 xformOp:translate = (-2.5, 4.2, 0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "Tube_03" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.8, 0.8, 0.9)]
+        double height = 0.6
+        double radius = 0.08
+        double3 xformOp:translate = (-2, 4.1, -0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "Tube_04" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.8, 0.8, 0.9)]
+        double height = 0.6
+        double radius = 0.08
+        double3 xformOp:translate = (-1.5, 4.3, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "Tube_05" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.8, 0.8, 0.9)]
+        double height = 0.6
+        double radius = 0.08
+        double3 xformOp:translate = (-1, 4.0, -0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "Tube_06" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.8, 0.8, 0.9)]
+        double height = 0.6
+        double radius = 0.08
+        double3 xformOp:translate = (-0.5, 4.4, 0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # =====================================================================
+    # Row 4: Mixed small objects — screws, washers (tiny boxes/spheres)
+    # dropping from high up for a chaotic shower effect
+    # =====================================================================
+
+    def Cube "Screw_01" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (-3.2, 12, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_02" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (-2.8, 12.3, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_03" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (-2.4, 12.1, 0.7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_04" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (-2.0, 12.5, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_05" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (-1.6, 12.2, 0.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_06" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (-1.2, 12.4, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_07" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (-0.8, 12.1, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_08" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (-0.4, 12.6, 0.7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_09" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (0.0, 12.3, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "Screw_10" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+        double size = 0.12
+        double3 xformOp:translate = (0.4, 12.5, 0.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Washer_01" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.6, 0.6, 0.65)]
+        double radius = 0.06
+        double3 xformOp:translate = (0.8, 12.2, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Washer_02" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.6, 0.6, 0.65)]
+        double radius = 0.06
+        double3 xformOp:translate = (1.2, 12.4, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Washer_03" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.6, 0.6, 0.65)]
+        double radius = 0.06
+        double3 xformOp:translate = (1.6, 12.1, 0.7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Washer_04" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.6, 0.6, 0.65)]
+        double radius = 0.06
+        double3 xformOp:translate = (2.0, 12.3, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Washer_05" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.6, 0.6, 0.65)]
+        double radius = 0.06
+        double3 xformOp:translate = (2.4, 12.6, 0.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # =====================================================================
+    # Row 5: Larger boxes tumbling down (toy boxes)
+    # =====================================================================
+
+    def Cube "ToyBox_01" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(1.0, 0.4, 0.7)]
+        double size = 0.8
+        double3 xformOp:translate = (-2, 14, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "ToyBox_02" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.4, 1.0, 0.7)]
+        double size = 0.7
+        double3 xformOp:translate = (0, 15, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "ToyBox_03" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.7, 0.4, 1.0)]
+        double size = 0.6
+        double3 xformOp:translate = (2, 13.5, -0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "ToyBox_04" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(1.0, 0.8, 0.2)]
+        double size = 0.9
+        double3 xformOp:translate = (-0.5, 16, 0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # =====================================================================
+    # Cluster: Dense pile of spheres (beakers) above shelf 2
+    # =====================================================================
+
+    def Sphere "Beaker_01" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.85, 0.92, 0.95)]
+        double radius = 0.3
+        double3 xformOp:translate = (-1, 7.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Beaker_02" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.85, 0.92, 0.95)]
+        double radius = 0.3
+        double3 xformOp:translate = (0, 7.8, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Beaker_03" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.85, 0.92, 0.95)]
+        double radius = 0.3
+        double3 xformOp:translate = (1, 7.6, -0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Beaker_04" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.85, 0.92, 0.95)]
+        double radius = 0.25
+        double3 xformOp:translate = (-0.5, 8.2, 0.1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "Beaker_05" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]
+    )
+    {
+        color3f[] primvars:displayColor = [(0.85, 0.92, 0.95)]
+        double radius = 0.25
+        double3 xformOp:translate = (0.5, 8.0, -0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # =====================================================================
+    # Camera for demo rendering
+    # =====================================================================
+
+    def Camera "DemoCamera"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 6, 18)
+        float3 xformOp:rotateXYZ = (-10, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}
