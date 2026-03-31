@@ -290,16 +290,25 @@ class NewtonPhysicsPlugin(PluginContainer):
             tf = body_q_cur[self._grab_body_idx]
             pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
             
-            # Spring force: F = k * (target - pos) - d * vel
-            k = 5.0  # stiffness
-            d = 2.0  # damping
+            # Spring force: F = mass * (k * (target - pos) - d * vel)
+            # Scale by mass so the force is proportional to body weight,
+            # matching Newton's own picking convention.
+            mass = float(e["model"].body_mass.numpy()[self._grab_body_idx])
+            k = 10.0  # stiffness
+            d = 5.0   # damping
             body_qd = e["states"][cur].body_qd.numpy()
             vel_n = Gf.Vec3d(
                 float(body_qd[self._grab_body_idx][0]),
                 float(body_qd[self._grab_body_idx][1]),
                 float(body_qd[self._grab_body_idx][2]))
             
-            force = (target_n - pos_n) * k - vel_n * d
+            force = mass * ((target_n - pos_n) * k - vel_n * d)
+            
+            # Clamp force magnitude to prevent explosions
+            force_mag = force.GetLength()
+            max_force = mass * 100.0  # max ~10g acceleration
+            if force_mag > max_force:
+                force = force * (max_force / force_mag)
             
             # Apply force via body_f
             body_f = e["states"][cur].body_f.numpy()
@@ -463,11 +472,11 @@ class NewtonPhysicsPlugin(PluginContainer):
             _log.info(f"No body hit (closest dist={best_dist:.2f})")
             return False
         
-        # Store grab state
+        # Store grab state — initialize target to body's ACTUAL position
+        # (not the ray hit point) to avoid a force spike on the first frame.
         self._grab_body_idx = best_idx
         self._grab_body_path = best_path
         
-        # Compute the grab point on the ray (USD space)
         tf = body_q[best_idx]
         pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
         if self._swap_yz:
@@ -475,10 +484,13 @@ class NewtonPhysicsPlugin(PluginContainer):
         else:
             pos_usd = pos_n
         
+        # Grab depth = distance from camera to body along ray
         v = pos_usd - ray_o
         t = Gf.Dot(v, ray_d)
-        self._grab_depth = t  # distance along ray
-        self._grab_offset = pos_usd - (ray_o + ray_d * t)  # offset from ray
+        self._grab_depth = t
+        # Offset = zero (target starts at body center)
+        self._grab_offset = Gf.Vec3d(0, 0, 0)
+        # Target starts at body's current position
         self._grab_target_usd = pos_usd
         
         _log.info(f"Grabbed body {best_path} (idx={best_idx}, dist={best_dist:.2f}, depth={t:.2f})")
