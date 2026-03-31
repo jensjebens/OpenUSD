@@ -190,8 +190,11 @@ class NewtonPhysicsPlugin(PluginContainer):
         solver = newton.solvers.SolverXPBD(model)
         states = [model.state(), model.state()]
 
-        # Picking.
-        self._picking = newton._src.viewer.picking.Picking(model)
+        # Picking — low stiffness + high damping to prevent oscillation.
+        # Newton's spring force is applied every substep, so even small
+        # stiffness produces significant forces at 24fps.
+        self._picking = newton._src.viewer.picking.Picking(
+            model, pick_stiffness=2.0, pick_damping=10.0)
 
         fps = stage.GetTimeCodesPerSecond()
         if fps <= 0:
@@ -273,9 +276,37 @@ class NewtonPhysicsPlugin(PluginContainer):
         cur = e["current"]
         nxt = 1 - cur
 
-        # Apply picking forces.
-        if self._picking and self._picking.is_picking():
-            self._picking._apply_picking_force(e["states"][cur])
+        # Apply grab force directly in Newton space.
+        if hasattr(self, '_grab_body_idx') and self._grab_body_idx >= 0:
+            target_usd = self._grab_target_usd
+            # Convert target from USD Y-up to Newton Z-up
+            if self._swap_yz:
+                target_n = self._q_to_newton.Transform(target_usd)
+            else:
+                target_n = target_usd
+            
+            # Read current body position in Newton space
+            body_q_cur = e["states"][cur].body_q.numpy()
+            tf = body_q_cur[self._grab_body_idx]
+            pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
+            
+            # Spring force: F = k * (target - pos) - d * vel
+            k = 5.0  # stiffness
+            d = 2.0  # damping
+            body_qd = e["states"][cur].body_qd.numpy()
+            vel_n = Gf.Vec3d(
+                float(body_qd[self._grab_body_idx][0]),
+                float(body_qd[self._grab_body_idx][1]),
+                float(body_qd[self._grab_body_idx][2]))
+            
+            force = (target_n - pos_n) * k - vel_n * d
+            
+            # Apply force via body_f
+            body_f = e["states"][cur].body_f.numpy()
+            body_f[self._grab_body_idx][0] += float(force[0])
+            body_f[self._grab_body_idx][1] += float(force[1])
+            body_f[self._grab_body_idx][2] += float(force[2])
+            e["states"][cur].body_f.assign(wp.array(body_f, dtype=wp.spatial_vector, device=e["model"].device))
 
         # Step.
         contacts = e["model"].collide(e["states"][cur])
@@ -376,64 +407,101 @@ class NewtonPhysicsPlugin(PluginContainer):
         return origin, direction
 
     def beginGrab(self, usdviewApi, x, y):
-        """Start grabbing a body at screen position (x, y)."""
-        if not self._picking or not self._engine:
-            _log.info("beginGrab: no picking or no engine")
+        """Start grabbing a body at screen position (x, y).
+        
+        Uses a simple position-based approach: find the closest body
+        to the screen ray (in USD space), then track its offset from
+        the ray intersection point. The grab force is applied directly
+        in Newton space each frame.
+        """
+        if not self._engine:
+            _log.info("beginGrab: no engine")
             return False
 
         origin, direction = self._screenToRay(usdviewApi, x, y)
-
-        cur = self._engine["current"]
-        state = self._engine["states"][cur]
-
-        # Log some body positions for comparison
-        body_q = state.body_q.numpy()
-        for idx in range(min(3, len(body_q))):
+        
+        # Find the closest body to the ray in USD space.
+        # We check all bodies and find the one whose USD position
+        # is closest to the ray.
+        e = self._engine
+        cur = e["current"]
+        body_q = e["states"][cur].body_q.numpy()
+        
+        best_dist = 1e10
+        best_idx = -1
+        best_path = None
+        
+        ray_o = Gf.Vec3d(origin[0], origin[1], origin[2])
+        ray_d = Gf.Vec3d(direction[0], direction[1], direction[2]).GetNormalized()
+        
+        for path, idx in e["body_map"].items():
             tf = body_q[idx]
-            label = list(self._engine["body_map"].keys())[idx] if idx < len(self._engine["body_map"]) else "?"
-            _log.info(f"  body[{idx}] {label}: pos=({tf[0]:.2f},{tf[1]:.2f},{tf[2]:.2f})")
-
-        # Convert ray from USD space to Newton space.
+            q_n = Gf.Quatd(float(tf[6]), float(tf[3]), float(tf[4]), float(tf[5]))
+            pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
+            
+            # Convert to USD space
+            if self._swap_yz:
+                pos_usd = self._q_undo.Transform(pos_n)
+            else:
+                pos_usd = pos_n
+            
+            # Distance from ray to point
+            v = pos_usd - ray_o
+            t = Gf.Dot(v, ray_d)
+            if t < 0:
+                continue  # behind the camera
+            closest_on_ray = ray_o + ray_d * t
+            dist = (pos_usd - closest_on_ray).GetLength()
+            
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+                best_path = path
+        
+        # Threshold: must be within ~2 units of the ray
+        if best_dist > 2.0 or best_idx < 0:
+            _log.info(f"No body hit (closest dist={best_dist:.2f})")
+            return False
+        
+        # Store grab state
+        self._grab_body_idx = best_idx
+        self._grab_body_path = best_path
+        
+        # Compute the grab point on the ray (USD space)
+        tf = body_q[best_idx]
+        pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
         if self._swap_yz:
-            o = self._q_to_newton.Transform(Gf.Vec3d(origin[0], origin[1], origin[2]))
-            d = self._q_to_newton.Transform(Gf.Vec3d(direction[0], direction[1], direction[2]))
-            origin_n = wp.vec3f(float(o[0]), float(o[1]), float(o[2]))
-            dir_n = wp.vec3f(float(d[0]), float(d[1]), float(d[2]))
+            pos_usd = self._q_undo.Transform(pos_n)
         else:
-            origin_n = wp.vec3f(origin[0], origin[1], origin[2])
-            dir_n = wp.vec3f(direction[0], direction[1], direction[2])
-
-        _log.info(f"  newton ray: origin=({origin_n[0]:.2f},{origin_n[1]:.2f},{origin_n[2]:.2f}) "
-                   f"dir=({dir_n[0]:.4f},{dir_n[1]:.4f},{dir_n[2]:.4f})")
-
-        self._picking.pick(state, origin_n, dir_n)
-
-        if self._picking.is_picking():
-            _log.info("Grabbed body!")
-            return True
-        return False
+            pos_usd = pos_n
+        
+        v = pos_usd - ray_o
+        t = Gf.Dot(v, ray_d)
+        self._grab_depth = t  # distance along ray
+        self._grab_offset = pos_usd - (ray_o + ray_d * t)  # offset from ray
+        self._grab_target_usd = pos_usd
+        
+        _log.info(f"Grabbed body {best_path} (idx={best_idx}, dist={best_dist:.2f}, depth={t:.2f})")
+        return True
 
     def updateGrab(self, usdviewApi, x, y):
         """Update grab target during drag."""
-        if not self._picking or not self._picking.is_picking():
+        if not hasattr(self, '_grab_body_idx') or self._grab_body_idx < 0:
             return
         origin, direction = self._screenToRay(usdviewApi, x, y)
-        if self._swap_yz:
-            o = self._q_to_newton.Transform(Gf.Vec3d(origin[0], origin[1], origin[2]))
-            d = self._q_to_newton.Transform(Gf.Vec3d(direction[0], direction[1], direction[2]))
-            self._picking.update(
-                wp.vec3f(float(o[0]), float(o[1]), float(o[2])),
-                wp.vec3f(float(d[0]), float(d[1]), float(d[2])))
-        else:
-            self._picking.update(
-                wp.vec3f(origin[0], origin[1], origin[2]),
-                wp.vec3f(direction[0], direction[1], direction[2]))
+        
+        ray_o = Gf.Vec3d(origin[0], origin[1], origin[2])
+        ray_d = Gf.Vec3d(direction[0], direction[1], direction[2]).GetNormalized()
+        
+        # Project at the same depth along the new ray
+        self._grab_target_usd = ray_o + ray_d * self._grab_depth + self._grab_offset
 
     def endGrab(self):
         """Release the grabbed body."""
-        if self._picking and self._picking.is_picking():
-            self._picking.release()
-            _log.info("Released body.")
+        if hasattr(self, '_grab_body_idx'):
+            _log.info(f"Released body {self._grab_body_path}.")
+            self._grab_body_idx = -1
+            self._grab_body_path = None
 
 
 # Qt event filter
