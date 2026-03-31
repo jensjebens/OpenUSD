@@ -383,10 +383,10 @@ except ImportError:
 
 
 class _GrabEventFilter(QtCore.QObject):
-    """Intercepts Shift+left-click-drag for physics grabbing.
+    """Intercepts mouse events for physics grabbing when grab mode is on.
 
-    Shift+left matches Omniverse's grab convention and avoids conflicts
-    with UsdView's right-click context menu and Alt+left camera tumble.
+    Uses Shift+left-click to match Omniverse convention. Falls back to
+    middle-click if Shift+left is consumed by UsdView's multi-select.
     """
 
     def __init__(self, stageView, plugin, usdviewApi):
@@ -394,27 +394,40 @@ class _GrabEventFilter(QtCore.QObject):
         self._plugin = plugin
         self._api = usdviewApi
         self._grabbing = False
+        _log.info(f"Event filter installed on {stageView.__class__.__name__}")
 
     def eventFilter(self, obj, event):
-        if event.type() == QtCore.QEvent.MouseButtonPress:
-            if event.button() == QtCore.Qt.LeftButton:
-                mods = event.modifiers()
-                if mods & QtCore.Qt.ShiftModifier:
-                    x = event.x() * obj.devicePixelRatioF()
-                    y = event.y() * obj.devicePixelRatioF()
-                    if self._plugin.beginGrab(self._api, x, y):
-                        self._grabbing = True
-                        return True
+        etype = event.type()
 
-        elif event.type() == QtCore.QEvent.MouseMove:
+        if etype == QtCore.QEvent.MouseButtonPress:
+            btn = event.button()
+            mods = event.modifiers()
+            # Shift+left or plain middle-click
+            grab = False
+            if btn == QtCore.Qt.LeftButton and (mods & QtCore.Qt.ShiftModifier):
+                grab = True
+            elif btn == QtCore.Qt.MiddleButton and not (mods & QtCore.Qt.AltModifier):
+                grab = True
+
+            if grab:
+                x = event.x() * obj.devicePixelRatioF()
+                y = event.y() * obj.devicePixelRatioF()
+                _log.info(f"Grab attempt at ({x:.0f}, {y:.0f})")
+                if self._plugin.beginGrab(self._api, x, y):
+                    self._grabbing = True
+                    return True
+                else:
+                    _log.info("No body hit")
+
+        elif etype == QtCore.QEvent.MouseMove:
             if self._grabbing:
                 x = event.x() * obj.devicePixelRatioF()
                 y = event.y() * obj.devicePixelRatioF()
                 self._plugin.updateGrab(self._api, x, y)
                 return True
 
-        elif event.type() == QtCore.QEvent.MouseButtonRelease:
-            if event.button() == QtCore.Qt.LeftButton and self._grabbing:
+        elif etype == QtCore.QEvent.MouseButtonRelease:
+            if self._grabbing:
                 self._plugin.endGrab()
                 self._grabbing = False
                 return True
