@@ -378,7 +378,11 @@ except ImportError:
 
 
 class _GrabEventFilter(QtCore.QObject):
-    """Intercepts right-click-drag for physics grabbing."""
+    """Intercepts Shift+left-click-drag for physics grabbing.
+
+    Shift+left matches Omniverse's grab convention and avoids conflicts
+    with UsdView's right-click context menu and Alt+left camera tumble.
+    """
 
     def __init__(self, stageView, plugin, usdviewApi):
         super().__init__(stageView)
@@ -388,10 +392,9 @@ class _GrabEventFilter(QtCore.QObject):
 
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.MouseButtonPress:
-            if event.button() == QtCore.Qt.RightButton:
+            if event.button() == QtCore.Qt.LeftButton:
                 mods = event.modifiers()
-                # Don't intercept Alt+right (camera zoom).
-                if not (mods & (QtCore.Qt.AltModifier | QtCore.Qt.MetaModifier)):
+                if mods & QtCore.Qt.ShiftModifier:
                     x = event.x() * obj.devicePixelRatioF()
                     y = event.y() * obj.devicePixelRatioF()
                     if self._plugin.beginGrab(self._api, x, y):
@@ -406,7 +409,7 @@ class _GrabEventFilter(QtCore.QObject):
                 return True
 
         elif event.type() == QtCore.QEvent.MouseButtonRelease:
-            if event.button() == QtCore.Qt.RightButton and self._grabbing:
+            if event.button() == QtCore.Qt.LeftButton and self._grabbing:
                 self._plugin.endGrab()
                 self._grabbing = False
                 return True
