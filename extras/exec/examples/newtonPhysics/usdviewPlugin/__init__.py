@@ -338,21 +338,41 @@ class NewtonPhysicsPlugin(PluginContainer):
             float(ray.direction[0]),
             float(ray.direction[1]),
             float(ray.direction[2]))
+
+        _log.info(f"  screenToRay: screen=({x:.0f},{y:.0f}) viewport=({w}x{h}) "
+                   f"ndc=({ndc[0]:.3f},{ndc[1]:.3f})")
+        _log.info(f"  ray origin=({origin[0]:.2f},{origin[1]:.2f},{origin[2]:.2f}) "
+                   f"dir=({direction[0]:.4f},{direction[1]:.4f},{direction[2]:.4f})")
+
         return origin, direction
 
     def beginGrab(self, usdviewApi, x, y):
         """Start grabbing a body at screen position (x, y)."""
         if not self._picking or not self._engine:
+            _log.info("beginGrab: no picking or no engine")
             return False
 
         origin, direction = self._screenToRay(usdviewApi, x, y)
 
         cur = self._engine["current"]
         state = self._engine["states"][cur]
-        self._picking.pick(
-            state,
-            wp.vec3f(origin[0], origin[1], origin[2]),
-            wp.vec3f(direction[0], direction[1], direction[2]))
+
+        # Log some body positions for comparison
+        body_q = state.body_q.numpy()
+        for idx in range(min(3, len(body_q))):
+            tf = body_q[idx]
+            label = list(self._engine["body_map"].keys())[idx] if idx < len(self._engine["body_map"]) else "?"
+            _log.info(f"  body[{idx}] {label}: pos=({tf[0]:.2f},{tf[1]:.2f},{tf[2]:.2f})")
+
+        # Newton GPU uses Z-up internally; USD/UsdView uses Y-up.
+        # Swap Y↔Z for the ray so it matches Newton's coordinate space.
+        origin_n = wp.vec3f(origin[0], origin[2], origin[1])
+        dir_n = wp.vec3f(direction[0], direction[2], direction[1])
+
+        _log.info(f"  newton ray: origin=({origin_n[0]:.2f},{origin_n[1]:.2f},{origin_n[2]:.2f}) "
+                   f"dir=({dir_n[0]:.4f},{dir_n[1]:.4f},{dir_n[2]:.4f})")
+
+        self._picking.pick(state, origin_n, dir_n)
 
         if self._picking.is_picking():
             _log.info("Grabbed body!")
@@ -364,9 +384,10 @@ class NewtonPhysicsPlugin(PluginContainer):
         if not self._picking or not self._picking.is_picking():
             return
         origin, direction = self._screenToRay(usdviewApi, x, y)
+        # Y↔Z swap for Newton's Z-up coordinate space
         self._picking.update(
-            wp.vec3f(origin[0], origin[1], origin[2]),
-            wp.vec3f(direction[0], direction[1], direction[2]))
+            wp.vec3f(origin[0], origin[2], origin[1]),
+            wp.vec3f(direction[0], direction[2], direction[1]))
 
     def endGrab(self):
         """Release the grabbed body."""
