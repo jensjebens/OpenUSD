@@ -160,8 +160,15 @@ class NewtonPhysicsPlugin(PluginContainer):
 
         _log.info(f"Initializing on {device}...")
 
+        # Open a separate stage for Newton to parse — using the same
+        # stage that UsdView owns can crash inside LoadUsdPhysicsFromRange
+        # due to concurrent Hydra/ExecUsd access.
+        root_layer = stage.GetRootLayer()
+        newton_stage = Usd.Stage.Open(root_layer.identifier)
+        _log.info(f"Opened separate stage for Newton: {root_layer.identifier}")
+
         builder = newton.ModelBuilder()
-        builder.add_usd(stage)
+        builder.add_usd(newton_stage)
         model = builder.finalize(device=device)
 
         # Body path mapping.
