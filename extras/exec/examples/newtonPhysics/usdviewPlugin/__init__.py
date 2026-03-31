@@ -213,6 +213,26 @@ class NewtonPhysicsPlugin(PluginContainer):
         # Register with HdExec so the scene index knows about our stage.
         HdExec.SetGlobalStage(stage)
 
+        # Detect if we need coordinate conversion.
+        # Newton GPU uses Z-up internally; if the USD stage is Y-up,
+        # we pre-compute the conversion quaternion.
+        up_axis = UsdGeom.GetStageUpAxis(stage)
+        self._swap_yz = (up_axis == UsdGeom.Tokens.y)
+        if self._swap_yz:
+            import math
+            # Undo Newton's +90° X rotation: apply -90° around X
+            self._q_undo = Gf.Quatd(
+                math.cos(-math.pi / 4),
+                math.sin(-math.pi / 4), 0, 0)
+            # Forward: USD Y-up → Newton Z-up (+90° around X)
+            self._q_to_newton = Gf.Quatd(
+                math.cos(math.pi / 4),
+                math.sin(math.pi / 4), 0, 0)
+        else:
+            self._q_undo = None
+            self._q_to_newton = None
+        _log.info(f"Stage upAxis={up_axis}, swap_yz={self._swap_yz}")
+
         # Start a QTimer on the main thread to step physics and refresh.
         # (Background threads can't trigger GL repaints.)
         try:
@@ -272,13 +292,22 @@ class NewtonPhysicsPlugin(PluginContainer):
         transforms = []
         for path, idx in e["body_map"].items():
             tf = body_q[idx]
-            px, py, pz = float(tf[0]), float(tf[1]), float(tf[2])
+            # body_q layout: (px, py, pz, qx, qy, qz, qw)
             qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
+            q_newton = Gf.Quatd(qw, qx, qy, qz)
+            pos_newton = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
 
-            quat = Gf.Quatd(qw, qx, qy, qz)
+            if self._swap_yz:
+                # Convert Newton Z-up → USD Y-up
+                q_usd = self._q_undo * q_newton
+                pos_usd = self._q_undo.Transform(pos_newton)
+            else:
+                q_usd = q_newton
+                pos_usd = pos_newton
+
             mat = Gf.Matrix4d()
-            mat.SetRotate(quat)
-            mat.SetTranslateOnly(Gf.Vec3d(px, py, pz))
+            mat.SetRotate(q_usd)
+            mat.SetTranslateOnly(pos_usd)
             transforms.append((path, mat))
 
         HdExec.SetCachedTransforms(transforms)
@@ -364,10 +393,15 @@ class NewtonPhysicsPlugin(PluginContainer):
             label = list(self._engine["body_map"].keys())[idx] if idx < len(self._engine["body_map"]) else "?"
             _log.info(f"  body[{idx}] {label}: pos=({tf[0]:.2f},{tf[1]:.2f},{tf[2]:.2f})")
 
-        # Newton GPU uses Z-up internally; USD/UsdView uses Y-up.
-        # Swap Y↔Z for the ray so it matches Newton's coordinate space.
-        origin_n = wp.vec3f(origin[0], origin[2], origin[1])
-        dir_n = wp.vec3f(direction[0], direction[2], direction[1])
+        # Convert ray from USD space to Newton space.
+        if self._swap_yz:
+            o = self._q_to_newton.Transform(Gf.Vec3d(origin[0], origin[1], origin[2]))
+            d = self._q_to_newton.Transform(Gf.Vec3d(direction[0], direction[1], direction[2]))
+            origin_n = wp.vec3f(float(o[0]), float(o[1]), float(o[2]))
+            dir_n = wp.vec3f(float(d[0]), float(d[1]), float(d[2]))
+        else:
+            origin_n = wp.vec3f(origin[0], origin[1], origin[2])
+            dir_n = wp.vec3f(direction[0], direction[1], direction[2])
 
         _log.info(f"  newton ray: origin=({origin_n[0]:.2f},{origin_n[1]:.2f},{origin_n[2]:.2f}) "
                    f"dir=({dir_n[0]:.4f},{dir_n[1]:.4f},{dir_n[2]:.4f})")
@@ -384,10 +418,16 @@ class NewtonPhysicsPlugin(PluginContainer):
         if not self._picking or not self._picking.is_picking():
             return
         origin, direction = self._screenToRay(usdviewApi, x, y)
-        # Y↔Z swap for Newton's Z-up coordinate space
-        self._picking.update(
-            wp.vec3f(origin[0], origin[2], origin[1]),
-            wp.vec3f(direction[0], direction[2], direction[1]))
+        if self._swap_yz:
+            o = self._q_to_newton.Transform(Gf.Vec3d(origin[0], origin[1], origin[2]))
+            d = self._q_to_newton.Transform(Gf.Vec3d(direction[0], direction[1], direction[2]))
+            self._picking.update(
+                wp.vec3f(float(o[0]), float(o[1]), float(o[2])),
+                wp.vec3f(float(d[0]), float(d[1]), float(d[2])))
+        else:
+            self._picking.update(
+                wp.vec3f(origin[0], origin[1], origin[2]),
+                wp.vec3f(direction[0], direction[1], direction[2]))
 
     def endGrab(self):
         """Release the grabbed body."""
