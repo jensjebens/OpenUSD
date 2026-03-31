@@ -276,46 +276,36 @@ class NewtonPhysicsPlugin(PluginContainer):
         cur = e["current"]
         nxt = 1 - cur
 
-        # Apply grab force directly in Newton space.
+        # Apply grab: set body velocity to move toward target.
+        # This is simpler and more stable than applying forces, which
+        # can conflict with Newton's internal force accumulation.
         if hasattr(self, '_grab_body_idx') and self._grab_body_idx >= 0:
             target_usd = self._grab_target_usd
-            # Convert target from USD Y-up to Newton Z-up
             if self._swap_yz:
                 target_n = self._q_to_newton.Transform(target_usd)
             else:
                 target_n = target_usd
             
-            # Read current body position in Newton space
             body_q_cur = e["states"][cur].body_q.numpy()
             tf = body_q_cur[self._grab_body_idx]
             pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
             
-            # Spring force: F = mass * (k * (target - pos) - d * vel)
-            # Scale by mass so the force is proportional to body weight,
-            # matching Newton's own picking convention.
-            mass = float(e["model"].body_mass.numpy()[self._grab_body_idx])
-            k = 10.0  # stiffness
-            d = 5.0   # damping
+            # Velocity = (target - pos) * gain
+            # This effectively makes the body track the target smoothly
+            gain = 5.0  # how quickly the body follows (units/sec per unit displacement)
+            desired_vel = (target_n - pos_n) * gain
+            
+            # Write velocity directly
             body_qd = e["states"][cur].body_qd.numpy()
-            vel_n = Gf.Vec3d(
-                float(body_qd[self._grab_body_idx][0]),
-                float(body_qd[self._grab_body_idx][1]),
-                float(body_qd[self._grab_body_idx][2]))
-            
-            force = mass * ((target_n - pos_n) * k - vel_n * d)
-            
-            # Clamp force magnitude to prevent explosions
-            force_mag = force.GetLength()
-            max_force = mass * 100.0  # max ~10g acceleration
-            if force_mag > max_force:
-                force = force * (max_force / force_mag)
-            
-            # Apply force via body_f
-            body_f = e["states"][cur].body_f.numpy()
-            body_f[self._grab_body_idx][0] += float(force[0])
-            body_f[self._grab_body_idx][1] += float(force[1])
-            body_f[self._grab_body_idx][2] += float(force[2])
-            e["states"][cur].body_f.assign(wp.array(body_f, dtype=wp.spatial_vector, device=e["model"].device))
+            body_qd[self._grab_body_idx][0] = float(desired_vel[0])
+            body_qd[self._grab_body_idx][1] = float(desired_vel[1])
+            body_qd[self._grab_body_idx][2] = float(desired_vel[2])
+            # Zero angular velocity to prevent spinning
+            body_qd[self._grab_body_idx][3] = 0.0
+            body_qd[self._grab_body_idx][4] = 0.0
+            body_qd[self._grab_body_idx][5] = 0.0
+            e["states"][cur].body_qd.assign(
+                wp.array(body_qd, dtype=wp.spatial_vectorf, device=e["model"].device))
 
         # Step.
         contacts = e["model"].collide(e["states"][cur])
