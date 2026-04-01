@@ -186,6 +186,50 @@ class NewtonPhysicsPlugin(PluginContainer):
             _log.info("No physics bodies found.")
             return
 
+        # Detect axis convention BEFORE computing rest transforms.
+        up_axis = UsdGeom.GetStageUpAxis(stage)
+        self._swap_yz = (up_axis == UsdGeom.Tokens.y)
+        if self._swap_yz:
+            import math
+            self._q_undo = Gf.Quatd(
+                math.cos(-math.pi / 4),
+                math.sin(-math.pi / 4), 0, 0)
+            self._q_to_newton = Gf.Quatd(
+                math.cos(math.pi / 4),
+                math.sin(math.pi / 4), 0, 0)
+        else:
+            self._q_undo = None
+            self._q_to_newton = None
+
+        meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
+        self._grab_threshold = 2.0 / meters_per_unit
+        _log.info(f"Stage upAxis={up_axis}, swap_yz={self._swap_yz}, grab_threshold={self._grab_threshold:.1f}")
+
+        # Store rest transforms (Newton → USD) for delta computation.
+        # Option C: we overlay correction = M_sim * M_rest⁻¹ with
+        # resetXformStack=false so Hydra's flattening propagates to children.
+        rest_transforms = {}
+        bq_rest = model.state().body_q.numpy()
+        for path, idx in body_map.items():
+            tf = bq_rest[idx]
+            qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
+            q_newton = Gf.Quatd(qw, qx, qy, qz)
+            pos_newton = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
+
+            if self._swap_yz:
+                q_usd = self._q_undo * q_newton
+                pos_usd = self._q_undo.Transform(pos_newton)
+            else:
+                q_usd = q_newton
+                pos_usd = pos_newton
+
+            M_rest = Gf.Matrix4d()
+            M_rest.SetRotate(q_usd)
+            M_rest.SetTranslateOnly(pos_usd)
+            rest_transforms[path] = M_rest
+
+        _log.info(f"Cached {len(rest_transforms)} rest transforms")
+
         # Solver — default XPBD.
         solver = newton.solvers.SolverXPBD(model)
         states = [model.state(), model.state()]
@@ -207,6 +251,7 @@ class NewtonPhysicsPlugin(PluginContainer):
             "states": states,
             "current": 0,
             "body_map": body_map,
+            "rest_transforms": rest_transforms,
             "dt": dt,
             "time": 0.0,
             "stage": stage,
@@ -215,29 +260,6 @@ class NewtonPhysicsPlugin(PluginContainer):
 
         # Register with HdExec so the scene index knows about our stage.
         HdExec.SetGlobalStage(stage)
-
-        # Detect if we need coordinate conversion.
-        # Newton GPU uses Z-up internally; if the USD stage is Y-up,
-        # we pre-compute the conversion quaternion.
-        up_axis = UsdGeom.GetStageUpAxis(stage)
-        self._swap_yz = (up_axis == UsdGeom.Tokens.y)
-        if self._swap_yz:
-            import math
-            # Undo Newton's +90° X rotation: apply -90° around X
-            self._q_undo = Gf.Quatd(
-                math.cos(-math.pi / 4),
-                math.sin(-math.pi / 4), 0, 0)
-            # Forward: USD Y-up → Newton Z-up (+90° around X)
-            self._q_to_newton = Gf.Quatd(
-                math.cos(math.pi / 4),
-                math.sin(math.pi / 4), 0, 0)
-        else:
-            self._q_undo = None
-            self._q_to_newton = None
-        # Hit threshold scales with stage units (cm scenes need larger threshold)
-        meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
-        self._grab_threshold = 2.0 / meters_per_unit  # 2 meters in stage units
-        _log.info(f"Grab threshold: {self._grab_threshold:.1f} stage units (metersPerUnit={meters_per_unit})")
 
         # Start a QTimer on the main thread to step physics and refresh.
         # (Background threads can't trigger GL repaints.)
@@ -338,10 +360,21 @@ class NewtonPhysicsPlugin(PluginContainer):
                 q_usd = q_newton
                 pos_usd = pos_newton
 
-            mat = Gf.Matrix4d()
-            mat.SetRotate(q_usd)
-            mat.SetTranslateOnly(pos_usd)
-            transforms.append((path, mat))
+            M_sim = Gf.Matrix4d()
+            M_sim.SetRotate(q_usd)
+            M_sim.SetTranslateOnly(pos_usd)
+
+            # Compute correction = M_sim * M_rest⁻¹
+            # With resetXformStack=false, Hydra flattening gives:
+            #   childWorld = childLocal * correction * bodyRest
+            #             = childLocal * M_sim (correct!)
+            M_rest = e["rest_transforms"].get(path)
+            if M_rest:
+                M_correction = M_sim * M_rest.GetInverse()
+            else:
+                M_correction = M_sim  # fallback: treat as world-space
+
+            transforms.append((path, M_correction))
 
         HdExec.SetCachedTransforms(transforms)
 
@@ -349,6 +382,17 @@ class NewtonPhysicsPlugin(PluginContainer):
         if int(e["time"] * 24) % 24 == 0:
             tf = body_q[0] if len(body_q) > 0 else [0,0,0,0,0,0,1]
             _log.info(f"Step t={e['time']:.2f}s pos=({tf[0]:.2f}, {tf[1]:.2f}, {tf[2]:.2f})")
+            # Also log a dynamic body for debugging
+            if len(body_q) > 1:
+                tf1 = body_q[1]
+                label1 = list(e["body_map"].keys())[1] if len(e["body_map"]) > 1 else "?"
+                # Show both Newton pos and USD-converted pos
+                pos_n = Gf.Vec3d(float(tf1[0]), float(tf1[1]), float(tf1[2]))
+                if self._swap_yz:
+                    pos_usd = self._q_undo.Transform(pos_n)
+                else:
+                    pos_usd = pos_n
+                _log.info(f"  body[1] {label1}: newton=({pos_n[0]:.1f},{pos_n[1]:.1f},{pos_n[2]:.1f}) usd=({pos_usd[0]:.1f},{pos_usd[1]:.1f},{pos_usd[2]:.1f})")
 
         # Dirty the HdExec scene index so Hydra re-pulls transforms.
         # Advance global time so the TransformProvider sees the new frame.

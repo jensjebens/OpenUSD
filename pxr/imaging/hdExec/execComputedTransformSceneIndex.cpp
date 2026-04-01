@@ -637,14 +637,12 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
 
         if (providerResult) {
             // Create a simple xform overlay with the provider's matrix.
-            bool resetXformStack = _resetXformStack;
-            if (_stage) {
-                UsdPrim usdPrim = _stage->GetPrimAtPath(primPath);
-                if (usdPrim) {
-                    resetXformStack =
-                        _GetResetXformStackForPrim(usdPrim, _resetXformStack);
-                }
-            }
+            // Cached transforms from Python physics engines are CORRECTIONS
+            // (M_sim * M_rest_inv), not world-space transforms. Use
+            // resetXformStack=false so Hydra's flattening composes the
+            // correction with the prim's existing hierarchy, which
+            // propagates correctly to descendant meshes.
+            bool resetXformStack = false;
             HdContainerDataSourceHandle xformContainer =
                 HdXformSchema::Builder()
                     .SetMatrix(
