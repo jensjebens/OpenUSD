@@ -331,11 +331,22 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
         }
 
         // Dirty prims with cached transforms (from Python physics).
+        // Also dirty their children so downstream flattening/rendering
+        // picks up the changed parent xform.
         if (cachedTransforms) {
             for (const auto &pair : *cachedTransforms) {
                 dirtyEntries.push_back({
                     pair.first,
                     HdDataSourceLocatorSet::UniversalSet()});
+
+                // Dirty all children of cached-transform prims.
+                for (const auto &childPath :
+                         inst->_GetInputSceneIndex()
+                             ->GetChildPrimPaths(pair.first)) {
+                    dirtyEntries.push_back({
+                        childPath,
+                        HdDataSourceLocatorSet::UniversalSet()});
+                }
             }
         }
 
@@ -347,6 +358,53 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
 
 namespace
 {
+
+// ---------------------------------------------------------------------------
+// _CachedTransformMatrixDataSource
+// ---------------------------------------------------------------------------
+// A lazy data source that reads from the static transform cache on each
+// GetTypedValue() call.  Unlike HdRetainedTypedSampledDataSource which
+// captures the value at creation time, this always returns the latest
+// cached matrix.  This is critical because downstream scene indices
+// (e.g. HdFlatteningSceneIndex) and renderers may hold references to
+// our data source across frames — if we used a retained/immutable data
+// source, they'd read stale transforms and the geometry wouldn't move.
+
+class _CachedTransformMatrixDataSource : public HdMatrixDataSource
+{
+public:
+    HD_DECLARE_DATASOURCE(_CachedTransformMatrixDataSource);
+
+    VtValue GetValue(const Time shutterOffset) override
+    {
+        return VtValue(GetTypedValue(shutterOffset));
+    }
+
+    GfMatrix4d GetTypedValue(const Time shutterOffset) override
+    {
+        std::optional<GfMatrix4d> cached =
+            HdExecComputedTransformSceneIndex::GetCachedTransform(_primPath);
+        if (cached) {
+            return *cached;
+        }
+        return _fallback;
+    }
+
+    bool GetContributingSampleTimesForInterval(
+        Time startTime, Time endTime,
+        std::vector<Time> *outSampleTimes) override
+    {
+        return false;
+    }
+
+private:
+    _CachedTransformMatrixDataSource(
+        const SdfPath &primPath, const GfMatrix4d &fallback)
+        : _primPath(primPath), _fallback(fallback) {}
+
+    SdfPath _primPath;
+    GfMatrix4d _fallback;
+};
 
 // ---------------------------------------------------------------------------
 // _ExecMatrixDataSource
@@ -510,6 +568,13 @@ HdExecComputedTransformSceneIndex::HdExecComputedTransformSceneIndex(
     , _resetXformStack(resetXformStack)
     , _currentTime(UsdTimeCode::Default())
 {
+    // Explicit-mode instances are immediately bootstrapped since the
+    // caller provides stage + exec system.  Auto-bootstrap instances
+    // set this flag lazily in _TryBootstrap().
+    if (_stage && _execSystem) {
+        _bootstrapped = true;
+    }
+
     // Register this instance for global time advancing
     std::lock_guard<std::mutex> lock(_sInstancesMutex);
     _sInstances.push_back(this);
@@ -625,6 +690,14 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
         std::optional<GfMatrix4d> providerResult =
             GetCachedTransform(primPath);
 
+        if (providerResult) {
+            TF_STATUS("HdExec: GetPrim(%s) — cache HIT, translate=(%f, %f, %f)",
+                      primPath.GetText(),
+                      providerResult->ExtractTranslation()[0],
+                      providerResult->ExtractTranslation()[1],
+                      providerResult->ExtractTranslation()[2]);
+        }
+
         if (!providerResult) {
             double frame = _sGlobalTimeFrame.load();
             double fps = 60.0;
@@ -637,17 +710,31 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
 
         if (providerResult) {
             // Create a simple xform overlay with the provider's matrix.
-            // Cached transforms from Python physics engines are CORRECTIONS
-            // (M_sim * M_rest_inv), not world-space transforms. Use
-            // resetXformStack=false so Hydra's flattening composes the
-            // correction with the prim's existing hierarchy, which
-            // propagates correctly to descendant meshes.
-            bool resetXformStack = false;
+            //
+            // Physics engines (e.g. Newton GPU) supply WORLD-SPACE body
+            // transforms (M_sim).  Use resetXformStack=true so that
+            // Hydra's flattening treats the matrix as fully composed and
+            // does NOT concatenate it with the parent's world xform —
+            // which would double-apply the parent transform and cause
+            // the "two cubes" bug (original + simulated position).
+            //
+            // When the prim has physics API metadata, honour the
+            // per-schema resetXformStack setting from plugInfo.json.
+            // Otherwise fall back to the filter's own default which is
+            // set by the scene-index plugin (typically true).
+            bool resetXformStack = _resetXformStack;
+            if (_stage) {
+                UsdPrim prim = _stage->GetPrimAtPath(primPath);
+                if (prim) {
+                    resetXformStack =
+                        _GetResetXformStackForPrim(prim, _resetXformStack);
+                }
+            }
             HdContainerDataSourceHandle xformContainer =
                 HdXformSchema::Builder()
                     .SetMatrix(
-                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
-                            *providerResult))
+                        _CachedTransformMatrixDataSource::New(
+                            primPath, *providerResult))
                     .SetResetXformStack(
                         HdRetainedTypedSampledDataSource<bool>::New(
                             resetXformStack))
