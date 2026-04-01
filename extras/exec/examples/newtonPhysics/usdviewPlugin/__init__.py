@@ -364,17 +364,11 @@ class NewtonPhysicsPlugin(PluginContainer):
             M_sim.SetRotate(q_usd)
             M_sim.SetTranslateOnly(pos_usd)
 
-            # Compute correction = M_sim * M_rest⁻¹
-            # With resetXformStack=false, Hydra flattening gives:
-            #   childWorld = childLocal * correction * bodyRest
-            #             = childLocal * M_sim (correct!)
-            M_rest = e["rest_transforms"].get(path)
-            if M_rest:
-                M_correction = M_sim * M_rest.GetInverse()
-            else:
-                M_correction = M_sim  # fallback: treat as world-space
-
-            transforms.append((path, M_correction))
+            # Use M_sim directly with resetXformStack=false.
+            # The overlay REPLACES the prim's local xform data source,
+            # so M_sim becomes the body's local-to-parent transform.
+            # Children inherit this via Hydra's flattening.
+            transforms.append((path, M_sim))
 
         HdExec.SetCachedTransforms(transforms)
 
