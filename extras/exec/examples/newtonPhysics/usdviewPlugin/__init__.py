@@ -234,7 +234,10 @@ class NewtonPhysicsPlugin(PluginContainer):
         else:
             self._q_undo = None
             self._q_to_newton = None
-        _log.info(f"Stage upAxis={up_axis}, swap_yz={self._swap_yz}")
+        # Hit threshold scales with stage units (cm scenes need larger threshold)
+        meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
+        self._grab_threshold = 2.0 / meters_per_unit  # 2 meters in stage units
+        _log.info(f"Grab threshold: {self._grab_threshold:.1f} stage units (metersPerUnit={meters_per_unit})")
 
         # Start a QTimer on the main thread to step physics and refresh.
         # (Background threads can't trigger GL repaints.)
@@ -457,8 +460,8 @@ class NewtonPhysicsPlugin(PluginContainer):
                 best_idx = idx
                 best_path = path
         
-        # Threshold: must be within ~2 units of the ray
-        if best_dist > 2.0 or best_idx < 0:
+        # Threshold: must be within grab_threshold of the ray
+        if best_dist > self._grab_threshold or best_idx < 0:
             _log.info(f"No body hit (closest dist={best_dist:.2f})")
             return False
         
