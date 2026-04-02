@@ -1274,6 +1274,147 @@ _TestFlatteningDeepHierarchy()
 }
 
 // ---------------------------------------------------------------------------
+// Test 14: Cache update AFTER flattening — verify the flattening scene
+//          index returns the updated value when the cache changes.
+//
+// This tests the runtime scenario: initial flattening happens (no physics),
+// then the Newton plugin caches a transform, dirties the prim, and the
+// flattening must re-evaluate using the new cached value.
+// ---------------------------------------------------------------------------
+
+static bool
+_TestFlatteningCacheInvalidation()
+{
+    std::cout << "=== TestFlatteningCacheInvalidation ===" << std::endl;
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+
+    // Scene: /Body at (0,10,0), /Body/Mesh at local (1,0,0).
+    HdRetainedSceneIndexRefPtr retainedSi = HdRetainedSceneIndex::New();
+
+    GfMatrix4d bodyLocal(1.0);
+    bodyLocal.SetTranslate(GfVec3d(0, 10, 0));
+
+    GfMatrix4d meshLocal(1.0);
+    meshLocal.SetTranslate(GfVec3d(1, 0, 0));
+
+    retainedSi->AddPrims({
+        {SdfPath("/Body"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            bodyLocal))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(false))
+                    .Build())},
+        {SdfPath("/Body/Mesh"), TfToken("mesh"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            meshLocal))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(false))
+                    .Build())},
+    });
+
+    // Create flattening with physics-aware provider.
+    auto flatteningSi = HdFlatteningSceneIndex::New(
+        retainedSi, _PhysicsAwareFlattenedProviders());
+
+    // Step 1: Query BEFORE any cached transform.
+    // Body = (0,10,0), Mesh = (1,10,0). Normal flattening.
+    {
+        HdSceneIndexPrim meshPrim =
+            flatteningSi->GetPrim(SdfPath("/Body/Mesh"));
+        HdXformSchema xform =
+            HdXformSchema::GetFromParent(meshPrim.dataSource);
+        GfMatrix4d mat = xform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Mesh before cache: ("
+                  << mat.ExtractTranslation()[0] << ", "
+                  << mat.ExtractTranslation()[1] << ", "
+                  << mat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            mat.ExtractTranslation(), GfVec3d(1, 10, 0), 1e-6));
+    }
+
+    // Step 2: Set cached transform (simulating Newton plugin mid-frame).
+    GfMatrix4d mSim(1.0);
+    mSim.SetTranslate(GfVec3d(0, 0.5, 0));
+    HdExecComputedTransformSceneIndex::SetCachedTransform(
+        SdfPath("/Body"), mSim);
+
+    // Step 3: Dirty the body prim FROM THE INPUT to trigger
+    // flattening cache invalidation.
+    retainedSi->DirtyPrims({
+        {SdfPath("/Body"),
+         HdDataSourceLocatorSet(HdXformSchema::GetDefaultLocator())}});
+
+    // Step 4: Query AFTER cache + dirty.
+    // Body should now be M_sim = (0,0.5,0).
+    // Mesh should be (1,0,0) local × (0,0.5,0) parent = (1,0.5,0).
+    {
+        HdSceneIndexPrim bodyPrim =
+            flatteningSi->GetPrim(SdfPath("/Body"));
+        HdXformSchema bodyXform =
+            HdXformSchema::GetFromParent(bodyPrim.dataSource);
+        GfMatrix4d bodyMat = bodyXform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Body after cache+dirty: ("
+                  << bodyMat.ExtractTranslation()[0] << ", "
+                  << bodyMat.ExtractTranslation()[1] << ", "
+                  << bodyMat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            bodyMat.ExtractTranslation(), GfVec3d(0, 0.5, 0), 1e-6));
+    }
+    {
+        HdSceneIndexPrim meshPrim =
+            flatteningSi->GetPrim(SdfPath("/Body/Mesh"));
+        HdXformSchema xform =
+            HdXformSchema::GetFromParent(meshPrim.dataSource);
+        GfMatrix4d mat = xform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Mesh after cache+dirty: ("
+                  << mat.ExtractTranslation()[0] << ", "
+                  << mat.ExtractTranslation()[1] << ", "
+                  << mat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            mat.ExtractTranslation(), GfVec3d(1, 0.5, 0), 1e-6));
+    }
+
+    // Step 5: Update the cached transform again (second physics frame).
+    GfMatrix4d mSim2(1.0);
+    mSim2.SetTranslate(GfVec3d(0, 2.0, 0));
+    HdExecComputedTransformSceneIndex::SetCachedTransform(
+        SdfPath("/Body"), mSim2);
+
+    // Dirty again.
+    retainedSi->DirtyPrims({
+        {SdfPath("/Body"),
+         HdDataSourceLocatorSet(HdXformSchema::GetDefaultLocator())}});
+
+    // Step 6: Verify second update.
+    {
+        HdSceneIndexPrim meshPrim =
+            flatteningSi->GetPrim(SdfPath("/Body/Mesh"));
+        HdXformSchema xform =
+            HdXformSchema::GetFromParent(meshPrim.dataSource);
+        GfMatrix4d mat = xform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Mesh after 2nd update: ("
+                  << mat.ExtractTranslation()[0] << ", "
+                  << mat.ExtractTranslation()[1] << ", "
+                  << mat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            mat.ExtractTranslation(), GfVec3d(1, 2.0, 0), 1e-6));
+    }
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+    std::cout << "  PASSED" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 
 int main(int argc, char **argv)
 {
@@ -1315,6 +1456,7 @@ int main(int argc, char **argv)
     success &= _TestFlatteningWithCachedTransform();
     success &= _TestFlatteningNonPhysicsPrimsUnaffected();
     success &= _TestFlatteningDeepHierarchy();
+    success &= _TestFlatteningCacheInvalidation();
 
     TF_VERIFY(mark.IsClean());
 

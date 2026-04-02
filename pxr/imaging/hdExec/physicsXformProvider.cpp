@@ -17,6 +17,8 @@ HdContainerDataSourceHandle
 HdExecPhysicsXformProvider::GetFlattenedDataSource(
     const Context &ctx) const
 {
+    TF_STATUS("HdExecPhysicsXformProvider::GetFlattenedDataSource "
+              "called for %s", ctx.GetPrimPath().GetText());
     static const HdContainerDataSourceHandle identityXform =
         HdXformSchema::Builder()
             .SetMatrix(

@@ -44,6 +44,9 @@ public:
     {
         using namespace HdMakeDataSourceContainingFlattenedDataSourceProvider;
 
+        TF_STATUS("HdExec_UsdImagingSceneIndexPlugin::"
+                  "FlattenedDataSourceProviders called");
+
         // Register our physics-aware xform provider. This overrides the
         // default HdFlattenedXformDataSourceProvider for the "xform" key.
         return HdRetainedContainerDataSource::New(
