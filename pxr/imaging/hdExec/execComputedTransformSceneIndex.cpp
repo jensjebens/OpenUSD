@@ -331,11 +331,31 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
         }
 
         // Dirty prims with cached transforms (from Python physics).
+        // Also dirty their descendant renderables so the ancestor walk
+        // in GetPrim() recomposes their world transforms.
         if (cachedTransforms) {
             for (const auto &pair : *cachedTransforms) {
                 dirtyEntries.push_back({
                     pair.first,
                     HdDataSourceLocatorSet::UniversalSet()});
+
+                // Walk descendants recursively.
+                std::vector<SdfPath> stack;
+                for (const auto &child :
+                         inst->GetChildPrimPaths(pair.first)) {
+                    stack.push_back(child);
+                }
+                while (!stack.empty()) {
+                    SdfPath path = stack.back();
+                    stack.pop_back();
+                    dirtyEntries.push_back({
+                        path,
+                        HdDataSourceLocatorSet::UniversalSet()});
+                    for (const auto &child :
+                             inst->GetChildPrimPaths(path)) {
+                        stack.push_back(child);
+                    }
+                }
             }
         }
 
@@ -625,18 +645,22 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
             _CreateExecXformDataSource(primPath),
             prim.dataSource);
     } else {
-        // For prims without exec computations, check TransformProvider
-        // callbacks (C++ physics engines). The static transform cache
-        // is handled by HdExecPhysicsXformProvider in the flattening
-        // pass — don't overlay it here to avoid double-applying.
-        double frame = _sGlobalTimeFrame.load();
-        double fps = 60.0;
-        if (_stage) {
-            fps = _stage->GetTimeCodesPerSecond();
-            if (fps <= 0) fps = 60.0;
-        }
+        // Even without an exec computation, check the static transform
+        // cache and then TransformProvider callbacks.  The cache is
+        // the preferred path for Python physics engines — it avoids
+        // calling into Python from TBB threads entirely.
         std::optional<GfMatrix4d> providerResult =
-            QueryTransformProviders(primPath, frame / fps);
+            GetCachedTransform(primPath);
+
+        if (!providerResult) {
+            double frame = _sGlobalTimeFrame.load();
+            double fps = 60.0;
+            if (_stage) {
+                fps = _stage->GetTimeCodesPerSecond();
+                if (fps <= 0) fps = 60.0;
+            }
+            providerResult = QueryTransformProviders(primPath, frame / fps);
+        }
 
         if (providerResult) {
             // Create a simple xform overlay with the provider's matrix.
@@ -673,6 +697,77 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
                 HdRetainedContainerDataSource::New(
                     HdXformSchemaTokens->xform, xformContainer),
                 prim.dataSource);
+        } else {
+            // No direct cached transform or provider for this prim.
+            // Check if any ANCESTOR has a cached physics transform.
+            // If so, recompose this prim's world transform:
+            //   M_new = M_input × inv(M_ancestor_input) × M_sim
+            // This undoes the ancestor's original flattened transform
+            // and applies the new physics transform.
+            //
+            // Only applies when the input provides pre-flattened world
+            // transforms (resetXformStack=true), which is the case when
+            // HdFlatteningSceneIndex is upstream of this filter.
+            HdXformSchema inputXform =
+                HdXformSchema::GetFromParent(prim.dataSource);
+            bool inputIsFlattened = false;
+            if (inputXform.IsDefined() && inputXform.GetResetXformStack()) {
+                inputIsFlattened =
+                    inputXform.GetResetXformStack()->GetTypedValue(0);
+            }
+
+            if (inputIsFlattened) {
+                for (SdfPath ancestorPath = primPath.GetParentPath();
+                     !ancestorPath.IsEmpty() &&
+                         ancestorPath != SdfPath::AbsoluteRootPath();
+                     ancestorPath = ancestorPath.GetParentPath()) {
+
+                    std::optional<GfMatrix4d> ancestorSim =
+                        GetCachedTransform(ancestorPath);
+                    if (!ancestorSim) {
+                        continue;
+                    }
+
+                    // Found an ancestor with a cached physics transform.
+                    // Get the ancestor's ORIGINAL (pre-physics) flattened
+                    // transform from the input scene index.
+                    HdSceneIndexPrim ancestorPrim =
+                        _GetInputSceneIndex()->GetPrim(ancestorPath);
+                    HdXformSchema ancestorXform =
+                        HdXformSchema::GetFromParent(ancestorPrim.dataSource);
+                    if (!ancestorXform.IsDefined() ||
+                        !ancestorXform.GetMatrix()) {
+                        break;
+                    }
+                    GfMatrix4d ancestorOriginal =
+                        ancestorXform.GetMatrix()->GetTypedValue(0);
+
+                    // Get this prim's current (stale) flattened transform.
+                    GfMatrix4d childOriginal =
+                        inputXform.GetMatrix()->GetTypedValue(0);
+
+                    // Recompose:
+                    // M_new = M_child × inv(M_ancestor_old) × M_sim
+                    GfMatrix4d ancestorInv = ancestorOriginal.GetInverse();
+                    GfMatrix4d childNew =
+                        childOriginal * ancestorInv * (*ancestorSim);
+
+                    HdContainerDataSourceHandle xformContainer =
+                        HdXformSchema::Builder()
+                            .SetMatrix(
+                                HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                                    childNew))
+                            .SetResetXformStack(
+                                HdRetainedTypedSampledDataSource<bool>::New(
+                                    true))
+                            .Build();
+                    prim.dataSource = HdOverlayContainerDataSource::New(
+                        HdRetainedContainerDataSource::New(
+                            HdXformSchemaTokens->xform, xformContainer),
+                        prim.dataSource);
+                    break;
+                }
+            }
         }
     }
 

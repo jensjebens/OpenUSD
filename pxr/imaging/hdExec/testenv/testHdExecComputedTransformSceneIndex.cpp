@@ -1415,6 +1415,220 @@ _TestFlatteningCacheInvalidation()
 }
 
 // ---------------------------------------------------------------------------
+// Test 15: Post-flattening ancestor walk — child Mesh gets recomposed
+//          transform when parent has cached physics M_sim.
+//
+// Simulates the real pipeline: input to HdExec filter has pre-flattened
+// world-space transforms (as provided by HdFlatteningSceneIndex upstream).
+// When parent has a cached M_sim, GetPrim() for the child should
+// recompose: M_child_new = M_child_input × inv(M_parent_input) × M_sim
+// ---------------------------------------------------------------------------
+
+static bool
+_TestPostFlatteningAncestorWalk()
+{
+    std::cout << "=== TestPostFlatteningAncestorWalk ===" << std::endl;
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+
+    // Simulate pre-flattened input (what HdExec sees after flattening):
+    // /Body: world = (0, 10, 0), resetXformStack = true
+    // /Body/Mesh: world = (1, 10, 0), resetXformStack = true
+    //   (flattened from local (1,0,0) × parent (0,10,0))
+
+    GfMatrix4d bodyWorld(1.0);
+    bodyWorld.SetTranslate(GfVec3d(0, 10, 0));
+
+    GfMatrix4d meshWorld(1.0);
+    meshWorld.SetTranslate(GfVec3d(1, 10, 0));
+
+    HdRetainedSceneIndexRefPtr retainedSi = HdRetainedSceneIndex::New();
+    retainedSi->AddPrims({
+        {SdfPath("/Body"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            bodyWorld))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(true))
+                    .Build())},
+        {SdfPath("/Body/Mesh"), TfToken("mesh"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            meshWorld))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(true))
+                    .Build())},
+    });
+
+    // Create a stage for the filter (needed for _HasExecComputation).
+    SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    layer->ImportFromString(
+        R"usda(#usda 1.0
+def Xform "Body" {}
+def Cube "Body/Mesh" {}
+)usda");
+    UsdStageConstRefPtr stage = UsdStage::Open(layer);
+    auto execSystem = std::make_shared<ExecUsdSystem>(stage);
+
+    auto filter = HdExecComputedTransformSceneIndex::New(
+        retainedSi, stage, execSystem,
+        {TfToken("computeSimulatedTransform")},
+        /* resetXformStack = */ true);
+
+    // Before physics: Mesh should pass through with world (1, 10, 0).
+    {
+        HdSceneIndexPrim meshPrim = filter->GetPrim(SdfPath("/Body/Mesh"));
+        HdXformSchema xform = HdXformSchema::GetFromParent(meshPrim.dataSource);
+        GfMatrix4d mat = xform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Mesh before physics: ("
+                  << mat.ExtractTranslation()[0] << ", "
+                  << mat.ExtractTranslation()[1] << ", "
+                  << mat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            mat.ExtractTranslation(), GfVec3d(1, 10, 0), 1e-6));
+    }
+
+    // Set cached M_sim on /Body: body moves to (0, 0.5, 0).
+    GfMatrix4d mSim(1.0);
+    mSim.SetTranslate(GfVec3d(0, 0.5, 0));
+    HdExecComputedTransformSceneIndex::SetCachedTransform(
+        SdfPath("/Body"), mSim);
+
+    // After physics:
+    // /Body: GetPrim returns M_sim = (0, 0.5, 0) — direct cache hit.
+    // /Body/Mesh: ancestor walk recomposes:
+    //   M_child_new = M_child_input × inv(M_parent_input) × M_sim
+    //               = (1,10,0) × inv(0,10,0) × (0,0.5,0)
+    //               = (1,0,0) × (0,0.5,0)
+    //               = (1, 0.5, 0)
+    {
+        HdSceneIndexPrim bodyPrim = filter->GetPrim(SdfPath("/Body"));
+        HdXformSchema bodyXform = HdXformSchema::GetFromParent(bodyPrim.dataSource);
+        GfMatrix4d bodyMat = bodyXform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Body after physics: ("
+                  << bodyMat.ExtractTranslation()[0] << ", "
+                  << bodyMat.ExtractTranslation()[1] << ", "
+                  << bodyMat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            bodyMat.ExtractTranslation(), GfVec3d(0, 0.5, 0), 1e-6));
+    }
+    {
+        HdSceneIndexPrim meshPrim = filter->GetPrim(SdfPath("/Body/Mesh"));
+        HdXformSchema xform = HdXformSchema::GetFromParent(meshPrim.dataSource);
+        GfMatrix4d mat = xform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Mesh after physics: ("
+                  << mat.ExtractTranslation()[0] << ", "
+                  << mat.ExtractTranslation()[1] << ", "
+                  << mat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            mat.ExtractTranslation(), GfVec3d(1, 0.5, 0), 1e-6));
+    }
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+    std::cout << "  PASSED" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: Deep ancestor walk — grandchild recomposes through two levels.
+// ---------------------------------------------------------------------------
+
+static bool
+_TestPostFlatteningDeepAncestorWalk()
+{
+    std::cout << "=== TestPostFlatteningDeepAncestorWalk ===" << std::endl;
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+
+    // Pre-flattened input:
+    // /A: world = (0, 10, 0)
+    // /A/B: world = (1, 10, 0)  (local (1,0,0) × parent (0,10,0))
+    // /A/B/C: world = (1, 10, 2) (local (0,0,2) × parent (1,10,0))
+
+    HdRetainedSceneIndexRefPtr retainedSi = HdRetainedSceneIndex::New();
+    retainedSi->AddPrims({
+        {SdfPath("/A"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            GfMatrix4d().SetTranslate(GfVec3d(0, 10, 0))))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(true))
+                    .Build())},
+        {SdfPath("/A/B"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            GfMatrix4d().SetTranslate(GfVec3d(1, 10, 0))))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(true))
+                    .Build())},
+        {SdfPath("/A/B/C"), TfToken("mesh"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            GfMatrix4d().SetTranslate(GfVec3d(1, 10, 2))))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(true))
+                    .Build())},
+    });
+
+    SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    layer->ImportFromString(
+        R"usda(#usda 1.0
+def Xform "A" {}
+def Xform "A/B" {}
+def Cube "A/B/C" {}
+)usda");
+    UsdStageConstRefPtr stage = UsdStage::Open(layer);
+    auto execSystem = std::make_shared<ExecUsdSystem>(stage);
+
+    auto filter = HdExecComputedTransformSceneIndex::New(
+        retainedSi, stage, execSystem,
+        {TfToken("computeSimulatedTransform")},
+        /* resetXformStack = */ true);
+
+    // Physics moves /A to (0, 0.5, 0).
+    GfMatrix4d mSim(1.0);
+    mSim.SetTranslate(GfVec3d(0, 0.5, 0));
+    HdExecComputedTransformSceneIndex::SetCachedTransform(
+        SdfPath("/A"), mSim);
+
+    // /A/B/C should recompose:
+    //   M_child_new = M_C_input × inv(M_A_input) × M_sim
+    //               = (1,10,2) × inv(0,10,0) × (0,0.5,0)
+    //               = (1,0,2) × (0,0.5,0)
+    //               = (1, 0.5, 2)
+    {
+        HdSceneIndexPrim primC = filter->GetPrim(SdfPath("/A/B/C"));
+        HdXformSchema xC = HdXformSchema::GetFromParent(primC.dataSource);
+        GfMatrix4d matC = xC.GetMatrix()->GetTypedValue(0);
+        std::cout << "  /A/B/C after physics: ("
+                  << matC.ExtractTranslation()[0] << ", "
+                  << matC.ExtractTranslation()[1] << ", "
+                  << matC.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            matC.ExtractTranslation(), GfVec3d(1, 0.5, 2), 1e-6));
+    }
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+    std::cout << "  PASSED" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 
 int main(int argc, char **argv)
 {
@@ -1457,6 +1671,8 @@ int main(int argc, char **argv)
     success &= _TestFlatteningNonPhysicsPrimsUnaffected();
     success &= _TestFlatteningDeepHierarchy();
     success &= _TestFlatteningCacheInvalidation();
+    success &= _TestPostFlatteningAncestorWalk();
+    success &= _TestPostFlatteningDeepAncestorWalk();
 
     // Tests 11-14 use HdFlatteningSceneIndex directly with our provider.
     // The remaining gap: in UsdView, the dirty signal must come from
