@@ -4,19 +4,19 @@ End-to-end demonstration of unit-aware value resolution through the Hydra 2 pipe
 
 ## The Problem
 
-When assets authored in different unit systems (centimeters, millimeters) are referenced into a meter-scale stage, their raw numeric values are interpreted as meters. A 50cm cube becomes 50 **meters**. A bolt at position 10,000mm appears 10 **kilometers** away.
+When assets authored in different unit systems are referenced into a stage, their raw numeric values are misinterpreted. A 1-meter cone (height=1) in a centimeter stage appears as 1 **centimeter** tall — invisible next to cm-scale geometry.
 
 ### Before: No units resolution
 
-![Before — uncorrected](before_units_resolution.png)
+![Before — uncorrected](cones_before.png)
 
-*Only the blue 1m reference cube is visible. The red cm-scale box is 200m away, the green mm-scale box is 2km away — both invisible at this camera distance.*
+*A cm-scale stage with a green cone (height=100cm) and an orange cone authored in meters (height=1m). Without units resolution, the orange cone is 1cm tall — invisible.*
 
 ### After: With units resolution
 
-![After — corrected](after_units_resolution.png)
+![After — corrected](cones_after.png)
 
-*All three cubes are visible: blue (1m, meters), red (50cm → 0.5m, corrected from centimeters), green (500mm → 0.5m, corrected from millimeters). Correct positions, correct sizes.*
+*With `GeomMetricsAPI` applied, the orange cone's `metersPerUnit=1.0` is detected against the stage's `metersPerUnit=0.01`. The OpenExec computation scales the transform 100×, making both cones the same size.*
 
 ## Architecture
 
@@ -24,24 +24,31 @@ When assets authored in different unit systems (centimeters, millimeters) are re
 UsdGeomMetricsAPI (metrics:metersPerUnit on prim)
   → execMetricsUnits (computeUnitAwareLocalToWorldTransform)
     → HdExecComputedTransformSceneIndex (auto-bootstrap)
-      → HdFlatteningSceneIndex
-        → Storm render delegate
+      → Storm render delegate
 ```
 
 ## Test Scenes
 
 | File | Description |
 |------|-------------|
-| `factory_demo_before.usda` | Uncorrected — raw cm/mm values as meters |
-| `factory_demo_corrected.usda` | Corrected — transforms scaled by metersPerUnit |
-| `factory_demo.usda` | With GeomMetricsAPI — for runtime correction via OpenExec |
+| `cones_before.usda` | Two cones in a cm stage — no MetricsAPI |
+| `cones_after.usda` | Same scene with GeomMetricsAPI — runtime correction via OpenExec |
 
-## Running in usdview
+## Rendering
 
 ```bash
-cd extras/exec/examples/unitsDemo
-usdview factory_demo.usda
+# Before (no correction)
+usdrecord --camera /World/Camera --renderer Storm cones_before.usda cones_before.png
+
+# After (with MetricsAPI correction)
+usdrecord --camera /World/Camera --renderer Storm cones_after.usda cones_after.png
 ```
+
+**Note:** `execMetricsUnits` must be in `LD_LIBRARY_PATH` and its `plugInfo.json` in `PXR_PLUGINPATH_NAME` for the computation to run.
+
+## Known Limitation
+
+The current `execGeom` `computeLocalToWorldTransform` reads only `xformOp:transform` (single matrix op), not composed xformOps like `xformOp:translate` or `xformOp:rotateXYZ`. Scene files must use `xformOp:transform` for the exec pipeline to see the transform.
 
 ## Related
 
