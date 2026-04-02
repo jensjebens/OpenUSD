@@ -9,6 +9,7 @@ pxr_library(hdExec
         sdf
         tf
         usd
+        usdImaging
         vt
         exec
         execUsd
@@ -24,6 +25,11 @@ pxr_library(hdExec
     PYMODULE_CPPFILES
         module.cpp
         wrapExecComputedTransformSceneIndex.cpp
+
+    PRIVATE_CLASSES
+
+    CPPFILES
+        usdImagingSceneIndexPlugin.cpp
 
     PYMODULE_FILES
         __init__.py

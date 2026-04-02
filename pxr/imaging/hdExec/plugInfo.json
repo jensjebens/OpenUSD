@@ -8,6 +8,9 @@
                         "loadWithRenderer": "GL",
                         "displayName": "OpenExec Computed Transform",
                         "priority": 0
+                    },
+                    "HdExec_UsdImagingSceneIndexPlugin": {
+                        "bases": ["UsdImagingSceneIndexPlugin"]
                     }
                 }
             },
