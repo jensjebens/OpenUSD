@@ -331,22 +331,11 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
         }
 
         // Dirty prims with cached transforms (from Python physics).
-        // Also dirty their children so downstream flattening/rendering
-        // picks up the changed parent xform.
         if (cachedTransforms) {
             for (const auto &pair : *cachedTransforms) {
                 dirtyEntries.push_back({
                     pair.first,
                     HdDataSourceLocatorSet::UniversalSet()});
-
-                // Dirty all children of cached-transform prims.
-                for (const auto &childPath :
-                         inst->_GetInputSceneIndex()
-                             ->GetChildPrimPaths(pair.first)) {
-                    dirtyEntries.push_back({
-                        childPath,
-                        HdDataSourceLocatorSet::UniversalSet()});
-                }
             }
         }
 
@@ -358,53 +347,6 @@ HdExecComputedTransformSceneIndex::AdvanceGlobalTime(UsdTimeCode time)
 
 namespace
 {
-
-// ---------------------------------------------------------------------------
-// _CachedTransformMatrixDataSource
-// ---------------------------------------------------------------------------
-// A lazy data source that reads from the static transform cache on each
-// GetTypedValue() call.  Unlike HdRetainedTypedSampledDataSource which
-// captures the value at creation time, this always returns the latest
-// cached matrix.  This is critical because downstream scene indices
-// (e.g. HdFlatteningSceneIndex) and renderers may hold references to
-// our data source across frames — if we used a retained/immutable data
-// source, they'd read stale transforms and the geometry wouldn't move.
-
-class _CachedTransformMatrixDataSource : public HdMatrixDataSource
-{
-public:
-    HD_DECLARE_DATASOURCE(_CachedTransformMatrixDataSource);
-
-    VtValue GetValue(const Time shutterOffset) override
-    {
-        return VtValue(GetTypedValue(shutterOffset));
-    }
-
-    GfMatrix4d GetTypedValue(const Time shutterOffset) override
-    {
-        std::optional<GfMatrix4d> cached =
-            HdExecComputedTransformSceneIndex::GetCachedTransform(_primPath);
-        if (cached) {
-            return *cached;
-        }
-        return _fallback;
-    }
-
-    bool GetContributingSampleTimesForInterval(
-        Time startTime, Time endTime,
-        std::vector<Time> *outSampleTimes) override
-    {
-        return false;
-    }
-
-private:
-    _CachedTransformMatrixDataSource(
-        const SdfPath &primPath, const GfMatrix4d &fallback)
-        : _primPath(primPath), _fallback(fallback) {}
-
-    SdfPath _primPath;
-    GfMatrix4d _fallback;
-};
 
 // ---------------------------------------------------------------------------
 // _ExecMatrixDataSource
@@ -690,14 +632,6 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
         std::optional<GfMatrix4d> providerResult =
             GetCachedTransform(primPath);
 
-        if (providerResult) {
-            TF_STATUS("HdExec: GetPrim(%s) — cache HIT, translate=(%f, %f, %f)",
-                      primPath.GetText(),
-                      providerResult->ExtractTranslation()[0],
-                      providerResult->ExtractTranslation()[1],
-                      providerResult->ExtractTranslation()[2]);
-        }
-
         if (!providerResult) {
             double frame = _sGlobalTimeFrame.load();
             double fps = 60.0;
@@ -733,8 +667,8 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
             HdContainerDataSourceHandle xformContainer =
                 HdXformSchema::Builder()
                     .SetMatrix(
-                        _CachedTransformMatrixDataSource::New(
-                            primPath, *providerResult))
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            *providerResult))
                     .SetResetXformStack(
                         HdRetainedTypedSampledDataSource<bool>::New(
                             resetXformStack))
