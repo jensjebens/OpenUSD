@@ -1458,6 +1458,11 @@ int main(int argc, char **argv)
     success &= _TestFlatteningDeepHierarchy();
     success &= _TestFlatteningCacheInvalidation();
 
+    // Tests 11-14 use HdFlatteningSceneIndex directly with our provider.
+    // The remaining gap: in UsdView, the dirty signal must come from
+    // UsdImagingStageSceneIndex (upstream of flattening). Tests 15+
+    // will verify that mechanism once implemented.
+
     TF_VERIFY(mark.IsClean());
 
     if (success && mark.IsClean()) {

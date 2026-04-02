@@ -372,6 +372,30 @@ class NewtonPhysicsPlugin(PluginContainer):
 
         HdExec.SetCachedTransforms(transforms)
 
+        # TEMPORARY: Touch the xformOp:translate attribute on the session
+        # layer for each physics body. This triggers UsdNotice::ObjectsChanged
+        # for an xform property, which UsdImagingStageSceneIndex maps to the
+        # xform dirty locator, flowing through HdFlatteningSceneIndex to
+        # invalidate cached flattened transforms.
+        # The actual rendered transform comes from our physics provider, not
+        # from this attribute — this just triggers the dirty flow.
+        # TODO: Replace with proper dirty mechanism.
+        stage = e["stage"]
+        session = stage.GetSessionLayer()
+        with Sdf.ChangeBlock():
+            for path, M in transforms:
+                t = M.ExtractTranslation()
+                prim_spec = session.GetPrimAtPath(path)
+                if not prim_spec:
+                    prim_spec = Sdf.CreatePrimInLayer(session, path)
+                attr_path = path.AppendProperty("xformOp:translate")
+                attr_spec = session.GetAttributeAtPath(attr_path)
+                if not attr_spec:
+                    attr_spec = Sdf.AttributeSpec(
+                        prim_spec, "xformOp:translate",
+                        Sdf.ValueTypeNames.Double3)
+                attr_spec.default = Gf.Vec3d(t[0], t[1], t[2])
+
         # Log every ~1 second
         if int(e["time"] * 24) % 24 == 0:
             tf = body_q[0] if len(body_q) > 0 else [0,0,0,0,0,0,1]

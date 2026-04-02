@@ -625,22 +625,18 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
             _CreateExecXformDataSource(primPath),
             prim.dataSource);
     } else {
-        // Even without an exec computation, check the static transform
-        // cache and then TransformProvider callbacks.  The cache is
-        // the preferred path for Python physics engines — it avoids
-        // calling into Python from TBB threads entirely.
-        std::optional<GfMatrix4d> providerResult =
-            GetCachedTransform(primPath);
-
-        if (!providerResult) {
-            double frame = _sGlobalTimeFrame.load();
-            double fps = 60.0;
-            if (_stage) {
-                fps = _stage->GetTimeCodesPerSecond();
-                if (fps <= 0) fps = 60.0;
-            }
-            providerResult = QueryTransformProviders(primPath, frame / fps);
+        // For prims without exec computations, check TransformProvider
+        // callbacks (C++ physics engines). The static transform cache
+        // is handled by HdExecPhysicsXformProvider in the flattening
+        // pass — don't overlay it here to avoid double-applying.
+        double frame = _sGlobalTimeFrame.load();
+        double fps = 60.0;
+        if (_stage) {
+            fps = _stage->GetTimeCodesPerSecond();
+            if (fps <= 0) fps = 60.0;
         }
+        std::optional<GfMatrix4d> providerResult =
+            QueryTransformProviders(primPath, frame / fps);
 
         if (providerResult) {
             // Create a simple xform overlay with the provider's matrix.
