@@ -18,6 +18,7 @@ pxr_library(hdExec
 
     PUBLIC_CLASSES
         execComputedTransformSceneIndex
+        physicsXformProvider
         sceneIndexPlugin
 
     PYMODULE_CPPFILES

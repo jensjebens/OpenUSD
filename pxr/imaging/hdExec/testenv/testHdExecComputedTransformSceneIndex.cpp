@@ -13,6 +13,9 @@
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 #include "pxr/imaging/hd/tokens.h"
 #include "pxr/imaging/hd/xformSchema.h"
+#include "pxr/imaging/hd/flatteningSceneIndex.h"
+#include "pxr/imaging/hd/flattenedDataSourceProviders.h"
+#include "pxr/imaging/hdExec/physicsXformProvider.h"
 
 #include "pxr/exec/execUsd/cacheView.h"
 #include "pxr/exec/execUsd/request.h"
@@ -43,6 +46,26 @@
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
+
+// Helper: create flattening providers that include our physics xform provider.
+// The physics provider is overlaid with higher priority than the default,
+// so it handles prims with cached transforms while the default handles
+// everything else.
+static HdContainerDataSourceHandle
+_PhysicsAwareFlattenedProviders()
+{
+    using namespace HdMakeDataSourceContainingFlattenedDataSourceProvider;
+
+    // Our physics provider overlaid ON TOP of defaults.
+    HdContainerDataSourceHandle physicsProviders =
+        HdRetainedContainerDataSource::New(
+            HdXformSchemaTokens->xform,
+            Make<HdExecPhysicsXformProvider>());
+
+    return HdOverlayContainerDataSource::New(
+        physicsProviders,
+        HdFlattenedDataSourceProviders());
+}
 
 // ---------------------------------------------------------------------------
 // RecordingSceneIndexObserver
@@ -969,6 +992,288 @@ def Xform "Body" {
 }
 
 // ---------------------------------------------------------------------------
+// Test 11: Cached physics transform propagates to child via flattening.
+//
+// This tests the full pipeline: set a cached transform on a parent Xform,
+// run through HdFlatteningSceneIndex, and verify the child Mesh gets the
+// correct composed world-space transform.
+//
+// Uses a physics-aware flattening provider (HdExecPhysicsXformProvider)
+// that checks the static transform cache during the flattening pass.
+// ---------------------------------------------------------------------------
+
+static bool
+_TestFlatteningWithCachedTransform()
+{
+    std::cout << "=== TestFlatteningWithCachedTransform ===" << std::endl;
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+
+    // Build a scene: /Body at (0,10,0) with /Body/Mesh at local (1,0,0).
+    HdRetainedSceneIndexRefPtr retainedSi = HdRetainedSceneIndex::New();
+
+    GfMatrix4d bodyLocal(1.0);
+    bodyLocal.SetTranslate(GfVec3d(0, 10, 0));
+
+    GfMatrix4d meshLocal(1.0);
+    meshLocal.SetTranslate(GfVec3d(1, 0, 0));
+
+    retainedSi->AddPrims({
+        {SdfPath("/Body"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            bodyLocal))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(false))
+                    .Build())},
+        {SdfPath("/Body/Mesh"), TfToken("mesh"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            meshLocal))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(false))
+                    .Build())},
+    });
+
+    // Create flattening scene index with default providers.
+    // TODO: Replace with physics-aware providers once implemented.
+    auto flatteningSi = HdFlatteningSceneIndex::New(
+        retainedSi, _PhysicsAwareFlattenedProviders());
+
+    // Verify normal flattening BEFORE physics:
+    // Body world = (0, 10, 0), Mesh world = (1, 10, 0)
+    {
+        HdSceneIndexPrim bodyPrim = flatteningSi->GetPrim(SdfPath("/Body"));
+        HdXformSchema bodyXform =
+            HdXformSchema::GetFromParent(bodyPrim.dataSource);
+        TF_AXIOM(bodyXform.IsDefined());
+        GfMatrix4d bodyMat = bodyXform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Body before physics: ("
+                  << bodyMat.ExtractTranslation()[0] << ", "
+                  << bodyMat.ExtractTranslation()[1] << ", "
+                  << bodyMat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            bodyMat.ExtractTranslation(), GfVec3d(0, 10, 0), 1e-6));
+    }
+    {
+        HdSceneIndexPrim meshPrim =
+            flatteningSi->GetPrim(SdfPath("/Body/Mesh"));
+        HdXformSchema meshXform =
+            HdXformSchema::GetFromParent(meshPrim.dataSource);
+        TF_AXIOM(meshXform.IsDefined());
+        GfMatrix4d meshMat = meshXform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Mesh before physics: ("
+                  << meshMat.ExtractTranslation()[0] << ", "
+                  << meshMat.ExtractTranslation()[1] << ", "
+                  << meshMat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            meshMat.ExtractTranslation(), GfVec3d(1, 10, 0), 1e-6));
+    }
+
+    // Now set a cached physics transform: body moves to (0, 0.5, 0).
+    GfMatrix4d mSim(1.0);
+    mSim.SetTranslate(GfVec3d(0, 0.5, 0));
+    HdExecComputedTransformSceneIndex::SetCachedTransform(
+        SdfPath("/Body"), mSim);
+
+    // Dirty the body to force re-flattening.
+    retainedSi->DirtyPrims({
+        {SdfPath("/Body"),
+         HdDataSourceLocatorSet(HdXformSchema::GetDefaultLocator())}});
+
+    // After physics, the flattening provider should use M_sim for /Body:
+    //   Body world = M_sim = (0, 0.5, 0)
+    //   Mesh world = meshLocal * M_sim = (1, 0, 0) * (0, 0.5, 0) = (1, 0.5, 0)
+    {
+        HdSceneIndexPrim bodyPrim = flatteningSi->GetPrim(SdfPath("/Body"));
+        HdXformSchema bodyXform =
+            HdXformSchema::GetFromParent(bodyPrim.dataSource);
+        TF_AXIOM(bodyXform.IsDefined());
+        GfMatrix4d bodyMat = bodyXform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Body after physics: ("
+                  << bodyMat.ExtractTranslation()[0] << ", "
+                  << bodyMat.ExtractTranslation()[1] << ", "
+                  << bodyMat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            bodyMat.ExtractTranslation(), GfVec3d(0, 0.5, 0), 1e-6));
+    }
+    {
+        HdSceneIndexPrim meshPrim =
+            flatteningSi->GetPrim(SdfPath("/Body/Mesh"));
+        HdXformSchema meshXform =
+            HdXformSchema::GetFromParent(meshPrim.dataSource);
+        TF_AXIOM(meshXform.IsDefined());
+        GfMatrix4d meshMat = meshXform.GetMatrix()->GetTypedValue(0);
+        std::cout << "  Mesh after physics: ("
+                  << meshMat.ExtractTranslation()[0] << ", "
+                  << meshMat.ExtractTranslation()[1] << ", "
+                  << meshMat.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            meshMat.ExtractTranslation(), GfVec3d(1, 0.5, 0), 1e-6));
+    }
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+    std::cout << "  PASSED" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: Non-physics prims are unaffected by the physics flattening provider.
+// ---------------------------------------------------------------------------
+
+static bool
+_TestFlatteningNonPhysicsPrimsUnaffected()
+{
+    std::cout << "=== TestFlatteningNonPhysicsPrimsUnaffected ===" << std::endl;
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+
+    // Scene with no physics: /A at (3,0,0), /A/B at local (0,4,0).
+    HdRetainedSceneIndexRefPtr retainedSi = HdRetainedSceneIndex::New();
+
+    retainedSi->AddPrims({
+        {SdfPath("/A"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            GfMatrix4d().SetTranslate(GfVec3d(3, 0, 0))))
+                    .Build())},
+        {SdfPath("/A/B"), TfToken("mesh"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            GfMatrix4d().SetTranslate(GfVec3d(0, 4, 0))))
+                    .Build())},
+    });
+
+    auto flatteningSi = HdFlatteningSceneIndex::New(
+        retainedSi, _PhysicsAwareFlattenedProviders());
+
+    // No cached transforms — normal flattening should work.
+    // /A world = (3, 0, 0), /A/B world = (3, 4, 0)
+    {
+        HdSceneIndexPrim primA = flatteningSi->GetPrim(SdfPath("/A"));
+        HdXformSchema xA = HdXformSchema::GetFromParent(primA.dataSource);
+        GfMatrix4d matA = xA.GetMatrix()->GetTypedValue(0);
+        TF_AXIOM(GfIsClose(
+            matA.ExtractTranslation(), GfVec3d(3, 0, 0), 1e-6));
+    }
+    {
+        HdSceneIndexPrim primB = flatteningSi->GetPrim(SdfPath("/A/B"));
+        HdXformSchema xB = HdXformSchema::GetFromParent(primB.dataSource);
+        GfMatrix4d matB = xB.GetMatrix()->GetTypedValue(0);
+        std::cout << "  /A/B flattened: ("
+                  << matB.ExtractTranslation()[0] << ", "
+                  << matB.ExtractTranslation()[1] << ", "
+                  << matB.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            matB.ExtractTranslation(), GfVec3d(3, 4, 0), 1e-6));
+    }
+
+    std::cout << "  PASSED" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: Deep hierarchy — physics on grandparent propagates to grandchild.
+// ---------------------------------------------------------------------------
+
+static bool
+_TestFlatteningDeepHierarchy()
+{
+    std::cout << "=== TestFlatteningDeepHierarchy ===" << std::endl;
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+
+    // /A at (0,10,0), /A/B at local (1,0,0), /A/B/C at local (0,0,2)
+    HdRetainedSceneIndexRefPtr retainedSi = HdRetainedSceneIndex::New();
+
+    retainedSi->AddPrims({
+        {SdfPath("/A"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            GfMatrix4d().SetTranslate(GfVec3d(0, 10, 0))))
+                    .Build())},
+        {SdfPath("/A/B"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            GfMatrix4d().SetTranslate(GfVec3d(1, 0, 0))))
+                    .Build())},
+        {SdfPath("/A/B/C"), TfToken("mesh"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            GfMatrix4d().SetTranslate(GfVec3d(0, 0, 2))))
+                    .Build())},
+    });
+
+    auto flatteningSi = HdFlatteningSceneIndex::New(
+        retainedSi, _PhysicsAwareFlattenedProviders());
+
+    // Before physics: /A/B/C world = (1, 10, 2)
+    {
+        HdSceneIndexPrim primC = flatteningSi->GetPrim(SdfPath("/A/B/C"));
+        HdXformSchema xC = HdXformSchema::GetFromParent(primC.dataSource);
+        GfMatrix4d matC = xC.GetMatrix()->GetTypedValue(0);
+        std::cout << "  /A/B/C before physics: ("
+                  << matC.ExtractTranslation()[0] << ", "
+                  << matC.ExtractTranslation()[1] << ", "
+                  << matC.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            matC.ExtractTranslation(), GfVec3d(1, 10, 2), 1e-6));
+    }
+
+    // Physics moves /A to (0, 0.5, 0).
+    GfMatrix4d mSim(1.0);
+    mSim.SetTranslate(GfVec3d(0, 0.5, 0));
+    HdExecComputedTransformSceneIndex::SetCachedTransform(
+        SdfPath("/A"), mSim);
+
+    // Dirty /A to trigger re-flattening.
+    retainedSi->DirtyPrims({
+        {SdfPath("/A"),
+         HdDataSourceLocatorSet(HdXformSchema::GetDefaultLocator())}});
+
+    // After physics:
+    //   /A world = M_sim = (0, 0.5, 0)
+    //   /A/B world = (1, 0, 0) local * (0, 0.5, 0) parent = (1, 0.5, 0)
+    //   /A/B/C world = (0, 0, 2) local * (1, 0.5, 0) parent = (1, 0.5, 2)
+    {
+        HdSceneIndexPrim primC = flatteningSi->GetPrim(SdfPath("/A/B/C"));
+        HdXformSchema xC = HdXformSchema::GetFromParent(primC.dataSource);
+        GfMatrix4d matC = xC.GetMatrix()->GetTypedValue(0);
+        std::cout << "  /A/B/C after physics: ("
+                  << matC.ExtractTranslation()[0] << ", "
+                  << matC.ExtractTranslation()[1] << ", "
+                  << matC.ExtractTranslation()[2] << ")" << std::endl;
+        TF_AXIOM(GfIsClose(
+            matC.ExtractTranslation(), GfVec3d(1, 0.5, 2), 1e-6));
+    }
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+    std::cout << "  PASSED" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 
 int main(int argc, char **argv)
 {
@@ -1007,6 +1312,9 @@ int main(int argc, char **argv)
     success &= _TestCachedTransformOverlay();
     success &= _TestAdvanceGlobalTimeDirty();
     success &= _TestCachedTransformLocalSpace();
+    success &= _TestFlatteningWithCachedTransform();
+    success &= _TestFlatteningNonPhysicsPrimsUnaffected();
+    success &= _TestFlatteningDeepHierarchy();
 
     TF_VERIFY(mark.IsClean());
 
