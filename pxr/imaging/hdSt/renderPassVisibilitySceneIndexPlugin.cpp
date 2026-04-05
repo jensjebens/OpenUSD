@@ -24,7 +24,7 @@
 #include "pxr/imaging/hd/tokens.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/purposeSchema.h"
-#include "pxr/imaging/hd/renderTagTokens.h"
+#include "pxr/imaging/hd/tokens.h"
 #include "pxr/imaging/hdsi/utils.h"
 #include "pxr/base/trace/trace.h"
 
