@@ -39,20 +39,59 @@ HdVisibilitySchema::GetVisibility() const
         HdVisibilitySchemaTokens->visibility);
 }
 
+HdBoolDataSourceHandle
+HdVisibilitySchema::GetGuideVisibility() const
+{
+    return _GetTypedDataSource<HdBoolDataSource>(
+        HdVisibilitySchemaTokens->guideVisibility);
+}
+
+HdBoolDataSourceHandle
+HdVisibilitySchema::GetProxyVisibility() const
+{
+    return _GetTypedDataSource<HdBoolDataSource>(
+        HdVisibilitySchemaTokens->proxyVisibility);
+}
+
+HdBoolDataSourceHandle
+HdVisibilitySchema::GetRenderVisibility() const
+{
+    return _GetTypedDataSource<HdBoolDataSource>(
+        HdVisibilitySchemaTokens->renderVisibility);
+}
+
 /*static*/
 HdContainerDataSourceHandle
 HdVisibilitySchema::BuildRetained(
-        const HdBoolDataSourceHandle &visibility
+        const HdBoolDataSourceHandle &visibility,
+        const HdBoolDataSourceHandle &guideVisibility,
+        const HdBoolDataSourceHandle &proxyVisibility,
+        const HdBoolDataSourceHandle &renderVisibility
 )
 {
-    TfToken _names[1];
-    HdDataSourceBaseHandle _values[1];
+    TfToken _names[4];
+    HdDataSourceBaseHandle _values[4];
 
     size_t _count = 0;
 
     if (visibility) {
         _names[_count] = HdVisibilitySchemaTokens->visibility;
         _values[_count++] = visibility;
+    }
+
+    if (guideVisibility) {
+        _names[_count] = HdVisibilitySchemaTokens->guideVisibility;
+        _values[_count++] = guideVisibility;
+    }
+
+    if (proxyVisibility) {
+        _names[_count] = HdVisibilitySchemaTokens->proxyVisibility;
+        _values[_count++] = proxyVisibility;
+    }
+
+    if (renderVisibility) {
+        _names[_count] = HdVisibilitySchemaTokens->renderVisibility;
+        _values[_count++] = renderVisibility;
     }
     return HdRetainedContainerDataSource::New(_count, _names, _values);
 }
@@ -65,11 +104,38 @@ HdVisibilitySchema::Builder::SetVisibility(
     return *this;
 }
 
+HdVisibilitySchema::Builder &
+HdVisibilitySchema::Builder::SetGuideVisibility(
+    const HdBoolDataSourceHandle &guideVisibility)
+{
+    _guideVisibility = guideVisibility;
+    return *this;
+}
+
+HdVisibilitySchema::Builder &
+HdVisibilitySchema::Builder::SetProxyVisibility(
+    const HdBoolDataSourceHandle &proxyVisibility)
+{
+    _proxyVisibility = proxyVisibility;
+    return *this;
+}
+
+HdVisibilitySchema::Builder &
+HdVisibilitySchema::Builder::SetRenderVisibility(
+    const HdBoolDataSourceHandle &renderVisibility)
+{
+    _renderVisibility = renderVisibility;
+    return *this;
+}
+
 HdContainerDataSourceHandle
 HdVisibilitySchema::Builder::Build()
 {
     return HdVisibilitySchema::BuildRetained(
-        _visibility
+        _visibility,
+        _guideVisibility,
+        _proxyVisibility,
+        _renderVisibility
     );
 }
 

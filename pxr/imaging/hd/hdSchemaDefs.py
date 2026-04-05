@@ -345,6 +345,21 @@
         SCHEMA_TOKEN = 'visibility',
         MEMBERS = [
             ('visibility', T_BOOL, {}),
+            ('guideVisibility', T_BOOL,
+             dict(DOC = 'Purpose visibility for "guide" geometry. '
+             'If absent, inherits from parent. '
+             'If false, guide-purpose prims are invisible. '
+             'If true, overrides an ancestor\'s false opinion.')),
+            ('proxyVisibility', T_BOOL,
+             dict(DOC = 'Purpose visibility for "proxy" geometry. '
+             'If absent, inherits from parent. '
+             'If false, proxy-purpose prims are invisible. '
+             'If true, overrides an ancestor\'s false opinion.')),
+            ('renderVisibility', T_BOOL,
+             dict(DOC = 'Purpose visibility for "render" geometry. '
+             'If absent, inherits from parent. '
+             'If false, render-purpose prims are invisible. '
+             'If true, overrides an ancestor\'s false opinion.')),
         ],
         ADD_DEFAULT_LOCATOR = True,
     ),

@@ -27,6 +27,8 @@
 #include "pxr/imaging/hd/schema.h" 
 #include "pxr/imaging/hd/tokens.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
+#include "pxr/imaging/hd/purposeSchema.h"
+#include "pxr/imaging/hd/renderTagTokens.h"
 #include "pxr/imaging/hdsi/utils.h"
 #include "pxr/base/trace/trace.h"
 
@@ -95,8 +97,30 @@ bool
 _IsVisible(const HdContainerDataSourceHandle& primSource)
 {
     if (const auto visSchema = HdVisibilitySchema::GetFromParent(primSource)) {
+        // Check base visibility.
         if (const HdBoolDataSourceHandle visDs = visSchema.GetVisibility()) {
-            return visDs->GetTypedValue(0.0f);
+            if (!visDs->GetTypedValue(0.0f)) {
+                return false;
+            }
+        }
+
+        // Check purpose-specific visibility.
+        if (const auto purposeSchema =
+                HdPurposeSchema::GetFromParent(primSource)) {
+            if (const auto purposeDs = purposeSchema.GetPurpose()) {
+                const TfToken purpose = purposeDs->GetTypedValue(0.0f);
+                HdBoolDataSourceHandle purposeVisDs;
+                if (purpose == HdRenderTagTokens->proxy) {
+                    purposeVisDs = visSchema.GetProxyVisibility();
+                } else if (purpose == HdRenderTagTokens->render) {
+                    purposeVisDs = visSchema.GetRenderVisibility();
+                } else if (purpose == HdRenderTagTokens->guide) {
+                    purposeVisDs = visSchema.GetGuideVisibility();
+                }
+                if (purposeVisDs && !purposeVisDs->GetTypedValue(0.0f)) {
+                    return false;
+                }
+            }
         }
     }
     return true;
