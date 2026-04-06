@@ -1605,6 +1605,21 @@ def GetPySideInstructions():
 PYSIDE = PythonDependency("PySide", GetPySideInstructions,
                           moduleNames=["PySide2", "PySide6"])
 
+############################################################
+# Newton GPU Physics
+
+def GetNewtonInstructions():
+    return ('Newton GPU is not installed. If you have pip '
+            'installed, run "pip install newton" to '
+            'install it, then re-run this script.\n'
+            'Newton GPU requires an NVIDIA GPU with CUDA 12+ drivers.\n'
+            'If Newton is already installed, you may need to '
+            'update your PYTHONPATH to indicate where it is '
+            'located.\n'
+            'See https://github.com/newton-physics/newton for details.')
+
+NEWTON = PythonDependency("Newton", GetNewtonInstructions,
+                          moduleNames=["newton"])
 
 ############################################################
 # Alembic
@@ -1949,6 +1964,44 @@ def InstallUSD(context, force, buildArgs):
 
         RunCMake(context, force, extraArgs, context.usdInstDir)
 
+        # Install Newton GPU physics plugin if requested.
+        # Newton is a Python plugin, so we copy the plugin files into the
+        # USD install tree where they'll be discoverable by UsdView's
+        # Plug.Registry without manual PXR_PLUGINPATH_NAME configuration.
+        if context.buildNewton:
+            newtonPluginSrc = os.path.join(
+                context.usdSrcDir,
+                "extras", "exec", "examples", "newtonPhysics")
+            newtonPythonSrc = os.path.join(newtonPluginSrc, "python")
+            newtonUsdviewSrc = os.path.join(newtonPluginSrc, "usdviewPlugin")
+
+            # Install UsdView plugin (plugInfo.json + container)
+            newtonUsdviewDest = os.path.join(
+                context.usdInstDir, "lib", "python", "pxr",
+                "newtonPhysics", "usdviewPlugin")
+            if os.path.isdir(newtonUsdviewDest):
+                shutil.rmtree(newtonUsdviewDest)
+            os.makedirs(newtonUsdviewDest, exist_ok=True)
+            for f in glob.glob(os.path.join(newtonUsdviewSrc, "*.py")) + \
+                     glob.glob(os.path.join(newtonUsdviewSrc, "*.json")):
+                PrintCommandOutput("Installing Newton plugin: {}\n".format(
+                    os.path.basename(f)))
+                shutil.copy(f, newtonUsdviewDest)
+
+            # Install Newton Python module
+            newtonPythonDest = os.path.join(
+                context.usdInstDir, "lib", "python", "pxr",
+                "newtonPhysics", "python")
+            if os.path.isdir(newtonPythonDest):
+                shutil.rmtree(newtonPythonDest)
+            os.makedirs(newtonPythonDest, exist_ok=True)
+            for f in glob.glob(os.path.join(newtonPythonSrc, "*.py")):
+                PrintCommandOutput("Installing Newton module: {}\n".format(
+                    os.path.basename(f)))
+                shutil.copy(f, newtonPythonDest)
+
+            PrintCommandOutput("Newton GPU physics plugin installed.\n")
+
 USD = Dependency("USD", InstallUSD, "include/pxr/pxr.h")
 
 ############################################################
@@ -2283,6 +2336,12 @@ subgroup.add_argument("--opencolorio", dest="build_ocio", action="store_true",
                       help="Build OpenColorIO plugin for USD")
 subgroup.add_argument("--no-opencolorio", dest="build_ocio", action="store_false",
                       help="Do not build OpenColorIO plugin for USD (default)")
+subgroup = group.add_mutually_exclusive_group()
+subgroup.add_argument("--newton", dest="build_newton", action="store_true",
+                      default=False,
+                      help="Build Newton GPU physics plugin for USD")
+subgroup.add_argument("--no-newton", dest="build_newton", action="store_false",
+                      help="Do not build Newton GPU physics plugin (default)")
 
 group = parser.add_argument_group(title="Alembic Plugin Options")
 subgroup = group.add_mutually_exclusive_group()
@@ -2474,6 +2533,8 @@ class InstallContext:
         # - Imaging plugins
         self.buildEmbree = self.buildImaging and args.build_embree
         self.buildPrman = self.buildImaging and args.build_prman
+        self.buildNewton = (self.buildImaging and self.buildPython
+                            and args.build_newton)
         self.prmanLocation = (os.path.abspath(args.prman_location)
                                if args.prman_location else None)
         self.buildOIIO = ((args.build_oiio or (self.buildUsdImaging
@@ -2567,6 +2628,9 @@ if context.buildImaging:
 
     if context.buildEmbree:
         requiredDependencies += [TBB, EMBREE]
+
+    if context.buildNewton:
+        requiredDependencies += [NEWTON]
                              
 if context.buildUsdview:
     requiredDependencies += [PYOPENGL, PYSIDE]
@@ -2804,6 +2868,7 @@ summaryMsg += """\
       OpenColorIO support:      {buildOCIO} 
       Embree support:           {buildEmbree}
       PRMan support:            {buildPrman}
+      Newton support:           {buildNewton}
       Vulkan support:           {enableVulkan}
     UsdImaging                  {buildUsdImaging}
       usdview:                  {buildUsdview}
@@ -2883,6 +2948,7 @@ summaryMsg = summaryMsg.format(
     buildOCIO=("On" if context.buildOCIO else "Off"),
     buildEmbree=("On" if context.buildEmbree else "Off"),
     buildPrman=("On" if context.buildPrman else "Off"),
+    buildNewton=("On" if context.buildNewton else "Off"),
     buildUsdImaging=("On" if context.buildUsdImaging else "Off"),
     buildUsdview=("On" if context.buildUsdview else "Off"),
     buildPython=("On" if context.buildPython else "Off"),
