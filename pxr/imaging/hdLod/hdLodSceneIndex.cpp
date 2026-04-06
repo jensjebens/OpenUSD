@@ -453,28 +453,21 @@ HdLodSceneIndex::_GetCameraPosition() const
 {
     const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
 
-    // Try to find camera path from render settings if not already cached.
+    // Search for a camera prim in the scene index
     if (_cameraPath.IsEmpty()) {
-        // Look for a renderSettings prim under /Render or root.
-        SdfPathVector rsChildren =
-            input->GetChildPrimPaths(SdfPath::AbsoluteRootPath());
-        for (const SdfPath &child : rsChildren) {
-            HdSceneIndexPrim prim = input->GetPrim(child);
-            if (prim.primType == TfToken("renderSettings")) {
-                if (prim.dataSource) {
-                    HdDataSourceBaseHandle camDs =
-                        prim.dataSource->Get(_tokens->activeCamera);
-                    if (!camDs) {
-                        camDs = prim.dataSource->Get(_tokens->camera);
-                    }
-                    if (camDs) {
-                        using PathDs = HdTypedSampledDataSource<SdfPath>;
-                        if (PathDs::Handle pd = PathDs::Cast(camDs)) {
-                            _cameraPath = pd->GetTypedValue(0.0f);
-                        }
-                    }
-                }
+        // Walk scene looking for a camera type prim
+        std::vector<SdfPath> toVisit;
+        toVisit.push_back(SdfPath::AbsoluteRootPath());
+        while (!toVisit.empty() && _cameraPath.IsEmpty()) {
+            SdfPath path = toVisit.back();
+            toVisit.pop_back();
+            HdSceneIndexPrim prim = input->GetPrim(path);
+            if (prim.primType == TfToken("camera")) {
+                _cameraPath = path;
                 break;
+            }
+            for (const SdfPath &child : input->GetChildPrimPaths(path)) {
+                toVisit.push_back(child);
             }
         }
     }
@@ -482,11 +475,18 @@ HdLodSceneIndex::_GetCameraPosition() const
     if (!_cameraPath.IsEmpty()) {
         HdSceneIndexPrim camPrim = input->GetPrim(_cameraPath);
         if (camPrim.dataSource) {
-            HdXformSchema xformSchema =
-                HdXformSchema::GetFromParent(camPrim.dataSource);
-            if (HdMatrixDataSourceHandle matDs = xformSchema.GetMatrix()) {
-                GfMatrix4d mat = matDs->GetTypedValue(0.0f);
-                return mat.ExtractTranslation();
+            HdDataSourceBaseHandle xformDs =
+                camPrim.dataSource->Get(HdXformSchemaTokens->xform);
+            if (xformDs) {
+                HdXformSchema xformSchema =
+                    HdXformSchema::GetFromParent(camPrim.dataSource);
+                if (xformSchema.IsDefined()) {
+                    if (HdMatrixDataSourceHandle matDs =
+                            xformSchema.GetMatrix()) {
+                        GfMatrix4d mat = matDs->GetTypedValue(0.0f);
+                        return mat.ExtractTranslation();
+                    }
+                }
             }
         }
     }
