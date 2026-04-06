@@ -207,7 +207,7 @@ HdLodSceneIndex::_PrimsAdded(
 {
     _TryBootstrap();
 
-    if (_stage) {
+    if (_stage && !_evaluating) {
         _RebuildCache();
         _EvaluateLod();
     }
@@ -257,7 +257,7 @@ HdLodSceneIndex::_PrimsDirtied(
         }
     }
 
-    if (needsReevaluation) {
+    if (needsReevaluation && !_evaluating) {
         _EvaluateLod();
     }
 
@@ -489,6 +489,9 @@ HdLodSceneIndex::_GetCameraPosition() const
 void
 HdLodSceneIndex::_EvaluateLod()
 {
+    if (_evaluating) return;
+    _evaluating = true;
+
     const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
     GfVec3d cameraPos = _GetCameraPosition();
 
@@ -652,6 +655,8 @@ HdLodSceneIndex::_EvaluateLod()
     }
 
     _hiddenRenderables = std::move(newHidden);
+
+    _evaluating = false;
 
     if (!dirtyEntries.empty()) {
         _SendPrimsDirtied(dirtyEntries);

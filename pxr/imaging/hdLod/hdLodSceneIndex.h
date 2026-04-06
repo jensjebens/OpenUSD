@@ -117,6 +117,9 @@ private:
     std::unordered_map<SdfPath, _GroupThresholds, SdfPath::Hash>
         _groupThresholds;
 
+    // Reentrancy guard to prevent infinite rebuild loops
+    bool _evaluating = false;
+
     // USD stage reference for reading LOD schema data (relationships, attrs)
     UsdStageRefPtr _stage;
 
