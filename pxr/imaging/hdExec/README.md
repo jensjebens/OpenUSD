@@ -3,6 +3,11 @@
 Generic Hydra 2.0 scene index filter that bridges OpenExec computed values
 into the rendering pipeline.
 
+![Newton GPU ant simulation in UsdView via HdExec](../../../../newton_usdview.gif)
+
+*Newton GPU physics (9-body ant, 8 revolute joints) running live in UsdView
+through the HdExec → Hydra 2.0 → Storm pipeline.*
+
 ## HdExecComputedTransformSceneIndex
 
 A `HdSingleInputFilteringSceneIndexBase` that overlays `HdXformSchema` on
