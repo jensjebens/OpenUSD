@@ -8,6 +8,7 @@ pxr_library(hdLod
         sdf
         tf
         gf
+        vt
 
     PUBLIC_CLASSES
         hdLodSceneIndex

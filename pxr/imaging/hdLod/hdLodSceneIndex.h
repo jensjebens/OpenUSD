@@ -14,6 +14,7 @@
 #include "pxr/imaging/hd/filteringSceneIndex.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/base/vt/array.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -93,6 +94,17 @@ private:
 
     // Cached camera path (from render settings active camera).
     mutable SdfPath _cameraPath;
+
+    // Per-group previous active LOD index for hysteresis.
+    std::unordered_map<SdfPath, int, SdfPath::Hash> _prevActiveIndex;
+
+    // Per-group cached thresholds (read from LodGroup prim).
+    struct _GroupThresholds {
+        VtArray<float> minThresholds;
+        VtArray<float> maxThresholds;
+    };
+    std::unordered_map<SdfPath, _GroupThresholds, SdfPath::Hash>
+        _groupThresholds;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

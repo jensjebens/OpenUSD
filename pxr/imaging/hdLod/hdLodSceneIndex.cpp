@@ -321,11 +321,11 @@ HdLodSceneIndex::_RebuildCache()
 {
     _lodGroups.clear();
     _descendantCache.clear();
+    _groupThresholds.clear();
 
     const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
 
     // Walk the entire scene to find LodGroup prims.
-    // We do a BFS/DFS from the pseudo-root.
     std::vector<SdfPath> toVisit;
     toVisit.push_back(SdfPath::AbsoluteRootPath());
 
@@ -341,6 +341,72 @@ HdLodSceneIndex::_RebuildCache()
                 _GetPathArrayAttr(prim.dataSource, _tokens->lodItems);
             if (!lodItems.empty()) {
                 _lodGroups[path] = std::move(lodItems);
+
+                // Read distance heuristic thresholds from the GROUP prim
+                // (LodDistanceHeuristicAPI is applied to the group, not items)
+                _GroupThresholds thresholds;
+                if (prim.dataSource) {
+                    TfTokenVector names = prim.dataSource->GetNames();
+                    for (const TfToken &name : names) {
+                        const std::string &ns = name.GetString();
+                        if (TfStringStartsWith(ns,
+                                _tokens->lodHeuristicPrefix.GetString())) {
+                            if (TfStringEndsWith(ns,
+                                    _tokens->distanceMinSuffix.GetString())) {
+                                thresholds.minThresholds =
+                                    _GetFloatArrayAttr(prim.dataSource, name);
+                            } else if (TfStringEndsWith(ns,
+                                    _tokens->distanceMaxSuffix.GetString())) {
+                                thresholds.maxThresholds =
+                                    _GetFloatArrayAttr(prim.dataSource, name);
+                            }
+                        }
+                    }
+                    // Fall back to primvars if not found at top level
+                    if (thresholds.minThresholds.empty()) {
+                        HdDataSourceBaseHandle pvDs =
+                            prim.dataSource->Get(TfToken("primvars"));
+                        if (HdContainerDataSourceHandle pvCont =
+                                HdContainerDataSource::Cast(pvDs)) {
+                            for (const TfToken &name : pvCont->GetNames()) {
+                                const std::string &ns = name.GetString();
+                                if (!TfStringStartsWith(ns,
+                                        _tokens->lodHeuristicPrefix
+                                            .GetString())) {
+                                    continue;
+                                }
+                                HdDataSourceBaseHandle pvEntry =
+                                    pvCont->Get(name);
+                                HdContainerDataSourceHandle pvc =
+                                    HdContainerDataSource::Cast(pvEntry);
+                                if (!pvc) continue;
+                                HdDataSourceBaseHandle valDs =
+                                    pvc->Get(TfToken("primvarValue"));
+                                if (!valDs) valDs = pvc->Get(TfToken("value"));
+                                HdFloatArrayDataSourceHandle faDs =
+                                    HdFloatArrayDataSource::Cast(valDs);
+                                if (!faDs) continue;
+                                if (TfStringEndsWith(ns,
+                                        _tokens->distanceMinSuffix
+                                            .GetString())) {
+                                    thresholds.minThresholds =
+                                        faDs->GetTypedValue(0.0f);
+                                } else if (TfStringEndsWith(ns,
+                                        _tokens->distanceMaxSuffix
+                                            .GetString())) {
+                                    thresholds.maxThresholds =
+                                        faDs->GetTypedValue(0.0f);
+                                }
+                            }
+                        }
+                    }
+                }
+                // If max thresholds not provided, fall back to min
+                if (thresholds.maxThresholds.empty() &&
+                    !thresholds.minThresholds.empty()) {
+                    thresholds.maxThresholds = thresholds.minThresholds;
+                }
+                _groupThresholds[path] = std::move(thresholds);
             }
         }
 
@@ -354,12 +420,7 @@ HdLodSceneIndex::_RebuildCache()
         for (const SdfPath &itemPath : groupEntry.second) {
             if (_descendantCache.find(itemPath) == _descendantCache.end()) {
                 std::vector<SdfPath> renderables;
-                // Collect renderables under this lod item but skip any sub-
-                // LodGroup prims (they handle themselves hierarchically).
-                for (const SdfPath &child :
-                        input->GetChildPrimPaths(itemPath)) {
-                    _CollectRenderables(child, renderables);
-                }
+                _CollectRenderables(itemPath, renderables);
                 _descendantCache[itemPath] = std::move(renderables);
             }
         }
@@ -420,11 +481,35 @@ HdLodSceneIndex::_EvaluateLod()
 
     std::unordered_set<SdfPath, SdfPath::Hash> newHidden;
 
+    // Track which LOD groups are inside inactive items (for hierarchical eval)
+    std::unordered_set<SdfPath, SdfPath::Hash> inactiveSubtrees;
+
     for (const auto &groupEntry : _lodGroups) {
         const SdfPath &groupPath = groupEntry.first;
         const std::vector<SdfPath> &lodItems = groupEntry.second;
 
         if (lodItems.empty()) {
+            continue;
+        }
+
+        // Axiom 1: skip if inside an inactive subtree (hierarchical gating)
+        bool skip = false;
+        for (const SdfPath &inactive : inactiveSubtrees) {
+            if (groupPath.HasPrefix(inactive)) {
+                skip = true;
+                break;
+            }
+        }
+        if (skip) {
+            // Hide ALL renderables in all items of this skipped group
+            for (const SdfPath &itemPath : lodItems) {
+                auto cacheIt = _descendantCache.find(itemPath);
+                if (cacheIt != _descendantCache.end()) {
+                    for (const SdfPath &rPath : cacheIt->second) {
+                        newHidden.insert(rPath);
+                    }
+                }
+            }
             continue;
         }
 
@@ -436,112 +521,93 @@ HdLodSceneIndex::_EvaluateLod()
                 HdXformSchema xformSchema =
                     HdXformSchema::GetFromParent(groupPrim.dataSource);
                 if (HdMatrixDataSourceHandle matDs = xformSchema.GetMatrix()) {
-                    groupPos = matDs->GetTypedValue(0.0f).ExtractTranslation();
+                    groupPos =
+                        matDs->GetTypedValue(0.0f).ExtractTranslation();
                 }
             }
         }
 
         double distance = (cameraPos - groupPos).GetLength();
 
-        // Find the active LOD item based on distance thresholds.
-        // Default: use the last LOD item (lowest detail) if no thresholds match.
-        int activeIndex = static_cast<int>(lodItems.size()) - 1;
+        // Read thresholds from cached group data
+        auto threshIt = _groupThresholds.find(groupPath);
+        VtArray<float> minThresholds, maxThresholds;
+        if (threshIt != _groupThresholds.end()) {
+            minThresholds = threshIt->second.minThresholds;
+            maxThresholds = threshIt->second.maxThresholds;
+        }
 
-        for (int i = 0; i < static_cast<int>(lodItems.size()); ++i) {
-            const SdfPath &itemPath = lodItems[i];
-            HdSceneIndexPrim itemPrim = input->GetPrim(itemPath);
-            if (!itemPrim.dataSource) {
-                continue;
-            }
+        int nThresholds = static_cast<int>(minThresholds.size());
+        int nItems = static_cast<int>(lodItems.size());
+        int activeIndex = 0;
 
-            // Look for LodDistanceHeuristicAPI on the item prim.
-            // Try to find any distance:minThresholds / maxThresholds attribute.
-            // Attribute names follow pattern:
-            //   lod:Heuristic:<domain>:distance:minThresholds
-            // We try a few common forms, or just look up all names.
-            TfTokenVector names = itemPrim.dataSource->GetNames();
-            VtArray<float> minThresholds, maxThresholds;
+        if (nThresholds > 0) {
+            // Get previous active index for hysteresis
+            auto prevIt = _prevActiveIndex.find(groupPath);
+            bool hasPrev = (prevIt != _prevActiveIndex.end());
+            int prevIndex = hasPrev ? prevIt->second : -1;
 
-            for (const TfToken &name : names) {
-                const std::string &ns = name.GetString();
-                if (TfStringStartsWith(ns,
-                        _tokens->lodHeuristicPrefix.GetString())) {
-                    if (TfStringEndsWith(ns,
-                            _tokens->distanceMinSuffix.GetString())) {
-                        minThresholds = _GetFloatArrayAttr(
-                            itemPrim.dataSource, name);
-                    } else if (TfStringEndsWith(ns,
-                            _tokens->distanceMaxSuffix.GetString())) {
-                        maxThresholds = _GetFloatArrayAttr(
-                            itemPrim.dataSource, name);
+            if (!hasPrev) {
+                // No previous state — use min thresholds (standard evaluation)
+                activeIndex = nItems - 1;  // default: lowest detail
+                for (int i = 0; i < nThresholds; ++i) {
+                    if (distance < static_cast<double>(minThresholds[i])) {
+                        activeIndex = i;
+                        break;
                     }
-                }
-            }
-
-            // Also check inside primvars for these attributes.
-            if (minThresholds.empty() || maxThresholds.empty()) {
-                HdDataSourceBaseHandle pvDs =
-                    itemPrim.dataSource->Get(TfToken("primvars"));
-                if (HdContainerDataSourceHandle pvCont =
-                        HdContainerDataSource::Cast(pvDs)) {
-                    TfTokenVector pvNames = pvCont->GetNames();
-                    for (const TfToken &name : pvNames) {
-                        const std::string &ns = name.GetString();
-                        if (TfStringStartsWith(ns,
-                                _tokens->lodHeuristicPrefix.GetString())) {
-                            HdDataSourceBaseHandle pvEntry = pvCont->Get(name);
-                            if (HdContainerDataSourceHandle pvc =
-                                    HdContainerDataSource::Cast(pvEntry)) {
-                                HdDataSourceBaseHandle valDs =
-                                    pvc->Get(TfToken("primvarValue"));
-                                if (!valDs) {
-                                    valDs = pvc->Get(TfToken("value"));
-                                }
-                                if (valDs) {
-                                    HdFloatArrayDataSourceHandle faDs =
-                                        HdFloatArrayDataSource::Cast(valDs);
-                                    if (faDs) {
-                                        if (TfStringEndsWith(ns,
-                                                _tokens->distanceMinSuffix
-                                                    .GetString())) {
-                                            minThresholds =
-                                                faDs->GetTypedValue(0.0f);
-                                        } else if (TfStringEndsWith(ns,
-                                                _tokens->distanceMaxSuffix
-                                                    .GetString())) {
-                                            maxThresholds =
-                                                faDs->GetTypedValue(0.0f);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!minThresholds.empty() && !maxThresholds.empty()) {
-                // Use the first pair of thresholds for this LOD item.
-                // minThresholds[0] is the near (min) distance to activate this
-                // LOD, maxThresholds[0] is the far (max) distance.
-                // Hysteresis: activate when distance < maxThreshold,
-                //             deactivate when distance > minThreshold.
-                float minT = minThresholds[0];
-                float maxT = maxThresholds[0];
-                if (distance >= static_cast<double>(minT) &&
-                    distance <  static_cast<double>(maxT)) {
-                    activeIndex = i;
-                    break;
                 }
             } else {
-                // No thresholds: first item is always active by default.
-                activeIndex = 0;
-                break;
+                // Hysteresis evaluation:
+                // - To go UP (higher index = less detail): use max thresholds
+                // - To go DOWN (lower index = more detail): use min thresholds
+                // - In between: stay at previous
+
+                // What index would max thresholds give? (for going UP)
+                int maxIndex = nItems - 1;
+                for (int i = 0; i < nThresholds && i < (int)maxThresholds.size(); ++i) {
+                    if (distance < static_cast<double>(maxThresholds[i])) {
+                        maxIndex = i;
+                        break;
+                    }
+                }
+
+                // What index would min thresholds give? (for going DOWN)
+                int minIndex = nItems - 1;
+                for (int i = 0; i < nThresholds; ++i) {
+                    if (distance < static_cast<double>(minThresholds[i])) {
+                        minIndex = i;
+                        break;
+                    }
+                }
+
+                if (maxIndex > prevIndex) {
+                    // Max thresholds say go higher → go higher
+                    activeIndex = maxIndex;
+                } else if (minIndex < prevIndex) {
+                    // Min thresholds say go lower → go lower
+                    activeIndex = minIndex;
+                } else {
+                    // In hysteresis dead zone → stay at previous
+                    activeIndex = prevIndex;
+                }
+            }
+        }
+
+        // Clamp to valid range
+        activeIndex = std::max(0, std::min(activeIndex, nItems - 1));
+
+        // Store active index for next frame's hysteresis
+        _prevActiveIndex[groupPath] = activeIndex;
+
+        // Mark non-active item subtrees as inactive (Axiom 1: hierarchical)
+        for (int i = 0; i < nItems; ++i) {
+            if (i != activeIndex) {
+                inactiveSubtrees.insert(lodItems[i]);
             }
         }
 
         // Hide all non-active items' renderables.
-        for (int i = 0; i < static_cast<int>(lodItems.size()); ++i) {
+        for (int i = 0; i < nItems; ++i) {
             if (i == activeIndex) {
                 continue;
             }
