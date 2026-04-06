@@ -18,6 +18,7 @@
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
+#include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
 
 #include <algorithm>
@@ -67,9 +68,11 @@ public:
     _InvisibleDataSource(HdContainerDataSourceHandle const &input)
         : _input(input)
     {
-        // Build the invisible visibility container once.
-        _visibilityDs = HdVisibilitySchema::BuildRetained(
-            HdRetainedTypedSampledDataSource<bool>::New(false));
+        // Build the invisible visibility container using the Builder.
+        _visibilityDs = HdVisibilitySchema::Builder()
+            .SetVisibility(
+                HdRetainedTypedSampledDataSource<bool>::New(false))
+            .Build();
     }
 
     TfTokenVector GetNames() override
@@ -230,6 +233,31 @@ HdLodSceneIndex::_CollectRenderables(
     }
 }
 
+// Helper: check if a prim data source has a lod:lodItems relationship.
+// This is a fallback for unregistered schemas where apiSchemas may not
+// be populated in the Hydra data source.
+static bool
+_HasLodItemsRelationship(const HdContainerDataSourceHandle &ds)
+{
+    if (!ds) {
+        return false;
+    }
+    // Check for the lodItems key directly
+    HdDataSourceBaseHandle lodItemsDs = ds->Get(_tokens->lodItems);
+    if (lodItemsDs) {
+        return true;
+    }
+    // Check inside a "lod" namespace container
+    HdDataSourceBaseHandle lodDs = ds->Get(TfToken("lod"));
+    if (HdContainerDataSourceHandle lodCont =
+            HdContainerDataSource::Cast(lodDs)) {
+        if (lodCont->Get(_tokens->lodItems)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Helper: check if a token vector data source (apiSchemas) contains a token.
 static bool
 _HasApiSchema(const HdContainerDataSourceHandle &ds, const TfToken &schema)
@@ -335,7 +363,21 @@ HdLodSceneIndex::_RebuildCache()
 
         HdSceneIndexPrim prim = input->GetPrim(path);
 
-        if (_HasApiSchema(prim.dataSource, _tokens->lodGroupAPI)) {
+        // Debug: log data source keys for non-root prims
+        if (path != SdfPath::AbsoluteRootPath() && prim.dataSource) {
+            TfTokenVector names = prim.dataSource->GetNames();
+            if (names.size() > 0) {
+                std::string keys;
+                for (const auto &n : names) {
+                    keys += n.GetString() + ", ";
+                }
+                TF_STATUS("hdLod: prim %s type=%s keys=[%s]",
+                    path.GetText(), prim.primType.GetText(), keys.c_str());
+            }
+        }
+
+        if (_HasApiSchema(prim.dataSource, _tokens->lodGroupAPI) ||
+            _HasLodItemsRelationship(prim.dataSource)) {
             // Read lodItems relationship
             SdfPathVector lodItems =
                 _GetPathArrayAttr(prim.dataSource, _tokens->lodItems);
