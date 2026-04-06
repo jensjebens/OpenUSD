@@ -1,0 +1,74 @@
+#usda 1.0
+(
+    defaultPrim = "RobotArm"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    doc = "Robot arm modeled in centimeters"
+)
+
+def Xform "RobotArm" (
+    prepend apiSchemas = ["GeomMetricsAPI"]
+)
+{
+    custom double metrics:metersPerUnit = 0.01
+    
+    # Base cylinder (20cm diameter, 10cm tall)
+    def Cylinder "Base"
+    {
+        double height = 10
+        double radius = 10
+        float3[] extent = [(-10, -5, -10), (10, 5, 10)]
+        color3f[] primvars:displayColor = [(0.8, 0.15, 0.1)]
+        double3 xformOp:translate = (0, 5, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+    }
+    
+    # Lower arm (40cm tall)
+    def Cube "LowerArm"
+    {
+        double size = 1
+        double3 xformOp:scale = (6, 40, 6)
+        double3 xformOp:translate = (0, 30, 0)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        color3f[] primvars:displayColor = [(0.9, 0.2, 0.15)]
+    }
+    
+    # Elbow joint
+    def Sphere "Elbow"
+    {
+        double radius = 5
+        double3 xformOp:translate = (0, 50, 0)
+        token[] xformOpOrder = ["xformOp:translate"]
+        color3f[] primvars:displayColor = [(0.6, 0.1, 0.08)]
+    }
+    
+    # Upper arm (30cm, angled)
+    def Cube "UpperArm"
+    {
+        double size = 1
+        double3 xformOp:scale = (5, 30, 5)
+        double3 xformOp:translate = (15, 65, 0)
+        float xformOp:rotateZ = -30
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ", "xformOp:scale"]
+        color3f[] primvars:displayColor = [(0.9, 0.25, 0.2)]
+    }
+    
+    # Gripper
+    def Cube "GripperLeft"
+    {
+        double size = 1
+        double3 xformOp:scale = (2, 12, 3)
+        double3 xformOp:translate = (28, 78, -3)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+    }
+    
+    def Cube "GripperRight"
+    {
+        double size = 1
+        double3 xformOp:scale = (2, 12, 3)
+        double3 xformOp:translate = (28, 78, 3)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        color3f[] primvars:displayColor = [(0.7, 0.7, 0.7)]
+    }
+}

@@ -1,0 +1,102 @@
+#usda 1.0
+(
+    """Schema for prim-level unit declarations and dimensional exponents.
+
+    Implements the MetricsAPI direction proposed in:
+    - "Revise Use of Layer Metadata" (PR #45)
+    - "Units and Scale in Composed Scenes"
+
+    Two applied API schemas:
+    - UsdGeomMetricsAPI: metersPerUnit and upAxis per subtree
+    - UsdPhysicsMetricsAPI: kilogramsPerUnit per subtree
+
+    Values are inherited down the hierarchy: applying to a root prim
+    establishes the unit context for the entire subtree. Consumers
+    walk ancestors to find the effective context, falling back to
+    stage-level layer metadata for backward compatibility.
+    """
+    subLayers = [
+        @usd/schema.usda@
+    ]
+)
+
+over "GLOBAL" (
+    customData = {
+        string libraryName       = "usdMetricsApi"
+        string libraryPath       = "."
+        string libraryPrefix     = "UsdMetrics"
+    }
+) {
+}
+
+class "GeomMetricsAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "GeomMetricsAPI"
+        # token[] apiSchemaAutoApplyTo = []  # Not auto-applied — explicit opt-in
+    }
+    doc = """Applied API schema declaring the spatial unit context for a
+    prim's subtree.
+
+    When applied to a prim, metersPerUnit and upAxis specify the unit
+    system in which all spatial attribute values on this prim and its
+    descendants are expressed, until overridden by a descendant prim
+    that also applies GeomMetricsAPI.
+
+    Consumers should call GetEffectiveMetersPerUnit() which walks
+    ancestor prims to find the nearest declaration, falling back to
+    stage-level metersPerUnit metadata, then to the USD default (0.01,
+    centimeters).
+
+    This schema is designed to align with the MetricsAPI direction
+    proposed in PR #45 (Revise Use of Layer Metadata)."""
+)
+{
+    double metrics:metersPerUnit = 0 (
+        customData = {
+            string apiName = "metersPerUnit"
+        }
+        doc = """Scale factor from the prim's linear unit to meters.
+        0.001 = millimeters, 0.01 = centimeters, 1.0 = meters.
+        Default 0 means 'inherited' — use nearest ancestor's value,
+        falling back to the USD convention (0.01 = centimeters).
+        Inherited by descendants until overridden."""
+    )
+
+    token metrics:upAxis = "inherited" (
+        customData = {
+            string apiName = "upAxis"
+        }
+        allowedTokens = ["Y", "Z", "inherited"]
+        doc = """Vertical axis convention for the prim's subtree.
+        Default 'inherited' — use nearest ancestor's value,
+        falling back to the USD convention (Y-up).
+        Inherited by descendants until overridden."""
+    )
+}
+
+class "PhysicsMetricsAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "PhysicsMetricsAPI"
+    }
+    doc = """Applied API schema declaring the mass unit context for a
+    prim's subtree.
+
+    When applied to a prim, kilogramsPerUnit specifies the mass unit in
+    which mass-bearing attribute values on this prim and its descendants
+    are expressed, until overridden by a descendant prim that also
+    applies PhysicsMetricsAPI.
+
+    Typically applied alongside GeomMetricsAPI on the same prim."""
+)
+{
+    double metrics:kilogramsPerUnit (
+        customData = {
+            string apiName = "kilogramsPerUnit"
+        }
+        doc = """Scale factor from the prim's mass unit to kilograms.
+        1.0 = kilograms, 0.001 = grams.
+        Inherited by descendants until overridden."""
+    )
+}

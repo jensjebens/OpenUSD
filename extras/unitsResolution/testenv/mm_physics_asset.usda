@@ -1,0 +1,29 @@
+#usda 1.0
+(
+    metersPerUnit = 0.001
+    upAxis = "Y"
+    kilogramsPerUnit = 0.001
+)
+
+def PhysicsScene "PhysicsScene" {
+    float physics:gravityMagnitude = 9810
+    vector3f physics:gravityDirection = (0, -1, 0)
+}
+
+def Xform "Bolt" (
+    apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsCollisionAPI"]
+)
+{
+    double3 xformOp:translate = (10000, 5000, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    # Velocity in mm/s
+    vector3f physics:velocity = (1000, 0, -500)
+    vector3f physics:angularVelocity = (0, 0.5, 0)
+
+    # Mass in grams (kilogramsPerUnit = 0.001)
+    float physics:mass = 50
+    float physics:density = 7800
+    point3f physics:centerOfMass = (25, 12.5, 0)
+    float3 physics:diagonalInertia = (500, 500, 300)
+}
