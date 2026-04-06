@@ -114,11 +114,6 @@ public:
     _InvisibleDataSource(HdContainerDataSourceHandle const &input)
         : _input(input)
     {
-        // Build the invisible visibility container using the Builder.
-        _visibilityDs = HdVisibilitySchema::Builder()
-            .SetVisibility(
-                HdRetainedTypedSampledDataSource<bool>::New(false))
-            .Build();
     }
 
     TfTokenVector GetNames() override
@@ -137,7 +132,7 @@ public:
     HdDataSourceBaseHandle Get(const TfToken &name) override
     {
         if (name == HdVisibilitySchemaTokens->visibility) {
-            return _visibilityDs;
+            return _GetInvisibleVisDs();
         }
         if (_input) {
             return _input->Get(name);
@@ -146,8 +141,19 @@ public:
     }
 
 private:
+    // Thread-safe singleton for the invisible visibility data source
+    static HdContainerDataSourceHandle _GetInvisibleVisDs()
+    {
+        // Avoid HdVisibilitySchema::Builder which calls BuildRetained
+        // (not thread-safe in TBB worker threads). Use HdRetainedContainerDataSource directly.
+        static HdContainerDataSourceHandle ds =
+            HdRetainedContainerDataSource::New(
+                HdVisibilitySchemaTokens->visibility,
+                HdRetainedTypedSampledDataSource<bool>::New(false));
+        return ds;
+    }
+
     HdContainerDataSourceHandle _input;
-    HdContainerDataSourceHandle _visibilityDs;
 };
 
 HD_DECLARE_DATASOURCE_HANDLES(_InvisibleDataSource);
@@ -188,8 +194,10 @@ HdLodSceneIndex::GetPrim(const SdfPath &primPath) const
 
     HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
     if (_hiddenRenderables.count(primPath)) {
-        prim.dataSource =
-            _InvisibleDataSource::New(prim.dataSource);
+        if (prim.dataSource) {
+            prim.dataSource =
+                _InvisibleDataSource::New(prim.dataSource);
+        }
     }
     return prim;
 }
@@ -490,10 +498,33 @@ void
 HdLodSceneIndex::_EvaluateLod()
 {
     if (_evaluating) return;
+
+    // Skip if no groups or no renderables detected yet
+    if (_lodGroups.empty() || _descendantCache.empty()) {
+        return;
+    }
+
+    // Check that at least one group has renderables
+    bool hasRenderables = false;
+    for (const auto &entry : _descendantCache) {
+        if (!entry.second.empty()) {
+            hasRenderables = true;
+            break;
+        }
+    }
+    if (!hasRenderables) {
+        return;
+    }
+
     _evaluating = true;
 
+    TF_STATUS("hdLod: _EvaluateLod START, %zu groups", _lodGroups.size());
+
     const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
+    TF_STATUS("hdLod: getting camera position...");
     GfVec3d cameraPos = _GetCameraPosition();
+    TF_STATUS("hdLod: camera at (%.1f, %.1f, %.1f)",
+        cameraPos[0], cameraPos[1], cameraPos[2]);
 
     std::unordered_set<SdfPath, SdfPath::Hash> newHidden;
 
@@ -530,18 +561,13 @@ HdLodSceneIndex::_EvaluateLod()
         }
 
         // Get the world position of the group prim for distance computation.
+        // For POC: skip xform read (known crash in GetTypedValue on some
+        // post-flattening xform data sources). Use origin.
+        // TODO: Fix xform reading for production.
         GfVec3d groupPos(0.0, 0.0, 0.0);
-        {
-            HdSceneIndexPrim groupPrim = input->GetPrim(groupPath);
-            if (groupPrim.dataSource) {
-                HdXformSchema xformSchema =
-                    HdXformSchema::GetFromParent(groupPrim.dataSource);
-                if (HdMatrixDataSourceHandle matDs = xformSchema.GetMatrix()) {
-                    groupPos =
-                        matDs->GetTypedValue(0.0f).ExtractTranslation();
-                }
-            }
-        }
+        TF_STATUS("hdLod: group %s pos=(%.1f,%.1f,%.1f) dist=%.1f",
+            groupPath.GetText(), groupPos[0], groupPos[1], groupPos[2],
+            (cameraPos - groupPos).GetLength());
 
         double distance = (cameraPos - groupPos).GetLength();
 
@@ -615,6 +641,10 @@ HdLodSceneIndex::_EvaluateLod()
         // Store active index for next frame's hysteresis
         _prevActiveIndex[groupPath] = activeIndex;
 
+        TF_STATUS("hdLod: group %s active=%d/%d dist=%.1f",
+            groupPath.GetText(), activeIndex, nItems,
+            distance);
+
         // Mark non-active item subtrees as inactive (Axiom 1: hierarchical)
         for (int i = 0; i < nItems; ++i) {
             if (i != activeIndex) {
@@ -658,8 +688,13 @@ HdLodSceneIndex::_EvaluateLod()
 
     _evaluating = false;
 
+    TF_STATUS("hdLod: _EvaluateLod done, %zu hidden, %zu dirty entries",
+        _hiddenRenderables.size(), dirtyEntries.size());
+
     if (!dirtyEntries.empty()) {
+        TF_STATUS("hdLod: sending %zu dirty entries", dirtyEntries.size());
         _SendPrimsDirtied(dirtyEntries);
+        TF_STATUS("hdLod: dirty entries sent");
     }
 }
 
