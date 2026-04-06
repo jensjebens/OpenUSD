@@ -26,7 +26,7 @@ logging.basicConfig(
 _log = logging.getLogger("newton_usdview")
 _log.info("Plugin module loaded")
 
-from pxr import Tf, Sdf, Gf, Usd, UsdGeom, UsdPhysics
+from pxr import Tf, Sdf, Gf, Usd, UsdGeom, UsdPhysics, Work
 
 try:
     from pxr import HdExec
@@ -173,7 +173,16 @@ class NewtonPhysicsPlugin(PluginContainer):
         _log.info(f"Opened separate stage for Newton: {root_layer.identifier}")
 
         builder = newton.ModelBuilder()
-        builder.add_usd(newton_stage)
+        # Temporarily limit TBB concurrency to 1 during physics parsing
+        # to work around an intermittent segfault in
+        # UsdPhysics.LoadUsdPhysicsFromRange's parallel prim processing.
+        # Also skip mesh approximation to avoid CoACD fork crashes.
+        Work.SetConcurrencyLimit(1)
+        try:
+            builder.add_usd(newton_stage, skip_mesh_approximation=True)
+        finally:
+            Work.SetConcurrencyLimit(0)  # restore full concurrency
+        builder.approximate_meshes(method='convex_hull')
         model = builder.finalize(device=device)
 
         # Body path mapping.
