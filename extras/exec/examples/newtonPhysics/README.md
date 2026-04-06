@@ -5,10 +5,10 @@ An OpenExec plugin that integrates
 Disney/DeepMind/NVIDIA) with OpenUSD for rigid-body simulation driven
 by `UsdPhysicsRigidBodyAPI` schemas.
 
-![Falling box collides with ground plane](demo.gif)
+![Newton GPU physics in UsdView — live simulation + interactive grab](../../../../newton_usdview.gif)
 
-*Rendered by `usdrecord` + Storm. Newton GPU (XPBD solver, NVIDIA L40)
-drives transforms live through HdExec → Hydra — no baking, no session layer.*
+*UsdView + Storm rendering. Newton GPU (XPBD solver, NVIDIA L40)
+drives rigid body transforms live through HdExec → Hydra — no baking, no session layer.*
 
 ## Architecture
 
@@ -94,7 +94,6 @@ HdExec.RegisterTransformProvider("newtonGPU", provider)
 ```
 newtonPhysics/
 ├── README.md
-├── demo.gif
 ├── python/
 │   ├── __init__.py              Newton GPU integration package
 │   ├── engine.py                NewtonEngine wrapper
