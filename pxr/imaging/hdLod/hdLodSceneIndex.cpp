@@ -19,11 +19,57 @@
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/registryManager.h"
+#include "pxr/base/tf/weakBase.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/usd/usd/notice.h"
+#include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
+#include "pxr/usd/usd/relationship.h"
+#include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usdUtils/stageCache.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+// Static member
+UsdStageRefPtr HdLodSceneIndex::_sGlobalStage;
+
+// Global listener that captures stages (same pattern as HdExec)
+namespace {
+class _StageListener : public TfWeakBase {
+public:
+    void Register() {
+        TfNotice::Register(
+            TfCreateWeakPtr(this),
+            &_StageListener::_OnStageContentsChanged);
+    }
+    void _OnStageContentsChanged(
+        const UsdNotice::StageContentsChanged &notice) {
+        UsdStageWeakPtr sender = notice.GetStage();
+        if (sender) {
+            HdLodSceneIndex::SetGlobalStage(UsdStageRefPtr(sender));
+        }
+    }
+};
+static _StageListener *_sListener = nullptr;
+} // anonymous namespace
+
+TF_REGISTRY_FUNCTION(HdLodSceneIndex)
+{
+    static _StageListener listener;
+    listener.Register();
+    _sListener = &listener;
+}
+
+/* static */
+void
+HdLodSceneIndex::SetGlobalStage(const UsdStageRefPtr &stage)
+{
+    _sGlobalStage = stage;
+}
 
 TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
@@ -122,14 +168,24 @@ HdLodSceneIndex::New(const HdSceneIndexBaseRefPtr &inputSceneIndex)
 HdLodSceneIndex::HdLodSceneIndex(
     const HdSceneIndexBaseRefPtr &inputSceneIndex)
     : HdSingleInputFilteringSceneIndexBase(inputSceneIndex)
+    , _stage(_sGlobalStage)
 {
-    _RebuildCache();
-    _EvaluateLod();
+    if (_stage) {
+        TF_STATUS("hdLod: stage captured (%zu prims)",
+            (size_t)std::distance(
+                _stage->Traverse().begin(), _stage->Traverse().end()));
+        _RebuildCache();
+        _EvaluateLod();
+    } else {
+        TF_STATUS("hdLod: no stage available yet (will rebuild on PrimsAdded)");
+    }
 }
 
 HdSceneIndexPrim
 HdLodSceneIndex::GetPrim(const SdfPath &primPath) const
 {
+    const_cast<HdLodSceneIndex*>(this)->_TryBootstrap();
+
     HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
     if (_hiddenRenderables.count(primPath)) {
         prim.dataSource =
@@ -149,10 +205,12 @@ HdLodSceneIndex::_PrimsAdded(
     const HdSceneIndexBase &sender,
     const HdSceneIndexObserver::AddedPrimEntries &entries)
 {
-    // Rebuild cache whenever prims are added, as new LodGroup/LodItem prims
-    // may have appeared.
-    _RebuildCache();
-    _EvaluateLod();
+    _TryBootstrap();
+
+    if (_stage) {
+        _RebuildCache();
+        _EvaluateLod();
+    }
     _SendPrimsAdded(entries);
 }
 
@@ -213,9 +271,27 @@ HdLodSceneIndex::_PrimsDirtied(
 bool
 HdLodSceneIndex::_IsRenderable(const TfToken &primType)
 {
-    // HdPrimTypeIsGprim covers all Rprim geometry prim types (mesh,
-    // basisCurves, points, volume, implicits, etc.).
-    return HdPrimTypeIsGprim(primType);
+    // HdPrimTypeIsGprim covers mesh, basisCurves, points, volume.
+    // We also need implicit geometry types (sphere, cube, cone, etc.)
+    if (HdPrimTypeIsGprim(primType)) {
+        return true;
+    }
+    // Check implicit geometry types
+    static const TfTokenVector implicitTypes = {
+        TfToken("sphere"),
+        TfToken("cube"),
+        TfToken("cone"),
+        TfToken("cylinder"),
+        TfToken("capsule"),
+        TfToken("plane"),
+        TfToken("tetMesh"),
+    };
+    for (const TfToken &t : implicitTypes) {
+        if (primType == t) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void
@@ -233,116 +309,13 @@ HdLodSceneIndex::_CollectRenderables(
     }
 }
 
-// Helper: check if a prim data source has a lod:lodItems relationship.
-// This is a fallback for unregistered schemas where apiSchemas may not
-// be populated in the Hydra data source.
-static bool
-_HasLodItemsRelationship(const HdContainerDataSourceHandle &ds)
-{
-    if (!ds) {
-        return false;
-    }
-    // Check for the lodItems key directly
-    HdDataSourceBaseHandle lodItemsDs = ds->Get(_tokens->lodItems);
-    if (lodItemsDs) {
-        return true;
-    }
-    // Check inside a "lod" namespace container
-    HdDataSourceBaseHandle lodDs = ds->Get(TfToken("lod"));
-    if (HdContainerDataSourceHandle lodCont =
-            HdContainerDataSource::Cast(lodDs)) {
-        if (lodCont->Get(_tokens->lodItems)) {
-            return true;
-        }
-    }
-    return false;
-}
 
-// Helper: check if a token vector data source (apiSchemas) contains a token.
-static bool
-_HasApiSchema(const HdContainerDataSourceHandle &ds, const TfToken &schema)
-{
-    if (!ds) {
-        return false;
-    }
-    HdDataSourceBaseHandle apiDs = ds->Get(_tokens->apiSchemas);
-    if (!apiDs) {
-        return false;
-    }
-    HdTokenArrayDataSourceHandle tokenArrayDs =
-        HdTokenArrayDataSource::Cast(apiDs);
-    if (!tokenArrayDs) {
-        return false;
-    }
-    VtArray<TfToken> schemas = tokenArrayDs->GetTypedValue(0.0f);
-    for (const TfToken &t : schemas) {
-        // Match prefix: token may be "LodGroupAPI" or "LodGroupAPI:instance"
-        if (t == schema ||
-            TfStringStartsWith(t.GetString(), schema.GetString() + ":")) {
-            return true;
-        }
-    }
-    return false;
-}
 
-// Helper: get a float array attribute from a prim's data source.
-// USD attributes typically come through as primvars or as top-level keys.
-// We try both the top-level key and the "primvars:<name>" key.
-static VtArray<float>
-_GetFloatArrayAttr(const HdContainerDataSourceHandle &ds,
-                   const TfToken &attrName)
-{
-    if (!ds) {
-        return {};
-    }
-    // Try direct key first
-    HdDataSourceBaseHandle attrDs = ds->Get(attrName);
-    if (!attrDs) {
-        // Try primvars:<name>
-        HdDataSourceBaseHandle primvarsDs = ds->Get(TfToken("primvars"));
-        if (HdContainerDataSourceHandle pvContainer =
-                HdContainerDataSource::Cast(primvarsDs)) {
-            HdDataSourceBaseHandle pv = pvContainer->Get(attrName);
-            if (HdContainerDataSourceHandle pvCont =
-                    HdContainerDataSource::Cast(pv)) {
-                attrDs = pvCont->Get(TfToken("primvarValue"));
-                if (!attrDs) {
-                    attrDs = pvCont->Get(TfToken("value"));
-                }
-            }
-        }
-    }
-    if (!attrDs) {
-        return {};
-    }
-    HdFloatArrayDataSourceHandle floatArrayDs =
-        HdFloatArrayDataSource::Cast(attrDs);
-    if (floatArrayDs) {
-        return floatArrayDs->GetTypedValue(0.0f);
-    }
-    return {};
-}
 
-// Helper: get SdfPath array attribute (for relationships like lodItems).
-static SdfPathVector
-_GetPathArrayAttr(const HdContainerDataSourceHandle &ds,
-                  const TfToken &attrName)
-{
-    if (!ds) {
-        return {};
-    }
-    HdDataSourceBaseHandle attrDs = ds->Get(attrName);
-    if (!attrDs) {
-        return {};
-    }
-    // Relationships come through as SdfPathArray typed data source
-    using PathArrayDs = HdTypedSampledDataSource<VtArray<SdfPath>>;
-    if (PathArrayDs::Handle pathDs = PathArrayDs::Cast(attrDs)) {
-        VtArray<SdfPath> paths = pathDs->GetTypedValue(0.0f);
-        return SdfPathVector(paths.begin(), paths.end());
-    }
-    return {};
-}
+
+
+
+
 
 void
 HdLodSceneIndex::_RebuildCache()
@@ -351,120 +324,118 @@ HdLodSceneIndex::_RebuildCache()
     _descendantCache.clear();
     _groupThresholds.clear();
 
-    const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
-
-    // Walk the entire scene to find LodGroup prims.
-    std::vector<SdfPath> toVisit;
-    toVisit.push_back(SdfPath::AbsoluteRootPath());
-
-    while (!toVisit.empty()) {
-        SdfPath path = toVisit.back();
-        toVisit.pop_back();
-
-        HdSceneIndexPrim prim = input->GetPrim(path);
-
-        // Debug: log data source keys for non-root prims
-        if (path != SdfPath::AbsoluteRootPath() && prim.dataSource) {
-            TfTokenVector names = prim.dataSource->GetNames();
-            if (names.size() > 0) {
-                std::string keys;
-                for (const auto &n : names) {
-                    keys += n.GetString() + ", ";
-                }
-                TF_STATUS("hdLod: prim %s type=%s keys=[%s]",
-                    path.GetText(), prim.primType.GetText(), keys.c_str());
-            }
-        }
-
-        if (_HasApiSchema(prim.dataSource, _tokens->lodGroupAPI) ||
-            _HasLodItemsRelationship(prim.dataSource)) {
-            // Read lodItems relationship
-            SdfPathVector lodItems =
-                _GetPathArrayAttr(prim.dataSource, _tokens->lodItems);
-            if (!lodItems.empty()) {
-                _lodGroups[path] = std::move(lodItems);
-
-                // Read distance heuristic thresholds from the GROUP prim
-                // (LodDistanceHeuristicAPI is applied to the group, not items)
-                _GroupThresholds thresholds;
-                if (prim.dataSource) {
-                    TfTokenVector names = prim.dataSource->GetNames();
-                    for (const TfToken &name : names) {
-                        const std::string &ns = name.GetString();
-                        if (TfStringStartsWith(ns,
-                                _tokens->lodHeuristicPrefix.GetString())) {
-                            if (TfStringEndsWith(ns,
-                                    _tokens->distanceMinSuffix.GetString())) {
-                                thresholds.minThresholds =
-                                    _GetFloatArrayAttr(prim.dataSource, name);
-                            } else if (TfStringEndsWith(ns,
-                                    _tokens->distanceMaxSuffix.GetString())) {
-                                thresholds.maxThresholds =
-                                    _GetFloatArrayAttr(prim.dataSource, name);
-                            }
-                        }
-                    }
-                    // Fall back to primvars if not found at top level
-                    if (thresholds.minThresholds.empty()) {
-                        HdDataSourceBaseHandle pvDs =
-                            prim.dataSource->Get(TfToken("primvars"));
-                        if (HdContainerDataSourceHandle pvCont =
-                                HdContainerDataSource::Cast(pvDs)) {
-                            for (const TfToken &name : pvCont->GetNames()) {
-                                const std::string &ns = name.GetString();
-                                if (!TfStringStartsWith(ns,
-                                        _tokens->lodHeuristicPrefix
-                                            .GetString())) {
-                                    continue;
-                                }
-                                HdDataSourceBaseHandle pvEntry =
-                                    pvCont->Get(name);
-                                HdContainerDataSourceHandle pvc =
-                                    HdContainerDataSource::Cast(pvEntry);
-                                if (!pvc) continue;
-                                HdDataSourceBaseHandle valDs =
-                                    pvc->Get(TfToken("primvarValue"));
-                                if (!valDs) valDs = pvc->Get(TfToken("value"));
-                                HdFloatArrayDataSourceHandle faDs =
-                                    HdFloatArrayDataSource::Cast(valDs);
-                                if (!faDs) continue;
-                                if (TfStringEndsWith(ns,
-                                        _tokens->distanceMinSuffix
-                                            .GetString())) {
-                                    thresholds.minThresholds =
-                                        faDs->GetTypedValue(0.0f);
-                                } else if (TfStringEndsWith(ns,
-                                        _tokens->distanceMaxSuffix
-                                            .GetString())) {
-                                    thresholds.maxThresholds =
-                                        faDs->GetTypedValue(0.0f);
-                                }
-                            }
-                        }
-                    }
-                }
-                // If max thresholds not provided, fall back to min
-                if (thresholds.maxThresholds.empty() &&
-                    !thresholds.minThresholds.empty()) {
-                    thresholds.maxThresholds = thresholds.minThresholds;
-                }
-                _groupThresholds[path] = std::move(thresholds);
-            }
-        }
-
-        for (const SdfPath &child : input->GetChildPrimPaths(path)) {
-            toVisit.push_back(child);
-        }
+    if (!_stage) {
+        return;
     }
 
-    // For each LodItem across all groups, collect renderable descendants.
+    // Walk the USD stage to find LodGroup prims by checking for
+    // the lod:lodItems relationship (works for unregistered schemas).
+    for (UsdPrim prim : _stage->Traverse()) {
+        UsdRelationship lodItemsRel =
+            prim.GetRelationship(TfToken("lod:lodItems"));
+        if (!lodItemsRel || !lodItemsRel.HasAuthoredTargets()) {
+            continue;
+        }
+
+        SdfPathVector targets;
+        lodItemsRel.GetTargets(&targets);
+        if (targets.empty()) {
+            continue;
+        }
+
+        SdfPath groupPath = prim.GetPath();
+        _lodGroups[groupPath] = targets;
+
+        TF_STATUS("hdLod: found LodGroup %s with %zu items",
+            groupPath.GetText(), targets.size());
+
+        // Read distance thresholds from the group prim
+        _GroupThresholds thresholds;
+        for (UsdAttribute attr : prim.GetAttributes()) {
+            const std::string &name = attr.GetName().GetString();
+            if (TfStringStartsWith(name, "lod:Heuristic:") &&
+                TfStringEndsWith(name, ":distance:minThresholds")) {
+                VtArray<float> val;
+                if (attr.Get(&val)) {
+                    thresholds.minThresholds = val;
+                }
+            } else if (TfStringStartsWith(name, "lod:Heuristic:") &&
+                       TfStringEndsWith(name, ":distance:maxThresholds")) {
+                VtArray<float> val;
+                if (attr.Get(&val)) {
+                    thresholds.maxThresholds = val;
+                }
+            }
+        }
+        if (thresholds.maxThresholds.empty() &&
+            !thresholds.minThresholds.empty()) {
+            thresholds.maxThresholds = thresholds.minThresholds;
+        }
+        if (!thresholds.minThresholds.empty()) {
+            TF_STATUS("hdLod: group %s thresholds min=[%s] max=[%s]",
+                groupPath.GetText(),
+                TfStringify(thresholds.minThresholds).c_str(),
+                TfStringify(thresholds.maxThresholds).c_str());
+        }
+        _groupThresholds[groupPath] = std::move(thresholds);
+    }
+
+    // Collect renderable descendants from the Hydra scene index.
     for (const auto &groupEntry : _lodGroups) {
         for (const SdfPath &itemPath : groupEntry.second) {
-            if (_descendantCache.find(itemPath) == _descendantCache.end()) {
+            if (true) {  // Always re-collect (cache cleared above)
                 std::vector<SdfPath> renderables;
+                // Check what the scene index says about this prim
+                const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
+                HdSceneIndexPrim itemPrim = input->GetPrim(itemPath);
+                TF_STATUS("hdLod: GetPrim(%s) type=%s ds=%s children=%zu",
+                    itemPath.GetText(),
+                    itemPrim.primType.GetText(),
+                    itemPrim.dataSource ? "yes" : "no",
+                    input->GetChildPrimPaths(itemPath).size());
                 _CollectRenderables(itemPath, renderables);
                 _descendantCache[itemPath] = std::move(renderables);
+                TF_STATUS("hdLod: item %s has %zu renderables",
+                    itemPath.GetText(),
+                    _descendantCache[itemPath].size());
             }
+        }
+    }
+}
+
+void
+HdLodSceneIndex::_TryBootstrap()
+{
+    if (_stage) {
+        return;  // Already bootstrapped
+    }
+    // Try global stage from notice listener
+    if (_sGlobalStage) {
+        _stage = _sGlobalStage;
+        TF_STATUS("hdLod: stage captured via notice listener");
+        _RebuildCache();
+        _EvaluateLod();
+        return;
+    }
+    // Fallback: try UsdUtilsStageCache
+    UsdStageCache cache = UsdUtilsStageCache::Get();
+    auto allStages = cache.GetAllStages();
+    if (!allStages.empty()) {
+        _stage = allStages.front();
+        TF_STATUS("hdLod: stage captured from UsdUtilsStageCache");
+        _RebuildCache();
+        _EvaluateLod();
+        return;
+    }
+    // Fallback: open stage from HDLOD_STAGE_PATH env var
+    const char* stagePath = std::getenv("HDLOD_STAGE_PATH");
+    if (stagePath && stagePath[0]) {
+        _stage = UsdStage::Open(stagePath);
+        if (_stage) {
+            TF_STATUS("hdLod: stage opened from HDLOD_STAGE_PATH=%s",
+                stagePath);
+            _RebuildCache();
+            _EvaluateLod();
         }
     }
 }

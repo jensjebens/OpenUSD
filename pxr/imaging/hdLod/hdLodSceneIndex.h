@@ -13,6 +13,7 @@
 #include "pxr/imaging/hdLod/api.h"
 #include "pxr/imaging/hd/filteringSceneIndex.h"
 #include "pxr/usd/sdf/path.h"
+#include "pxr/usd/usd/stage.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/vt/array.h"
 
@@ -28,10 +29,13 @@ TF_DECLARE_WEAK_AND_REF_PTRS(HdLodSceneIndex);
 ///
 /// A scene index filter that implements LOD (Level of Detail) switching.
 ///
-/// This filter reads LodGroupAPI and LodItemAPI apiSchemas metadata from
-/// prims and evaluates distance-based LOD selection with hysteresis.
-/// Non-active LodItem prims have visibility=false overlaid on all their
-/// renderable descendants.
+/// This filter reads LodGroupAPI and LodItemAPI from the USD stage
+/// (via a captured stage reference) and evaluates distance-based LOD
+/// selection with hysteresis. Non-active LodItem prims have visibility=false
+/// overlaid on all their renderable descendants.
+///
+/// The stage is captured via UsdNotice::StageContentsChanged, following
+/// the same pattern as HdExecComputedTransformSceneIndex.
 ///
 class HdLodSceneIndex final : public HdSingleInputFilteringSceneIndexBase
 {
@@ -39,6 +43,10 @@ public:
     HDLOD_API
     static HdLodSceneIndexRefPtr New(
         const HdSceneIndexBaseRefPtr &inputSceneIndex);
+
+    /// Set the USD stage used to read LOD schema data.
+    HDLOD_API
+    static void SetGlobalStage(const UsdStageRefPtr &stage);
 
     // HdSceneIndexBase overrides
     HDLOD_API
@@ -65,6 +73,9 @@ protected:
         const HdSceneIndexObserver::DirtiedPrimEntries &entries) override;
 
 private:
+    // Lazy bootstrap: capture stage on first access if available.
+    void _TryBootstrap();
+
     // Evaluate LOD selection for all LodGroup prims and update
     // _hiddenRenderables. Sends dirty notices for any changed renderables.
     void _EvaluateLod();
@@ -105,6 +116,12 @@ private:
     };
     std::unordered_map<SdfPath, _GroupThresholds, SdfPath::Hash>
         _groupThresholds;
+
+    // USD stage reference for reading LOD schema data (relationships, attrs)
+    UsdStageRefPtr _stage;
+
+    // Global stage captured via UsdNotice
+    static UsdStageRefPtr _sGlobalStage;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
