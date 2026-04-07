@@ -58,6 +58,7 @@ if (BUILD_SHARED_LIBS)
             usd
             usdGeom
             vt
+            work
         CPPFILES
             testenv/testHdExecComputedTransformSceneIndex.cpp
     )

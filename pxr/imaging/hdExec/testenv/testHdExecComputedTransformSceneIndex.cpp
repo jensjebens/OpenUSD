@@ -36,13 +36,18 @@
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/tf/errorMark.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
 
 #include "pxr/base/js/json.h"
 
+#include "pxr/base/work/loops.h"
+
+#include <atomic>
 #include <iostream>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -1788,6 +1793,234 @@ def Xform "Body" {}
 }
 
 // ---------------------------------------------------------------------------
+// Test 19: Degenerate (non-invertible) ancestor transform — ancestor walk
+//          should fall back gracefully, not produce NaN.
+// ---------------------------------------------------------------------------
+
+static bool
+_TestAncestorWalkDegenerateTransform()
+{
+    std::cout << "=== TestAncestorWalkDegenerateTransform ===" << std::endl;
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+
+    // Pre-flattened input: parent has ZERO scale on Y (non-invertible).
+    // In world space: parent at (0,0,0) with scaleY=0, child at (1,0,0).
+    GfMatrix4d parentWorld(1.0);
+    parentWorld[1][1] = 0.0;  // scaleY = 0 → determinant = 0
+
+    GfMatrix4d childWorld(1.0);
+    childWorld.SetTranslate(GfVec3d(1, 0, 0));
+
+    HdRetainedSceneIndexRefPtr retainedSi = HdRetainedSceneIndex::New();
+    retainedSi->AddPrims({
+        {SdfPath("/Parent"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            parentWorld))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(true))
+                    .Build())},
+        {SdfPath("/Parent/Child"), TfToken("mesh"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            childWorld))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(true))
+                    .Build())},
+    });
+
+    SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    layer->ImportFromString(R"usda(#usda 1.0
+def Xform "Parent" {}
+def Cube "Parent/Child" {}
+)usda");
+    UsdStageConstRefPtr stage = UsdStage::Open(layer);
+    auto execSystem = std::make_shared<ExecUsdSystem>(stage);
+    auto filter = HdExecComputedTransformSceneIndex::New(
+        retainedSi, stage, execSystem,
+        {TfToken("computeSimulatedTransform")}, true);
+
+    // Set a cached M_sim on the parent (which has non-invertible xform).
+    GfMatrix4d mSim(1.0);
+    mSim.SetTranslate(GfVec3d(0, 5, 0));
+    HdExecComputedTransformSceneIndex::SetCachedTransform(
+        SdfPath("/Parent"), mSim);
+
+    // The ancestor walk should detect non-invertible parent and skip.
+    // Child should retain its original input transform (1, 0, 0).
+    {
+        HdSceneIndexPrim childPrim =
+            filter->GetPrim(SdfPath("/Parent/Child"));
+        HdXformSchema xform =
+            HdXformSchema::GetFromParent(childPrim.dataSource);
+        TF_AXIOM(xform.IsDefined());
+        GfMatrix4d mat = xform.GetMatrix()->GetTypedValue(0);
+        GfVec3d t = mat.ExtractTranslation();
+
+        std::cout << "  Child with degenerate parent: ("
+                  << t[0] << ", " << t[1] << ", " << t[2] << ")" << std::endl;
+
+        // Must NOT be NaN.
+        TF_AXIOM(!std::isnan(t[0]) && !std::isnan(t[1]) && !std::isnan(t[2]));
+
+        // Should retain original (1, 0, 0) since ancestor walk was skipped.
+        TF_AXIOM(GfIsClose(t, GfVec3d(1, 0, 0), 1e-6));
+    }
+
+    // Parent itself should still get M_sim (direct cache hit, no inversion).
+    {
+        HdSceneIndexPrim parentPrim = filter->GetPrim(SdfPath("/Parent"));
+        HdXformSchema xform =
+            HdXformSchema::GetFromParent(parentPrim.dataSource);
+        GfMatrix4d mat = xform.GetMatrix()->GetTypedValue(0);
+        TF_AXIOM(GfIsClose(
+            mat.ExtractTranslation(), GfVec3d(0, 5, 0), 1e-6));
+    }
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+    std::cout << "  PASSED" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Test 20: Concurrent GetPrim — multiple threads read child prims that
+//          share a cached ancestor, verifying thread safety of the cache
+//          + ancestor walk.
+// ---------------------------------------------------------------------------
+
+static bool
+_TestConcurrentGetPrimWithSharedAncestor()
+{
+    std::cout << "=== TestConcurrentGetPrimWithSharedAncestor ===" << std::endl;
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+
+    // 1 parent with cached M_sim, 10 children.
+    // Pre-flattened input: parent at (0, 100, 0), children at
+    // (i, 100, 0) where i = 1..10.
+    const int numChildren = 10;
+
+    GfMatrix4d parentWorld(1.0);
+    parentWorld.SetTranslate(GfVec3d(0, 100, 0));
+
+    HdRetainedSceneIndexRefPtr retainedSi = HdRetainedSceneIndex::New();
+
+    HdRetainedSceneIndex::AddedPrimEntries primEntries;
+    primEntries.push_back(
+        {SdfPath("/Parent"), TfToken("xform"),
+            HdRetainedContainerDataSource::New(
+                HdXformSchemaTokens->xform,
+                HdXformSchema::Builder()
+                    .SetMatrix(
+                        HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                            parentWorld))
+                    .SetResetXformStack(
+                        HdRetainedTypedSampledDataSource<bool>::New(true))
+                    .Build())});
+
+    // Build USD layer for the stage.
+    std::string usdLayer = "#usda 1.0\ndef Xform \"Parent\" {}\n";
+
+    for (int i = 1; i <= numChildren; ++i) {
+        SdfPath childPath(
+            TfStringPrintf("/Parent/Child%d", i));
+
+        GfMatrix4d childWorld(1.0);
+        childWorld.SetTranslate(GfVec3d(i, 100, 0));
+
+        primEntries.push_back(
+            {childPath, TfToken("mesh"),
+                HdRetainedContainerDataSource::New(
+                    HdXformSchemaTokens->xform,
+                    HdXformSchema::Builder()
+                        .SetMatrix(
+                            HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                                childWorld))
+                        .SetResetXformStack(
+                            HdRetainedTypedSampledDataSource<bool>::New(true))
+                        .Build())});
+
+        usdLayer += TfStringPrintf(
+            "def Cube \"Parent/Child%d\" {}\n", i);
+    }
+
+    retainedSi->AddPrims(primEntries);
+
+    SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    layer->ImportFromString(usdLayer);
+    UsdStageConstRefPtr stage = UsdStage::Open(layer);
+    auto execSystem = std::make_shared<ExecUsdSystem>(stage);
+
+    auto filter = HdExecComputedTransformSceneIndex::New(
+        retainedSi, stage, execSystem,
+        {TfToken("computeSimulatedTransform")}, true);
+
+    // Cache M_sim on parent: body moves to (0, 5, 0).
+    GfMatrix4d mSim(1.0);
+    mSim.SetTranslate(GfVec3d(0, 5, 0));
+    HdExecComputedTransformSceneIndex::SetCachedTransform(
+        SdfPath("/Parent"), mSim);
+
+    // Expected: child i should recompose to (i, 5, 0).
+    // M_child_new = (i, 100, 0) × inv(0, 100, 0) × (0, 5, 0)
+    //             = (i, 0, 0) × (0, 5, 0) = (i, 5, 0)
+
+    // Launch concurrent reads from multiple threads.
+    std::atomic<bool> allCorrect{true};
+    std::atomic<int> completedCount{0};
+
+    WorkParallelForN(numChildren,
+        [&filter, &allCorrect, &completedCount]
+        (size_t beginIdx, size_t endIdx) {
+            for (size_t idx = beginIdx; idx < endIdx; ++idx) {
+                int i = static_cast<int>(idx) + 1;
+                SdfPath childPath(
+                    TfStringPrintf("/Parent/Child%d", i));
+
+                HdSceneIndexPrim childPrim = filter->GetPrim(childPath);
+                HdXformSchema xform =
+                    HdXformSchema::GetFromParent(childPrim.dataSource);
+
+                if (!xform.IsDefined() || !xform.GetMatrix()) {
+                    allCorrect.store(false);
+                    continue;
+                }
+
+                GfMatrix4d mat = xform.GetMatrix()->GetTypedValue(0);
+                GfVec3d t = mat.ExtractTranslation();
+
+                GfVec3d expected(i, 5, 0);
+                if (!GfIsClose(t, expected, 1e-4)) {
+                    std::cout << "  MISMATCH: Child" << i
+                              << " expected (" << expected[0] << ", "
+                              << expected[1] << ", " << expected[2]
+                              << ") got (" << t[0] << ", "
+                              << t[1] << ", " << t[2] << ")" << std::endl;
+                    allCorrect.store(false);
+                }
+                completedCount.fetch_add(1);
+            }
+        },
+        /* grainSize = */ 1);
+
+    std::cout << "  Completed " << completedCount.load()
+              << "/" << numChildren << " concurrent reads" << std::endl;
+    TF_AXIOM(completedCount.load() == numChildren);
+    TF_AXIOM(allCorrect.load());
+
+    HdExecComputedTransformSceneIndex::ClearAllCachedTransforms();
+    std::cout << "  PASSED" << std::endl;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 
 int main(int argc, char **argv)
 {
@@ -1835,6 +2068,8 @@ int main(int argc, char **argv)
     success &= _TestPostFlatteningDeepAncestorWalk();
     success &= _TestPostFlatteningAncestorWalkWithRotation();
     success &= _TestCacheClearRestoresOriginal();
+    success &= _TestAncestorWalkDegenerateTransform();
+    success &= _TestConcurrentGetPrimWithSharedAncestor();
 
     // Tests 11-14 use HdFlatteningSceneIndex directly with our provider.
     // The remaining gap: in UsdView, the dirty signal must come from

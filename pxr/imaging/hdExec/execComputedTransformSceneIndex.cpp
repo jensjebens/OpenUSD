@@ -742,6 +742,20 @@ HdExecComputedTransformSceneIndex::GetPrim(const SdfPath &primPath) const
                     GfMatrix4d ancestorOriginal =
                         ancestorXform.GetMatrix()->GetTypedValue(0);
 
+                    // Guard: non-invertible ancestor transform (e.g.
+                    // zero scale) would produce NaN.  Skip the walk
+                    // and let the child keep its stale input xform —
+                    // a frame of visual lag is better than NaN.
+                    double det = ancestorOriginal.GetDeterminant();
+                    if (GfIsClose(det, 0.0, 1e-12)) {
+                        TF_WARN("HdExec: ancestor %s has non-invertible "
+                                "transform (det=%.2e), skipping ancestor "
+                                "walk for child %s",
+                                ancestorPath.GetText(), det,
+                                primPath.GetText());
+                        break;
+                    }
+
                     // Get this prim's current (stale) flattened transform.
                     GfMatrix4d childOriginal =
                         inputXform.GetMatrix()->GetTypedValue(0);
