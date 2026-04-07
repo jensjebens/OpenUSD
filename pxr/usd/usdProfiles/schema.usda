@@ -1,0 +1,68 @@
+#usda 1.0
+(
+    subLayers = [
+        @usd/schema.usda@
+    ]
+)
+
+over "GLOBAL" (
+    customData = {
+        string libraryName = "usdProfiles"
+        string libraryPath = "pxr/usd/usdProfiles"
+        bool useLiteralIdentifier = 0
+        dictionary libraryTokens = {
+            dictionary profile = {
+                string doc = """Token for profile namespace."""
+            }
+        }
+    }
+) {}
+
+class "ProfileAPI"
+(
+    customData = {
+        string className = "ProfileAPI"
+        token[] apiSchemaAutoApplyTo = []
+    }
+
+    doc = """Applied API schema for declaring that a prim (and its descendants)
+    conform to a specific USD Profile — a named set of capabilities.
+
+    A Profile is a tagged node in a capability DAG representing a coherent
+    set of functionality. Applying ProfileAPI to a prim declares that the
+    subtree rooted at that prim satisfies the capabilities required by
+    the named profile.
+
+    Resolution: If no ProfileAPI is authored on a prim, the nearest
+    ancestor's ProfileAPI applies. Capability requirements do not
+    propagate upward through hierarchies.
+
+    See: https://github.com/PixarAnimationStudios/OpenUSD-proposals/tree/main/proposals/profiles
+    """
+
+    inherits = </APISchemaBase>
+)
+{
+    token profiles:profile (
+        customData = {
+            string apiName = "profile"
+        }
+        displayName = "Profile"
+        doc = """The profile identifier this prim conforms to.
+        Uses reverse domain notation, e.g.:
+        - com.nvidia.simready.prop_robotics_neutral
+        - usd.core.v25_05
+        - aousd.interchange.v1_0
+        """
+    )
+
+    token[] profiles:capabilities (
+        customData = {
+            string apiName = "capabilities"
+        }
+        displayName = "Capabilities"
+        doc = """Explicit list of capability identifiers this prim requires,
+        beyond those implied by the profile. Uses reverse domain notation.
+        """
+    )
+}

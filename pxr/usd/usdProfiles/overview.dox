@@ -1,0 +1,69 @@
+/*!
+\page usdProfiles_page_front UsdProfiles : USD Profile API Schema
+\if ( PXRUSDAPI_DOXYGEN_BUILD )
+\addtogroup usdProfiles
+\endif
+
+\section usdProfiles_overview Overview
+
+UsdProfiles provides the \ref UsdProfilesProfileAPI "ProfileAPI" applied schema
+for declaring that a prim (and its descendants) conform to a specific USD Profile.
+
+A \em Profile is a named node in a capability DAG (directed acyclic graph)
+representing a coherent set of functionality. Applying ProfileAPI to a prim
+declares that the subtree rooted at that prim satisfies the capabilities
+required by the named profile.
+
+\section usdProfiles_resolution Profile Resolution
+
+If no ProfileAPI is authored on a prim, the nearest ancestor's ProfileAPI
+applies. Capability requirements do not propagate upward.
+
+\section usdProfiles_registry Capability Registry
+
+The \ref UsdProfilesCapabilityRegistry "CapabilityRegistry" is a singleton
+that collects capability declarations from all loaded plugins' plugInfo.json
+files. Capabilities are declared in a "Capabilities" section:
+
+\code{.json}
+{
+    "Plugins": [{
+        "Info": {
+            "Capabilities": {
+                "com.example.myCapability": {
+                    "docstring": "My capability description",
+                    "predecessors": ["usd"]
+                }
+            }
+        }
+    }]
+}
+\endcode
+
+\section usdProfiles_profiles Profile Registry
+
+The \ref UsdProfilesProfileRegistry "ProfileRegistry" resolves profiles
+(capabilities with \c "isProfile": true) to their full transitive capability sets.
+
+\section usdProfiles_usage Usage Example
+
+\code{.py}
+from pxr import Usd, UsdProfiles
+
+stage = Usd.Stage.CreateInMemory()
+root = stage.DefinePrim("/Robot", "Xform")
+
+# Apply the ProfileAPI and set a profile
+api = UsdProfiles.ProfileAPI.Apply(root)
+api.GetProfileAttr().Set("com.nvidia.simready.prop_robotics_neutral")
+
+# Query the effective profile
+profile = UsdProfiles.GetEffectiveProfile(root)
+
+# Check what capabilities the profile expands to
+registry = UsdProfiles.CapabilityRegistry.GetInstance()
+caps = registry.GetTransitivePredecessors(
+    "com.nvidia.simready.prop_robotics_neutral")
+\endcode
+
+*/
