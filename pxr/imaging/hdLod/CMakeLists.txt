@@ -5,6 +5,7 @@ pxr_library(hdLod
     LIBRARIES
         hd
         usd
+        usdGeom
         usdUtils
         sdf
         tf

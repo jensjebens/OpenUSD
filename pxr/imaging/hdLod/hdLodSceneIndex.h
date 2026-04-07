@@ -88,7 +88,6 @@ private:
                              std::vector<SdfPath> &out) const;
 
     // Get camera world position from the active camera prim's xform.
-    GfVec3d _GetCameraPosition() const;
 
     // Check if a prim type is renderable (Rprim).
     static bool _IsRenderable(const TfToken &primType);
@@ -103,8 +102,11 @@ private:
     // Set of renderable paths that are currently hidden due to LOD.
     std::unordered_set<SdfPath, SdfPath::Hash> _hiddenRenderables;
 
-    // Cached camera path (from render settings active camera).
-    mutable SdfPath _cameraPath;
+    // Cached camera position (updated on each _RebuildCache)
+    GfVec3d _cachedCameraPos;
+
+    // Per-group cached world position
+    std::unordered_map<SdfPath, GfVec3d, SdfPath::Hash> _groupPositions;
 
     // Per-group previous active LOD index for hysteresis.
     std::unordered_map<SdfPath, int, SdfPath::Hash> _prevActiveIndex;

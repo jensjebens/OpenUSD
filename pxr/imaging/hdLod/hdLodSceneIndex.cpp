@@ -27,6 +27,7 @@
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdUtils/stageCache.h"
 
 #include <algorithm>
@@ -388,6 +389,40 @@ HdLodSceneIndex::_RebuildCache()
         _groupThresholds[groupPath] = std::move(thresholds);
     }
 
+    // Cache positions from the USD stage (safe, no Hydra data source issues)
+    _cachedCameraPos = GfVec3d(0, 0, 0);
+    _groupPositions.clear();
+    if (_stage) {
+        // Find camera from USD stage
+        for (UsdPrim p : _stage->Traverse()) {
+            if (p.GetTypeName() == TfToken("Camera")) {
+                UsdGeomXformable xf(p);
+                _cachedCameraPos =
+                    xf.ComputeLocalToWorldTransform(
+                        UsdTimeCode::Default()).ExtractTranslation();
+                TF_STATUS("hdLod: camera %s at (%.1f,%.1f,%.1f)",
+                    p.GetPath().GetText(),
+                    _cachedCameraPos[0],
+                    _cachedCameraPos[1],
+                    _cachedCameraPos[2]);
+                break;
+            }
+        }
+
+        // Cache group positions from USD stage
+        for (const auto &g : _lodGroups) {
+            UsdPrim gp = _stage->GetPrimAtPath(g.first);
+            if (gp) {
+                UsdGeomXformable xf(gp);
+                _groupPositions[g.first] =
+                    xf.ComputeLocalToWorldTransform(
+                        UsdTimeCode::Default()).ExtractTranslation();
+            } else {
+                _groupPositions[g.first] = GfVec3d(0, 0, 0);
+            }
+        }
+    }
+
     // Collect renderable descendants from the Hydra scene index.
     for (const auto &groupEntry : _lodGroups) {
         for (const SdfPath &itemPath : groupEntry.second) {
@@ -448,51 +483,7 @@ HdLodSceneIndex::_TryBootstrap()
     }
 }
 
-GfVec3d
-HdLodSceneIndex::_GetCameraPosition() const
-{
-    const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
-
-    // Search for a camera prim in the scene index
-    if (_cameraPath.IsEmpty()) {
-        // Walk scene looking for a camera type prim
-        std::vector<SdfPath> toVisit;
-        toVisit.push_back(SdfPath::AbsoluteRootPath());
-        while (!toVisit.empty() && _cameraPath.IsEmpty()) {
-            SdfPath path = toVisit.back();
-            toVisit.pop_back();
-            HdSceneIndexPrim prim = input->GetPrim(path);
-            if (prim.primType == TfToken("camera")) {
-                _cameraPath = path;
-                break;
-            }
-            for (const SdfPath &child : input->GetChildPrimPaths(path)) {
-                toVisit.push_back(child);
-            }
-        }
-    }
-
-    if (!_cameraPath.IsEmpty()) {
-        HdSceneIndexPrim camPrim = input->GetPrim(_cameraPath);
-        if (camPrim.dataSource) {
-            HdDataSourceBaseHandle xformDs =
-                camPrim.dataSource->Get(HdXformSchemaTokens->xform);
-            if (xformDs) {
-                HdXformSchema xformSchema =
-                    HdXformSchema::GetFromParent(camPrim.dataSource);
-                if (xformSchema.IsDefined()) {
-                    if (HdMatrixDataSourceHandle matDs =
-                            xformSchema.GetMatrix()) {
-                        GfMatrix4d mat = matDs->GetTypedValue(0.0f);
-                        return mat.ExtractTranslation();
-                    }
-                }
-            }
-        }
-    }
-
-    return GfVec3d(0.0, 0.0, 0.0);
-}
+// _GetCameraPosition removed — positions cached in _RebuildCache
 
 void
 HdLodSceneIndex::_EvaluateLod()
@@ -520,11 +511,7 @@ HdLodSceneIndex::_EvaluateLod()
 
     TF_STATUS("hdLod: _EvaluateLod START, %zu groups", _lodGroups.size());
 
-    const HdSceneIndexBaseRefPtr &input = _GetInputSceneIndex();
-    TF_STATUS("hdLod: getting camera position...");
-    GfVec3d cameraPos = _GetCameraPosition();
-    TF_STATUS("hdLod: camera at (%.1f, %.1f, %.1f)",
-        cameraPos[0], cameraPos[1], cameraPos[2]);
+    GfVec3d cameraPos = _cachedCameraPos;
 
     std::unordered_set<SdfPath, SdfPath::Hash> newHidden;
 
@@ -560,11 +547,14 @@ HdLodSceneIndex::_EvaluateLod()
             continue;
         }
 
-        // Get the world position of the group prim for distance computation.
-        // For POC: skip xform read (known crash in GetTypedValue on some
-        // post-flattening xform data sources). Use origin.
-        // TODO: Fix xform reading for production.
+        // Use cached group position (read on main thread in _RebuildCache)
         GfVec3d groupPos(0.0, 0.0, 0.0);
+        {
+            auto posIt = _groupPositions.find(groupPath);
+            if (posIt != _groupPositions.end()) {
+                groupPos = posIt->second;
+            }
+        }
         TF_STATUS("hdLod: group %s pos=(%.1f,%.1f,%.1f) dist=%.1f",
             groupPath.GetText(), groupPos[0], groupPos[1], groupPos[2],
             (cameraPos - groupPos).GetLength());
