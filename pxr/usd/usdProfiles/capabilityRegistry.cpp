@@ -38,15 +38,11 @@ UsdProfilesCapabilityRegistry::_LoadFromPlugins()
     PlugPluginPtrVector allPlugins = plugReg.GetAllPlugins();
 
     for (const PlugPluginPtr& plugin : allPlugins) {
+        // Plugin metadata is the "Info" dict from plugInfo.json
+        // (the Plug framework strips the outer Plugins[]/Info wrapper).
         const JsObject& metadata = plugin->GetMetadata();
-        const JsObject::const_iterator infoIt = metadata.find("Info");
-        if (infoIt == metadata.end() || !infoIt->second.IsObject()) {
-            continue;
-        }
-
-        const JsObject& info = infoIt->second.GetJsObject();
-        const JsObject::const_iterator capsIt = info.find("Capabilities");
-        if (capsIt == info.end() || !capsIt->second.IsObject()) {
+        const JsObject::const_iterator capsIt = metadata.find("Capabilities");
+        if (capsIt == metadata.end() || !capsIt->second.IsObject()) {
             continue;
         }
 
