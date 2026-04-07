@@ -245,10 +245,11 @@ void HdLodSceneIndex::_UpdateCameraPosition()
     if (_cameraPath.IsEmpty()) return;
 
     // Read camera position from the USD stage.
-    // NOTE: Hydra's flattened xform data source GetTypedValue(0.0f) crashes
-    // on our purpose-visibility-modified build (null vtable in matrix DS).
-    // This is a known issue in our fork. Reading from the USD stage via
-    // ComputeLocalToWorldTransform is equivalent and always safe.
+    // The Hydra flattened xform data source has a bug in our fork where
+    // _MatrixCombinerDataSource's initializer dereferences parent handles
+    // without null checks (see issue #22). Using ComputeLocalToWorldTransform
+    // from the USD stage is equivalent and safe.
+    // TODO: Switch to Hydra xform read once #22 is fixed.
     if (_stage) {
         UsdPrim camPrim = _stage->GetPrimAtPath(_cameraPath);
         if (camPrim) {
@@ -357,13 +358,14 @@ void HdLodSceneIndex::_EvaluateLod()
             continue;
         }
 
-        // Group position (read from USD stage — always safe)
+        // Group position — read from USD stage (Hydra xform bug, issue #22)
         GfVec3d groupPos(0, 0, 0);
         if (_stage) {
             UsdPrim gp = _stage->GetPrimAtPath(groupPath);
             if (gp) {
-                // Groups are typically at origin or have static xforms
-                // For animated groups, would need time-code tracking
+                UsdGeomXformable xf(gp);
+                groupPos = xf.ComputeLocalToWorldTransform(
+                    UsdTimeCode::Default()).ExtractTranslation();
             }
         }
 
