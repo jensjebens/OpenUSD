@@ -213,31 +213,31 @@ void HdLodSceneIndex::_PrimsDirtied(
     const HdSceneIndexBase &sender,
     const HdSceneIndexObserver::DirtiedPrimEntries &entries)
 {
-    bool needsEval = false;
-
+// Check if ANY prim has an xform dirty signal — this fires on every
+    // frame during UsdView playback when animated prims change.
+    // Don't filter by camera path: the viewport camera may be a free-cam
+    // that doesn't correspond to a USD prim, and animated objects (not the
+    // camera) are what get dirtied during scrubbing.
+    // (Pattern from Newton's HdExec scene index plugin.)
+    bool xformDirty = false;
     for (const auto &e : entries) {
-        for (const auto &loc : e.dirtyLocators) {
-            if (!loc.IsEmpty() &&
-                loc.GetFirstElement() == HdXformSchemaTokens->xform) {
-                // Camera xform changed — update position
-                if (e.primPath == _cameraPath) {
-                    _UpdateCameraPosition();
-                    needsEval = true;
-                }
-                break;
-            }
+        if (e.dirtyLocators.Contains(
+                HdXformSchema::GetDefaultLocator())) {
+            xformDirty = true;
+            break;
         }
+    }
+
+    if (xformDirty && !_cameraPath.IsEmpty()) {
+        _UpdateCameraPosition();
+        _EvaluateLod();
     }
 
     // Also evaluate on first dirty after prims are fully added
     if (!_lodInitialized && !_lodGroups.empty() && !_cameraPath.IsEmpty()) {
         _UpdateCameraPosition();
-        needsEval = true;
-        _lodInitialized = true;
-    }
-
-    if (needsEval) {
         _EvaluateLod();
+        _lodInitialized = true;
     }
 
     _SendPrimsDirtied(entries);
