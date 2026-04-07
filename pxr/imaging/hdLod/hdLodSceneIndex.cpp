@@ -176,6 +176,13 @@ void HdLodSceneIndex::_PrimsAdded(
         }
     }
 
+    // Re-evaluate LOD on PrimsAdded — UsdView frame scrubbing sends
+    // PrimsAdded (not PrimsDirtied) when animated prims change.
+    if (!_cameraPath.IsEmpty() && _stage) {
+        _UpdateCameraPosition();
+        _EvaluateLod();
+    }
+
     _SendPrimsAdded(entries);
 }
 
