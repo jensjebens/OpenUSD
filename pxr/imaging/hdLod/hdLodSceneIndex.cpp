@@ -244,14 +244,30 @@ void HdLodSceneIndex::_UpdateCameraPosition()
 {
     if (_cameraPath.IsEmpty()) return;
 
-    // Read camera position from the USD stage.
-    // Hydra's flattened xform GetTypedValue crashes even with null checks
-    // (issue #22 — _MatrixCombinerDataSource fix not sufficient, deeper
-    // issue in our fork's flattening pipeline). Stage read is equivalent.
+    // Read camera world-space position from Hydra's flattened xform.
+    // Post-flattening scene index plugins receive world-space matrices
+    // via HdXformSchema after HdFlatteningSceneIndex (step 6).
+    const auto &input = _GetInputSceneIndex();
+    HdSceneIndexPrim camPrim = input->GetPrim(_cameraPath);
+
+    if (camPrim.dataSource) {
+        HdXformSchema xs = HdXformSchema::GetFromParent(camPrim.dataSource);
+        if (xs.IsDefined()) {
+            HdMatrixDataSourceHandle matDs = xs.GetMatrix();
+            if (matDs) {
+                GfMatrix4d mat = matDs->GetTypedValue(0.0f);
+                _cachedCameraPos = mat.ExtractTranslation();
+                return;
+            }
+        }
+    }
+
+    // Fallback: read from USD stage (e.g. during initial scene population
+    // when Hydra data sources may not be fully initialized)
     if (_stage) {
-        UsdPrim camPrim = _stage->GetPrimAtPath(_cameraPath);
-        if (camPrim) {
-            UsdGeomXformable xf(camPrim);
+        UsdPrim usdPrim = _stage->GetPrimAtPath(_cameraPath);
+        if (usdPrim) {
+            UsdGeomXformable xf(usdPrim);
             _cachedCameraPos = xf.ComputeLocalToWorldTransform(
                 UsdTimeCode::Default()).ExtractTranslation();
         }

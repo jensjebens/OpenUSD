@@ -4,9 +4,7 @@
             "Info": {
                 "Types": {
                     "HdLod_SceneIndexPlugin": {
-                        "bases": [
-                            "HdSceneIndexPlugin"
-                        ],
+                        "bases": ["HdSceneIndexPlugin"],
                         "displayName": "HdLodSceneIndex",
                         "loadWithRenderer": "",
                         "priority": 0
