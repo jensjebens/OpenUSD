@@ -2,3 +2,11 @@
 
 # Public Classes
 profileAPI
+tokens
+
+# Python Module Files
+
+# Resource Files
+generatedSchema.usda
+plugInfo.json
+schema.usda:usdProfiles/schema.usda
