@@ -7,8 +7,6 @@
 #ifndef PXR_IMAGING_HD_LOD_SCENE_INDEX_H
 #define PXR_IMAGING_HD_LOD_SCENE_INDEX_H
 
-/// \file hdLod/hdLodSceneIndex.h
-
 #include "pxr/pxr.h"
 #include "pxr/imaging/hdLod/api.h"
 #include "pxr/imaging/hd/filteringSceneIndex.h"
@@ -25,18 +23,6 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DECLARE_WEAK_AND_REF_PTRS(HdLodSceneIndex);
 
-/// \class HdLodSceneIndex
-///
-/// A scene index filter that implements LOD (Level of Detail) switching.
-///
-/// This filter reads LodGroupAPI and LodItemAPI from the USD stage
-/// (via a captured stage reference) and evaluates distance-based LOD
-/// selection with hysteresis. Non-active LodItem prims have visibility=false
-/// overlaid on all their renderable descendants.
-///
-/// The stage is captured via UsdNotice::StageContentsChanged, following
-/// the same pattern as HdExecComputedTransformSceneIndex.
-///
 class HdLodSceneIndex final : public HdSingleInputFilteringSceneIndexBase
 {
 public:
@@ -44,11 +30,9 @@ public:
     static HdLodSceneIndexRefPtr New(
         const HdSceneIndexBaseRefPtr &inputSceneIndex);
 
-    /// Set the USD stage used to read LOD schema data.
     HDLOD_API
     static void SetGlobalStage(const UsdStageRefPtr &stage);
 
-    // HdSceneIndexBase overrides
     HDLOD_API
     HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override;
 
@@ -59,7 +43,6 @@ protected:
     HDLOD_API
     HdLodSceneIndex(const HdSceneIndexBaseRefPtr &inputSceneIndex);
 
-    // HdSingleInputFilteringSceneIndexBase overrides
     void _PrimsAdded(
         const HdSceneIndexBase &sender,
         const HdSceneIndexObserver::AddedPrimEntries &entries) override;
@@ -73,62 +56,46 @@ protected:
         const HdSceneIndexObserver::DirtiedPrimEntries &entries) override;
 
 private:
-    // Lazy bootstrap: capture stage on first access if available.
-    void _TryBootstrap();
-
-    // Evaluate LOD selection for all LodGroup prims and update
-    // _hiddenRenderables. Sends dirty notices for any changed renderables.
-    void _EvaluateLod();
-
-    // Rebuild the _lodGroups and _descendantCache maps by walking the scene.
-    void _RebuildCache();
-
-    // Walk descendants of lodItemPath, collecting renderable paths into out.
+    // Cache rebuild (safe in _PrimsAdded — no xform reads)
+    void _RebuildGroupCache();
     void _CollectRenderables(const SdfPath &primPath,
                              std::vector<SdfPath> &out) const;
-
-    // Get camera world position from the active camera prim's xform.
-
-    // Check if a prim type is renderable (Rprim).
     static bool _IsRenderable(const TfToken &primType);
 
-    // For each LodGroup prim path, the ordered list of LodItem prim paths.
-    std::unordered_map<SdfPath, std::vector<SdfPath>, SdfPath::Hash> _lodGroups;
+    // Camera position update (safe in _PrimsDirtied)
+    void _UpdateCameraPosition();
 
-    // For each LodItem prim path, the list of renderable descendant paths.
-    std::unordered_map<SdfPath, std::vector<SdfPath>, SdfPath::Hash>
-        _descendantCache;
+    // LOD evaluation (safe in _PrimsDirtied, after camera update)
+    void _EvaluateLod();
 
-    // Set of renderable paths that are currently hidden due to LOD.
-    std::unordered_set<SdfPath, SdfPath::Hash> _hiddenRenderables;
-
-    // Cached camera position (updated on each _RebuildCache)
-    GfVec3d _cachedCameraPos;
-
-    // Per-group cached world position
-    std::unordered_map<SdfPath, GfVec3d, SdfPath::Hash> _groupPositions;
-
-    // Per-group previous active LOD index for hysteresis.
-    std::unordered_map<SdfPath, int, SdfPath::Hash> _prevActiveIndex;
-
-    // Per-group cached thresholds (read from LodGroup prim).
-    struct _GroupThresholds {
+    // LOD group data (from USD stage)
+    struct _GroupData {
+        std::vector<SdfPath> lodItems;
         VtArray<float> minThresholds;
         VtArray<float> maxThresholds;
     };
-    std::unordered_map<SdfPath, _GroupThresholds, SdfPath::Hash>
-        _groupThresholds;
+    std::unordered_map<SdfPath, _GroupData, SdfPath::Hash> _lodGroups;
 
-    // Reentrancy guard to prevent infinite rebuild loops
-    bool _evaluating = false;
+    // Renderable descendants per LOD item
+    std::unordered_map<SdfPath, std::vector<SdfPath>, SdfPath::Hash>
+        _descendantCache;
 
-    // USD stage reference for reading LOD schema data (relationships, attrs)
+    // Hidden renderables (visibility overlay)
+    std::unordered_set<SdfPath, SdfPath::Hash> _hiddenRenderables;
+
+    // Per-group hysteresis state
+    std::unordered_map<SdfPath, int, SdfPath::Hash> _prevActiveIndex;
+
+    // Cached camera state
+    SdfPath _cameraPath;
+    GfVec3d _cachedCameraPos{0, 0, 0};
+    bool _lodInitialized = false;
+
+    // Stage reference
     UsdStageRefPtr _stage;
-
-    // Global stage captured via UsdNotice
     static UsdStageRefPtr _sGlobalStage;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
 
-#endif // PXR_IMAGING_HD_LOD_SCENE_INDEX_H
+#endif
