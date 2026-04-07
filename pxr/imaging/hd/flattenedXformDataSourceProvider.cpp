@@ -24,7 +24,10 @@ public:
         HdMatrixDataSourceHandle localMatrix)
         : _parent(std::move(parentMatrix))
         , _local(std::move(localMatrix))
-        , _cachedResultAt0(_local->GetTypedValue(0) * _parent->GetTypedValue(0))
+        , _cachedResultAt0(
+            (_local && _parent)
+                ? _local->GetTypedValue(0) * _parent->GetTypedValue(0)
+                : GfMatrix4d().SetIdentity())
     {
     }
 
@@ -56,8 +59,17 @@ public:
         // evaluate the extra memory used, and also figure out a lightweight
         // storage mechanism (since GetTypedValue can be called concurrently,
         // but a whole concurrent_map<Time,Matrix> might be too heavy).
-        return _local->GetTypedValue(shutterOffset) *
-            _parent->GetTypedValue(shutterOffset);
+        if (_local && _parent) {
+            return _local->GetTypedValue(shutterOffset) *
+                _parent->GetTypedValue(shutterOffset);
+        }
+        if (_local) {
+            return _local->GetTypedValue(shutterOffset);
+        }
+        if (_parent) {
+            return _parent->GetTypedValue(shutterOffset);
+        }
+        return GfMatrix4d().SetIdentity();
     }
 
 protected:
