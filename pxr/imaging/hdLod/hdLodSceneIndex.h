@@ -89,6 +89,7 @@ private:
     // Cached camera state
     SdfPath _cameraPath;
     GfVec3d _cachedCameraPos{0, 0, 0};
+    bool _evaluatingLod = false;
     bool _lodInitialized = false;
 
     // Stage reference

@@ -130,13 +130,11 @@ HdLodSceneIndex::HdLodSceneIndex(const HdSceneIndexBaseRefPtr &in)
 HdSceneIndexPrim
 HdLodSceneIndex::GetPrim(const SdfPath &primPath) const
 {
-    // Lazy LOD re-evaluation: read the camera's flattened xform from the
-    // input scene index on every GetPrim() call. The xform data source
-    // evaluates at the current render time (set by UsdImagingStageSceneIndex
-    // via SetTime), so the position reflects the actual animation frame.
-    // This catches frame changes during UsdView playback even when
-    // _PrimsDirtied doesn't propagate to our plugin.
-    if (_stage && !_cameraPath.IsEmpty() && !_lodGroups.empty()) {
+    // Lazy LOD re-evaluation: check the camera's flattened xform once per
+    // render pass. Uses a reentrancy guard to prevent infinite loops
+    // (_EvaluateLod sends dirty → triggers render → GetPrim → evaluate...)
+    if (_stage && !_cameraPath.IsEmpty() && !_lodGroups.empty()
+        && !_evaluatingLod) {
         const auto &input = _GetInputSceneIndex();
         HdSceneIndexPrim camPrim = input->GetPrim(_cameraPath);
         if (camPrim.dataSource) {
@@ -149,8 +147,10 @@ HdLodSceneIndex::GetPrim(const SdfPath &primPath) const
                         .ExtractTranslation();
                     if (pos != _cachedCameraPos) {
                         auto *self = const_cast<HdLodSceneIndex *>(this);
+                        self->_evaluatingLod = true;
                         self->_cachedCameraPos = pos;
                         self->_EvaluateLod();
+                        self->_evaluatingLod = false;
                     }
                 }
             }
