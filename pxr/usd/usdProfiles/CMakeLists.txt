@@ -14,16 +14,21 @@ pxr_library(usdProfiles
 
     PUBLIC_CLASSES
         capabilityRegistry
+        profileAPI
         profileRegistry
         queries
+        tokens
 
     PUBLIC_HEADERS
         api.h
 
     PYMODULE_CPPFILES
+        module.cpp
         wrapCapabilityRegistry.cpp
+        wrapProfileAPI.cpp
         wrapProfileRegistry.cpp
         wrapQueries.cpp
+        wrapTokens.cpp
 
     PYMODULE_FILES
         __init__.py
