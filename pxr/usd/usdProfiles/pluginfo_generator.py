@@ -42,6 +42,14 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
+
 
 @dataclass
 class CapabilityDef:
@@ -66,6 +74,7 @@ class PlugInfoGenerator:
     docs_root: str | None = None
     capabilities_dir: str | None = None
     profiles_dir: str | None = None
+    profiles_toml: str | None = None
     features_dir: str | None = None
     vendor_prefix: str = "com.nvidia.simready"
     plugin_name: str = "usdProfiles"
@@ -131,7 +140,7 @@ class PlugInfoGenerator:
             )
             capabilities.append(cap_def)
 
-        # Convert profiles
+        # Convert profiles from omni.usd_profiles parser
         for profile in store.profiles:
             profile_id = f"{self.vendor_prefix}.{profile.id}"
 
@@ -152,6 +161,28 @@ class PlugInfoGenerator:
                 is_profile=True,
             )
             capabilities.append(cap_def)
+
+        # Load TOML profiles (SimReady Foundation format)
+        toml_profiles = self._load_toml_profiles()
+        if toml_profiles:
+            # Merge TOML profiles — they reference features by ID
+            # Build a set of known feature IDs for matching
+            known_features = {f"{self.vendor_prefix}.{feat.id}" for feat in store.features}
+            for prof in toml_profiles:
+                # Check if already added from markdown
+                if not any(c.id == prof.id for c in capabilities):
+                    # Resolve feature references — match against known features
+                    resolved_preds = []
+                    for pred in prof.predecessors:
+                        if pred in known_features:
+                            resolved_preds.append(pred)
+                        else:
+                            # Still add it (might be from another plugin)
+                            resolved_preds.append(pred)
+                    if not resolved_preds:
+                        resolved_preds = [self.vendor_prefix]
+                    prof.predecessors = resolved_preds
+                    capabilities.append(prof)
 
         # Convert features as capabilities too (they're cross-cutting requirement sets)
         for feature in store.features:
@@ -183,7 +214,98 @@ class PlugInfoGenerator:
         """Fallback: load from a simple directory structure."""
         # For now, return empty — this would parse markdown files directly
         print("WARNING: omni.usd_profiles not available, using directory fallback")
-        return []
+
+        # But we can still load TOML profiles
+        capabilities = []
+
+        # Base vendor capability
+        capabilities.append(CapabilityDef(
+            id=self.vendor_prefix,
+            docstring=f"{self.vendor_prefix} asset capabilities",
+            predecessors=["usd"],
+        ))
+
+        toml_profiles = self._load_toml_profiles()
+        capabilities.extend(toml_profiles)
+
+        return capabilities
+
+    def _load_toml_profiles(self) -> list[CapabilityDef]:
+        """
+        Load profiles from TOML file(s) in SimReady Foundation format.
+
+        TOML format:
+            [Profile-Name]
+            "1.0.0" = {features = [
+                {"FEATURE_ID" = {version = "0.1.0"}},
+            ]}
+
+        Returns CapabilityDef entries with isProfile=True.
+        """
+        if tomllib is None:
+            return []
+
+        # Find TOML files
+        toml_paths = []
+        if self.profiles_toml:
+            toml_paths.append(self.profiles_toml)
+        elif self.profiles_dir and os.path.isdir(self.profiles_dir):
+            for f in os.listdir(self.profiles_dir):
+                if f.endswith(".toml"):
+                    toml_paths.append(os.path.join(self.profiles_dir, f))
+        elif self.docs_root:
+            profiles_dir = os.path.join(self.docs_root, "profiles")
+            if os.path.isdir(profiles_dir):
+                for f in os.listdir(profiles_dir):
+                    if f.endswith(".toml"):
+                        toml_paths.append(os.path.join(profiles_dir, f))
+
+        if not toml_paths:
+            return []
+
+        capabilities = []
+        for toml_path in toml_paths:
+            with open(toml_path, "rb") as f:
+                data = tomllib.load(f)
+
+            for profile_name, versions in data.items():
+                # Use the latest version
+                if not isinstance(versions, dict):
+                    continue
+
+                latest_version = sorted(versions.keys())[-1]
+                version_data = versions[latest_version]
+
+                if not isinstance(version_data, dict):
+                    continue
+
+                features_list = version_data.get("features", [])
+
+                # Extract feature IDs from the list of dicts
+                predecessors = []
+                for feat_entry in features_list:
+                    if isinstance(feat_entry, dict):
+                        for feat_id in feat_entry.keys():
+                            # Convert feature ID to capability namespace
+                            cap_feat_id = f"{self.vendor_prefix}.{feat_id}"
+                            predecessors.append(cap_feat_id)
+
+                if not predecessors:
+                    predecessors = [self.vendor_prefix]
+
+                # Convert profile name to capability ID
+                # "Prop-Robotics-Neutral" → "com.nvidia.simready.prop_robotics_neutral"
+                profile_id_suffix = profile_name.lower().replace("-", "_")
+                profile_id = f"{self.vendor_prefix}.{profile_id_suffix}"
+
+                capabilities.append(CapabilityDef(
+                    id=profile_id,
+                    docstring=f"{profile_name} (v{latest_version})",
+                    predecessors=predecessors,
+                    is_profile=True,
+                ))
+
+        return capabilities
 
     def _build_pluginfo(self, capabilities: list[CapabilityDef]) -> dict[str, Any]:
         """Build the plugInfo.json structure."""
@@ -236,6 +358,8 @@ def main():
                        help="Capabilities directory (if not using --docs-root)")
     parser.add_argument("--profiles-dir",
                        help="Profiles directory")
+    parser.add_argument("--profiles-toml",
+                       help="Profiles TOML file (SimReady Foundation format)")
     parser.add_argument("--features-dir",
                        help="Features directory")
     parser.add_argument("--output", "-o", default="plugInfo.generated.json",
@@ -251,12 +375,13 @@ def main():
 
     if args.demo:
         # Generate from the already-installed omni.capabilities as a demo
-        _generate_demo(args.output, args.vendor_prefix)
+        _generate_demo(args.output, args.vendor_prefix, args.profiles_toml)
     else:
         gen = PlugInfoGenerator(
             docs_root=args.docs_root,
             capabilities_dir=args.capabilities_dir,
             profiles_dir=args.profiles_dir,
+            profiles_toml=args.profiles_toml,
             features_dir=args.features_dir,
             vendor_prefix=args.vendor_prefix,
             plugin_name=args.plugin_name,
@@ -271,7 +396,7 @@ def main():
         print(f"  {validators} validator bindings")
 
 
-def _generate_demo(output_path: str, vendor_prefix: str):
+def _generate_demo(output_path: str, vendor_prefix: str, profiles_toml: str | None = None):
     """Generate a demo plugInfo.json from installed omni.capabilities."""
     try:
         from omni.capabilities import Capabilities, Requirements, Profiles, Features
@@ -303,7 +428,7 @@ def _generate_demo(output_path: str, vendor_prefix: str):
             "validators": validators,
         }
 
-    # Convert profiles
+    # Convert profiles from omni.capabilities
     for profile in Profiles:
         profile_id = f"{vendor_prefix}.{profile.id}"
         preds = [f"{vendor_prefix}.{cap.id}" for cap in profile.capabilities]
@@ -327,6 +452,22 @@ def _generate_demo(output_path: str, vendor_prefix: str):
             "predecessors": [vendor_prefix],
             "validators": validators,
         }
+
+    # Load TOML profiles if provided
+    if profiles_toml and tomllib:
+        gen = PlugInfoGenerator(
+            profiles_toml=profiles_toml,
+            vendor_prefix=vendor_prefix,
+        )
+        toml_profiles = gen._load_toml_profiles()
+        for prof in toml_profiles:
+            if prof.id not in caps_dict:
+                entry = {
+                    "docstring": prof.docstring,
+                    "predecessors": prof.predecessors,
+                    "isProfile": True,
+                }
+                caps_dict[prof.id] = entry
 
     pluginfo = {
         "Plugins": [{
