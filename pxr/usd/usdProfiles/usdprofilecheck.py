@@ -121,7 +121,9 @@ def generate_dot_graph(namespace=None, include_predecessors=False):
         is_profile = reg.IsProfile(cap_name)
 
         label = cap_name
-        if val_count > 0:
+        if val_count == 1:
+            label += f"\\n(1 validator)"
+        elif val_count > 1:
             label += f"\\n({val_count} validators)"
 
         # Choose shape and color by type
