@@ -39,10 +39,17 @@ pxr_library(usdProfiles
 
 pxr_test_scripts(
     testenv/testUsdProfilesBasic.py
+    testenv/testUsdProfilesCapabilityBridge.py
 )
 
 pxr_register_test(testUsdProfilesBasic
     PYTHON
     COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdProfilesBasic"
+    EXPECTED_RETURN_CODE 0
+)
+
+pxr_register_test(testUsdProfilesCapabilityBridge
+    PYTHON
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdProfilesCapabilityBridge"
     EXPECTED_RETURN_CODE 0
 )
