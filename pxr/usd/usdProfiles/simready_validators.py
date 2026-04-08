@@ -348,8 +348,15 @@ SIMREADY_VALIDATORS = [
 ]
 
 
+_registered = False
+
 def register_simready_validators():
     """Register all SimReady validators with the UsdValidation registry."""
+    global _registered
+    if _registered:
+        return UsdValidation.ValidationRegistry()
+    _registered = True
+
     registry = UsdValidation.ValidationRegistry()
 
     for name, doc, keywords, schemaTypes, fn, granularity in SIMREADY_VALIDATORS:
