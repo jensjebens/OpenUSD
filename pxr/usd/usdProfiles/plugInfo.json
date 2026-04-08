@@ -24,12 +24,71 @@
                         "predecessors": []
                     },
                     "usd.core": {
-                        "docstring": "Core USD capabilities for interchange",
-                        "predecessors": ["usd"]
+                        "docstring": "Core USD capabilities for interchange — composition, types, stage metadata",
+                        "predecessors": ["usd"],
+                        "validators": [
+                            "usdValidation:CompositionErrorTest",
+                            "usdValidation:StageMetadataChecker",
+                            "usdValidation:AttributeTypeMismatch"
+                        ]
+                    },
+                    "usd.geom": {
+                        "docstring": "USD geometry capabilities — boundable encapsulation, subset families, stage metadata",
+                        "predecessors": ["usd"],
+                        "validators": [
+                            "usdGeomValidators:EncapsulationChecker",
+                            "usdGeomValidators:StageMetadataChecker",
+                            "usdGeomValidators:SubsetFamilies",
+                            "usdGeomValidators:SubsetParentIsImageable"
+                        ]
+                    },
+                    "usd.shade": {
+                        "docstring": "USD shading capabilities — material bindings, encapsulation, shader compliance",
+                        "predecessors": ["usd"],
+                        "validators": [
+                            "usdShadeValidators:EncapsulationMaterialValidator",
+                            "usdShadeValidators:EncapsulationRulesValidator",
+                            "usdShadeValidators:MaterialBindingApiAppliedValidator",
+                            "usdShadeValidators:MaterialBindingCollectionValidator",
+                            "usdShadeValidators:MaterialBindingRelationships",
+                            "usdShadeValidators:NormalMapTextureValidator",
+                            "usdShadeValidators:ShaderSdrCompliance",
+                            "usdShadeValidators:SubsetMaterialBindFamilyName",
+                            "usdShadeValidators:SubsetsMaterialBindFamily"
+                        ]
+                    },
+                    "usd.physics": {
+                        "docstring": "USD physics capabilities — rigid bodies, colliders, articulations, joints",
+                        "predecessors": ["usd"],
+                        "validators": [
+                            "usdPhysicsValidators:RigidBodyChecker",
+                            "usdPhysicsValidators:ColliderChecker",
+                            "usdPhysicsValidators:ArticulationChecker",
+                            "usdPhysicsValidators:PhysicsJointChecker"
+                        ]
+                    },
+                    "usd.skel": {
+                        "docstring": "USD skeleton capabilities — skeletal binding and deformation",
+                        "predecessors": ["usd"],
+                        "validators": [
+                            "usdSkelValidators:SkelBindingApiAppliedValidator",
+                            "usdSkelValidators:SkelBindingApiValidator"
+                        ]
+                    },
+                    "usd.utils": {
+                        "docstring": "USD utility capabilities — package validation, file extensions, references",
+                        "predecessors": ["usd"],
+                        "validators": [
+                            "usdUtilsValidators:FileExtensionValidator",
+                            "usdUtilsValidators:MissingReferenceValidator",
+                            "usdUtilsValidators:PackageEncapsulationValidator",
+                            "usdUtilsValidators:RootPackageValidator",
+                            "usdUtilsValidators:UsdzPackageValidator"
+                        ]
                     },
                     "usd.core.v25_05": {
-                        "docstring": "USD core profile for the 25.05 release",
-                        "predecessors": ["usd.core"],
+                        "docstring": "USD core profile for the 25.05 release — all canonical USD validators",
+                        "predecessors": ["usd.core", "usd.geom", "usd.shade", "usd.physics", "usd.skel", "usd.utils"],
                         "isProfile": true
                     },
                     "aousd.interchange": {
@@ -47,7 +106,7 @@
                     },
                     "com.nvidia.simready.geom": {
                         "docstring": "SimReady geometry capabilities",
-                        "predecessors": ["com.nvidia.simready"],
+                        "predecessors": ["com.nvidia.simready", "usd.geom"],
                         "validators": [
                             "com.nvidia.simready:VG.MESH.001",
                             "com.nvidia.simready:VG.014",
@@ -57,7 +116,7 @@
                     },
                     "com.nvidia.simready.physics": {
                         "docstring": "SimReady physics capabilities",
-                        "predecessors": ["com.nvidia.simready"]
+                        "predecessors": ["com.nvidia.simready", "usd.physics"]
                     },
                     "com.nvidia.simready.physics.rigidBodies": {
                         "docstring": "SimReady rigid body physics",
@@ -78,7 +137,7 @@
                     },
                     "com.nvidia.simready.units": {
                         "docstring": "SimReady units requirements",
-                        "predecessors": ["com.nvidia.simready"],
+                        "predecessors": ["com.nvidia.simready", "usd.core"],
                         "validators": [
                             "com.nvidia.simready:UN.001"
                         ]
