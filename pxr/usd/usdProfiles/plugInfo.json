@@ -47,7 +47,13 @@
                     },
                     "com.nvidia.simready.geom": {
                         "docstring": "SimReady geometry capabilities",
-                        "predecessors": ["com.nvidia.simready"]
+                        "predecessors": ["com.nvidia.simready"],
+                        "validators": [
+                            "com.nvidia.simready:VG.MESH.001",
+                            "com.nvidia.simready:VG.014",
+                            "com.nvidia.simready:VG.027",
+                            "com.nvidia.simready:VG.025"
+                        ]
                     },
                     "com.nvidia.simready.physics": {
                         "docstring": "SimReady physics capabilities",
@@ -55,13 +61,35 @@
                     },
                     "com.nvidia.simready.physics.rigidBodies": {
                         "docstring": "SimReady rigid body physics",
-                        "predecessors": ["com.nvidia.simready.physics"]
+                        "predecessors": ["com.nvidia.simready.physics"],
+                        "validators": [
+                            "com.nvidia.simready:RB.003",
+                            "com.nvidia.simready:RB.005",
+                            "com.nvidia.simready:RB.COL.001"
+                        ]
+                    },
+                    "com.nvidia.simready.hierarchy": {
+                        "docstring": "SimReady hierarchy requirements",
+                        "predecessors": ["com.nvidia.simready"],
+                        "validators": [
+                            "com.nvidia.simready:HI.001",
+                            "com.nvidia.simready:HI.004"
+                        ]
+                    },
+                    "com.nvidia.simready.units": {
+                        "docstring": "SimReady units requirements",
+                        "predecessors": ["com.nvidia.simready"],
+                        "validators": [
+                            "com.nvidia.simready:UN.001"
+                        ]
                     },
                     "com.nvidia.simready.prop_robotics_neutral": {
                         "docstring": "SimReady neutral robotics prop profile",
                         "predecessors": [
                             "com.nvidia.simready.geom",
-                            "com.nvidia.simready.physics.rigidBodies"
+                            "com.nvidia.simready.physics.rigidBodies",
+                            "com.nvidia.simready.hierarchy",
+                            "com.nvidia.simready.units"
                         ],
                         "isProfile": true
                     }

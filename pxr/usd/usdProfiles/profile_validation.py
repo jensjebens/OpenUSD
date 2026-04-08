@@ -30,66 +30,41 @@ from pxr import Sdf, Usd, UsdProfiles, UsdValidation
 import simready_validators
 
 # ---------------------------------------------------------------------------
-# Capability → Validator keyword mapping
+# Capability → Validator resolution (via CapabilityRegistry)
 # ---------------------------------------------------------------------------
-
-# Maps capability IDs to the validator keywords they activate.
-# When a profile resolves to capabilities, we collect all matching keywords
-# and select validators that have ANY of those keywords.
-CAPABILITY_TO_KEYWORDS = {
-    "com.nvidia.simready.geom":                   ["geom"],
-    "com.nvidia.simready.physics":                ["physics"],
-    "com.nvidia.simready.physics.rigidBodies":    ["physics"],
-    "com.nvidia.simready.hierarchy":              ["hierarchy"],
-    "com.nvidia.simready.units":                  ["units"],
-    # The base simready capability activates all simready validators
-    "com.nvidia.simready":                        ["simready"],
-}
-
 
 def _get_validators_for_profile(profile_name, registry=None):
     """
-    Given a profile name, resolve its capabilities and return the
-    matching UsdValidation validators.
+    Given a profile name, resolve its capabilities via the DAG and return
+    the matching UsdValidation validators.
+
+    The capability→validator mapping is declared in plugInfo.json alongside
+    the capability definitions (no hardcoded keyword mapping needed).
     """
     if registry is None:
         registry = UsdValidation.ValidationRegistry()
 
     cap_registry = UsdProfiles.CapabilityRegistry.GetInstance()
 
-    if not cap_registry.IsProfile(profile_name):
-        print(f"WARNING: '{profile_name}' is not a registered profile")
-        # Fall back to using it as a capability
-        capabilities = [profile_name]
-    else:
-        # Get the profile itself + all transitive predecessors
-        capabilities = [profile_name] + [
-            str(c) for c in cap_registry.GetTransitivePredecessors(profile_name)
-        ]
+    if not cap_registry.IsCapability(profile_name):
+        print(f"WARNING: '{profile_name}' is not a registered capability or profile")
+        return [], [], []
 
-    # Collect keywords from capabilities
-    keywords = set()
-    for cap in capabilities:
-        cap_str = str(cap)
-        if cap_str in CAPABILITY_TO_KEYWORDS:
-            keywords.update(CAPABILITY_TO_KEYWORDS[cap_str])
+    # Get all validator names for this capability/profile (including
+    # transitive predecessors) — this is the single source of truth.
+    validator_names = [
+        str(v) for v in cap_registry.GetAllValidatorsForCapability(profile_name)
+    ]
 
-    if not keywords:
-        # If no keyword mapping found, try "simready" as fallback
-        keywords.add("simready")
+    # Resolve capabilities for display
+    capabilities = [profile_name] + [
+        str(c) for c in cap_registry.GetTransitivePredecessors(profile_name)
+    ]
 
-    # Get validators matching these keywords (deduplicated)
-    keyword_list = list(keywords)
-    seen_names = set()
-    validator_names = []
-    for md in registry.GetValidatorMetadataForKeywords(keyword_list):
-        if not md.isSuite and md.name not in seen_names:
-            seen_names.add(md.name)
-            validator_names.append(md.name)
-
+    # Load the actual UsdValidation validator objects
     validators = registry.GetOrLoadValidatorsByName(validator_names)
 
-    return validators, capabilities, keyword_list
+    return validators, capabilities, validator_names
 
 
 def validate_against_profile(asset_path, verbose=True):
@@ -156,8 +131,7 @@ def _validate_with_resolved_profile(stage, profile_name, asset_path, registry, v
         print(f"{'='*70}")
         print(f"  Profile:      {profile_name}")
         print(f"  Capabilities: {capabilities}")
-        print(f"  Keywords:     {keywords}")
-        print(f"  Validators:   {len(validators)}")
+        print(f"  Validators:   {len(validators)} (from capability DAG)")
         for v in validators:
             md = v.GetMetadata()
             print(f"    - {md.name}: {md.doc}")
