@@ -1,0 +1,341 @@
+/*!
+
+\page usdProfiles_page_front UsdProfiles : USD Profiles API Schema
+\if ( PXRUSDAPI_DOXYGEN_BUILD )
+\addtogroup usdProfiles
+\endif
+
+__UsdProfiles__ implements the
+<a href="https://github.com/PixarAnimationStudios/OpenUSD-proposals/tree/main/proposals/profiles">USD-Profiles proposal</a>,
+providing a declarative capability taxonomy for OpenUSD. It enables
+applications and assets to declare, discover, and validate functional
+capabilities through profiles and a capability directed acyclic graph (DAG).
+
+\tableofcontents
+
+\section usdProfiles_purpose Purpose and Motivation
+
+USD's flexibility via custom schemas, proprietary formats, and extensions
+makes it applicable across many industries, but that flexibility introduces
+interoperability challenges. Applications implement different subsets of USD
+schemas, leading to inconsistencies when content moves between tools.
+
+UsdProfiles addresses this by enabling applications to:
+
+\li Discover and validate a document's compatibility and runtime requirements
+\li Assess interoperability with particular scenes or scene elements
+\li Determine capability satisfaction for declared functional needs
+
+Rather than relying on ad hoc extension discovery, UsdProfiles introduces
+a standardized, declarative approach.
+
+\section usdProfiles_concepts Core Concepts
+
+\subsection usdProfiles_capabilities Capabilities
+
+A \b capability is an atomic unit of functionality, identified by a token
+using reverse domain notation:
+
+\li \c usd — base USD capability (root of the DAG)
+\li \c usd.core — core USD interchange capabilities
+\li \c com.nvidia.simready.geom — NVIDIA SimReady geometry capabilities
+\li \c com.nvidia.simready.physics.rigidBodies — rigid body physics
+
+Capabilities are organized in a directed acyclic graph (DAG) where edges
+represent "depends on" relationships (called \b predecessors). Every
+capability transitively depends on the \c usd root.
+
+\code
+usd (root)
+├── usd.core
+│   └── usd.core.v25_05  [PROFILE]
+├── aousd.interchange
+│   └── aousd.interchange.v1_0  [PROFILE]
+└── com.nvidia.simready
+    ├── com.nvidia.simready.geom
+    ├── com.nvidia.simready.physics
+    │   └── com.nvidia.simready.physics.rigidBodies
+    └── com.nvidia.simready.prop_robotics_neutral  [PROFILE]
+\endcode
+
+\subsection usdProfiles_profiles Profiles
+
+A \b profile is a capability node tagged with \c "isProfile": \c true in the
+capability DAG. It represents a coherent, named set of functionality suitable
+for a specific use case. Examples:
+
+\li \c usd.core.v25_05 — OpenUSD 25.05 baseline
+\li \c aousd.interchange.v1_0 — AOUSD interchange requirements
+\li \c com.nvidia.simready.prop_robotics_neutral — neutral robotics prop for simulation
+
+A profile's full capability set is determined by its transitive predecessors
+in the DAG. For example, \c com.nvidia.simready.prop_robotics_neutral
+expands to:
+
+\li \c com.nvidia.simready.geom
+\li \c com.nvidia.simready.physics.rigidBodies
+\li \c com.nvidia.simready.physics
+\li \c com.nvidia.simready
+\li \c usd
+
+\subsection usdProfiles_naming Naming Convention
+
+Capabilities use reverse domain notation for hierarchical clarity:
+
+\li \b Canonical capabilities: \c usd.* — maintained by OpenUSD/AOUSD
+\li \b Vendor extensions: \c com.nvidia.simready.* — NVIDIA SimReady
+\li \b Custom extensions: \c com.example.myapp.* — your organization
+
+All vendor capabilities must transitively inherit from \c usd. This ensures
+that any asset's capability requirements can always be traced back to the
+root, enabling clear compatibility reporting.
+
+\section usdProfiles_schema ProfileAPI Schema
+
+\subsection usdProfiles_schema_overview Overview
+
+The \ref UsdProfilesProfileAPI "ProfileAPI" is a single-apply API schema
+with two attributes:
+
+\li \c profiles:profile (token) — the profile identifier this prim conforms to
+\li \c profiles:capabilities (token[]) — additional explicit capability declarations
+
+\subsection usdProfiles_authoring Authoring
+
+\code{.py}
+from pxr import Usd, UsdGeom, UsdProfiles
+
+stage = Usd.Stage.CreateNew("my_asset.usda")
+root = UsdGeom.Xform.Define(stage, "/MyRobot")
+
+# Apply ProfileAPI and set a profile
+api = UsdProfiles.ProfileAPI.Apply(root.GetPrim())
+api.GetProfileAttr().Set("com.nvidia.simready.prop_robotics_neutral")
+
+# Optionally declare additional capabilities
+api.CreateCapabilitiesAttr([
+    "com.nvidia.simready.physics.rigidBodies",
+    "com.nvidia.simready.geom",
+])
+
+stage.Save()
+\endcode
+
+The resulting USD file:
+
+\code{.usda}
+#usda 1.0
+
+def Xform "MyRobot" (
+    prepend apiSchemas = ["ProfileAPI"]
+)
+{
+    token[] profiles:capabilities = [
+        "com.nvidia.simready.physics.rigidBodies",
+        "com.nvidia.simready.geom"
+    ]
+    token profiles:profile = "com.nvidia.simready.prop_robotics_neutral"
+}
+\endcode
+
+\subsection usdProfiles_resolution Resolution Semantics
+
+ProfileAPI follows a \b "nearest \b ancestor \b wins" resolution rule:
+
+\li If a prim has ProfileAPI applied with a non-empty \c profiles:profile,
+    that profile governs the prim and its descendants.
+\li If a prim does not have ProfileAPI, the nearest ancestor's profile applies.
+\li Capability requirements do \b not propagate upward through hierarchies.
+
+This enables strategic authoring at traversal boundaries for performance:
+
+\code
+/Warehouse                    ← ProfileAPI: "com.nvidia.simready.prop_robotics_neutral"
+  /Warehouse/ShelfUnit_A      ← (inherits from /Warehouse)
+    /Warehouse/ShelfUnit_A/Frame  ← (inherits from /Warehouse)
+  /Warehouse/RobotArm         ← ProfileAPI: "com.nvidia.simready.prop_robotics_neutral"
+    /Warehouse/RobotArm/Gripper   ← (inherits from /RobotArm)
+\endcode
+
+\code{.py}
+# Query effective profile — walks ancestor chain
+profile = UsdProfiles.GetEffectiveProfile(
+    stage.GetPrimAtPath("/Warehouse/ShelfUnit_A/Frame"))
+# → "com.nvidia.simready.prop_robotics_neutral" (inherited from /Warehouse)
+\endcode
+
+\section usdProfiles_registry Capability Registry
+
+\subsection usdProfiles_registry_overview Overview
+
+The \ref UsdProfilesCapabilityRegistry "CapabilityRegistry" is a singleton
+that collects capability declarations from all registered plugins at startup.
+Capabilities are declared in \c plugInfo.json:
+
+\code{.json}
+{
+    "Plugins": [{
+        "Info": {
+            "Capabilities": {
+                "com.example.myCapability": {
+                    "docstring": "Description of my capability",
+                    "predecessors": ["usd"],
+                    "isProfile": false
+                },
+                "com.example.myProfile": {
+                    "docstring": "A profile combining capabilities",
+                    "predecessors": [
+                        "com.example.myCapability",
+                        "com.nvidia.simready.geom"
+                    ],
+                    "isProfile": true
+                }
+            }
+        }
+    }]
+}
+\endcode
+
+\subsection usdProfiles_registry_query Querying the Registry
+
+\code{.py}
+registry = UsdProfiles.CapabilityRegistry.GetInstance()
+
+# Check membership
+registry.IsCapability("com.nvidia.simready.geom")  # True
+registry.IsProfile("com.nvidia.simready.prop_robotics_neutral")  # True
+
+# Navigate the DAG
+registry.GetPredecessors("com.nvidia.simready.geom")
+# → ["com.nvidia.simready"]
+
+registry.GetTransitivePredecessors(
+    "com.nvidia.simready.prop_robotics_neutral")
+# → ["com.nvidia.simready.geom",
+#     "com.nvidia.simready.physics.rigidBodies",
+#     "com.nvidia.simready.physics",
+#     "com.nvidia.simready",
+#     "usd"]
+
+# List all
+registry.GetAllCapabilities()  # all registered capability tokens
+registry.GetAllProfiles()      # only those tagged as profiles
+\endcode
+
+\subsection usdProfiles_registry_extension Extending the Registry
+
+Any USD plugin can declare additional capabilities in its \c plugInfo.json.
+The registry loads from all plugins, so capabilities from multiple sources
+are merged into a single DAG. This enables:
+
+\li \b OpenUSD core to declare canonical \c usd.* capabilities
+\li \b AOUSD to declare interchange \c aousd.* capabilities
+\li \b Vendors to declare domain-specific capabilities (\c com.nvidia.simready.*)
+\li \b Studios to declare project-specific capabilities (\c com.studio.project.*)
+
+\section usdProfiles_profile_registry Profile Registry
+
+The \ref UsdProfilesProfileRegistry "ProfileRegistry" is a convenience
+layer that resolves profiles to their full capability sets:
+
+\code{.py}
+preg = UsdProfiles.ProfileRegistry.GetInstance()
+preg.GetAllProfiles()
+preg.GetProfileCapabilities("com.nvidia.simready.prop_robotics_neutral")
+# → ["com.nvidia.simready.prop_robotics_neutral",
+#     "com.nvidia.simready.geom",
+#     "com.nvidia.simready.physics.rigidBodies",
+#     "com.nvidia.simready.physics",
+#     "com.nvidia.simready",
+#     "usd"]
+\endcode
+
+\section usdProfiles_queries Convenience Query Functions
+
+Two free functions provide the most common query patterns:
+
+\li \ref UsdProfilesGetEffectiveProfile() — Walk the ancestor chain and
+    return the nearest authored profile token.
+\li \ref UsdProfilesGetEffectiveCapabilities() — Return the full capability
+    set implied by the effective profile, plus any explicit
+    \c profiles:capabilities on the authoring prim.
+
+\code{.py}
+# Get the profile governing this prim
+profile = UsdProfiles.GetEffectiveProfile(prim)
+
+# Get all capabilities this prim satisfies
+caps = UsdProfiles.GetEffectiveCapabilities(prim)
+\endcode
+
+\section usdProfiles_example Full Example: Robotics Warehouse
+
+\code{.py}
+from pxr import Usd, UsdGeom, UsdProfiles
+
+# Create a warehouse scene
+stage = Usd.Stage.CreateNew("warehouse.usda")
+stage.SetMetadata("upAxis", "Z")
+stage.SetMetadata("metersPerUnit", 1.0)
+
+# Warehouse root — declares SimReady profile
+warehouse = UsdGeom.Xform.Define(stage, "/Warehouse")
+api = UsdProfiles.ProfileAPI.Apply(warehouse.GetPrim())
+api.GetProfileAttr().Set("com.nvidia.simready.prop_robotics_neutral")
+
+# Shelving (inherits profile from warehouse)
+shelf = UsdGeom.Xform.Define(stage, "/Warehouse/ShelfUnit_A")
+frame = UsdGeom.Xform.Define(stage, "/Warehouse/ShelfUnit_A/Frame")
+
+# Robot arm (own profile with explicit capabilities)
+robot = UsdGeom.Xform.Define(stage, "/Warehouse/RobotArm")
+robot_api = UsdProfiles.ProfileAPI.Apply(robot.GetPrim())
+robot_api.GetProfileAttr().Set(
+    "com.nvidia.simready.prop_robotics_neutral")
+robot_api.CreateCapabilitiesAttr([
+    "com.nvidia.simready.physics.rigidBodies",
+    "com.nvidia.simready.geom",
+])
+gripper = UsdGeom.Xform.Define(stage, "/Warehouse/RobotArm/Gripper")
+
+stage.Save()
+
+# --- Queries ---
+
+# Effective profiles (nearest ancestor wins)
+for path in ["/Warehouse", "/Warehouse/ShelfUnit_A/Frame",
+             "/Warehouse/RobotArm/Gripper"]:
+    prim = stage.GetPrimAtPath(path)
+    profile = UsdProfiles.GetEffectiveProfile(prim)
+    print(f"{path}: {profile}")
+
+# Full capability set
+caps = UsdProfiles.GetEffectiveCapabilities(
+    stage.GetPrimAtPath("/Warehouse/RobotArm"))
+print(f"Robot capabilities: {[str(c) for c in caps]}")
+
+# Explore the registry
+reg = UsdProfiles.CapabilityRegistry.GetInstance()
+for cap in reg.GetAllProfiles():
+    preds = reg.GetTransitivePredecessors(str(cap))
+    print(f"Profile {cap} implies: {[str(p) for p in preds]}")
+\endcode
+
+\section usdProfiles_future Future Directions
+
+The current implementation covers explicit capability queries via ProfileAPI.
+Planned extensions include:
+
+\li \b Introspective queries — infer capabilities from applied schemas
+    (e.g. UsdPhysicsRigidBodyAPI implies \c com.nvidia.simready.physics.rigidBodies)
+\li \b Traversal pruning — use ProfileAPI boundaries to optimize scene traversal
+\li \b UsdValidation integration — select validators based on profile requirements
+\li \b Build integration — guide OpenUSD builds based on capability profiles
+
+\section usdProfiles_references References
+
+\li <a href="https://github.com/PixarAnimationStudios/OpenUSD-proposals/tree/main/proposals/profiles">USD-Profiles Proposal</a>
+\li <a href="https://github.com/jensjebens/usd-profiles">Unification Research & Plans</a>
+\li <a href="https://github.com/NVIDIA/simready-foundation">NVIDIA SimReady Foundation</a>
+
+*/
