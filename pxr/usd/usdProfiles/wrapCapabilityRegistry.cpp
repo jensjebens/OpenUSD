@@ -47,5 +47,15 @@ void wrapUsdProfilesCapabilityRegistry()
         .def("GetAllProfiles",
              &This::GetAllProfiles,
              return_value_policy<TfPySequenceToList>())
+
+        .def("GetValidators",
+             &This::GetValidators,
+             (arg("id")),
+             return_value_policy<TfPySequenceToList>())
+
+        .def("GetAllValidatorsForCapability",
+             &This::GetAllValidatorsForCapability,
+             (arg("id")),
+             return_value_policy<TfPySequenceToList>())
     ;
 }

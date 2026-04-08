@@ -84,6 +84,16 @@ UsdProfilesCapabilityRegistry::_LoadFromPlugins()
                 info.isProfile = profileIt->second.GetBool();
             }
 
+            // validators
+            const JsObject::const_iterator valIt = capObj.find("validators");
+            if (valIt != capObj.end() && valIt->second.IsArray()) {
+                for (const JsValue& valVal : valIt->second.GetJsArray()) {
+                    if (valVal.IsString()) {
+                        info.validators.push_back(TfToken(valVal.GetString()));
+                    }
+                }
+            }
+
             if (_capabilities.count(capId)) {
                 TF_WARN("UsdProfilesCapabilityRegistry: Duplicate capability "
                         "'%s' from plugin '%s'; ignoring duplicate.",
@@ -182,6 +192,47 @@ UsdProfilesCapabilityRegistry::GetAllProfiles() const
             result.push_back(entry.first);
         }
     }
+    return result;
+}
+
+TfTokenVector
+UsdProfilesCapabilityRegistry::GetValidators(const TfToken& id) const
+{
+    const auto it = _capabilities.find(id);
+    if (it == _capabilities.end()) {
+        return {};
+    }
+    return it->second.validators;
+}
+
+TfTokenVector
+UsdProfilesCapabilityRegistry::GetAllValidatorsForCapability(
+    const TfToken& id) const
+{
+    if (!IsCapability(id)) {
+        return {};
+    }
+
+    // Collect validators from this capability and all transitive predecessors.
+    std::set<TfToken> seen;
+    TfTokenVector result;
+
+    // Add validators from the capability itself.
+    for (const TfToken& v : GetValidators(id)) {
+        if (seen.insert(v).second) {
+            result.push_back(v);
+        }
+    }
+
+    // Add validators from all transitive predecessors.
+    for (const TfToken& pred : GetTransitivePredecessors(id)) {
+        for (const TfToken& v : GetValidators(pred)) {
+            if (seen.insert(v).second) {
+                result.push_back(v);
+            }
+        }
+    }
+
     return result;
 }
 

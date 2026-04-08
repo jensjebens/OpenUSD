@@ -84,6 +84,17 @@ public:
     USDPROFILES_API
     std::string GetDocstring(const TfToken& id) const;
 
+    /// Return the validator names declared for \p id, or an empty vector
+    /// if \p id is not registered or has no validators.
+    USDPROFILES_API
+    TfTokenVector GetValidators(const TfToken& id) const;
+
+    /// Return all validator names for \p id and all its transitive
+    /// predecessors. This gives the complete set of validators required
+    /// by a capability or profile.
+    USDPROFILES_API
+    TfTokenVector GetAllValidatorsForCapability(const TfToken& id) const;
+
     /// Return all registered capability ids.
     USDPROFILES_API
     TfTokenVector GetAllCapabilities() const;
@@ -102,6 +113,7 @@ private:
         TfToken      id;
         std::string  docstring;
         TfTokenVector predecessors;
+        TfTokenVector validators;
         bool         isProfile = false;
     };
 
