@@ -1,0 +1,63 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    doc = "After units resolution: GeomMetricsAPI corrects the meter cone."
+)
+
+def Xform "World" (
+    prepend apiSchemas = ["GeomMetricsAPI"]
+)
+{
+    double metrics:metersPerUnit = 0.01
+    def DomeLight "DomeLight" {
+        float inputs:intensity = 0.8
+        color3f inputs:color = (0.85, 0.88, 0.95)
+    }
+    def DistantLight "KeyLight" {
+        float inputs:intensity = 3.0
+        float inputs:angle = 1.0
+        color3f inputs:color = (1.0, 0.98, 0.93)
+        double3 xformOp:rotateXYZ = (-40, 30, 0)
+        token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def Mesh "Ground" {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-400, 0, -300), (400, 0, -300), (400, 0, 300), (-400, 0, 300)]
+        color3f[] primvars:displayColor = [(0.3, 0.3, 0.32)]
+    }
+
+
+    def Cone "CorrectCone" {
+        token axis = "Y"
+        double height = 100
+        double radius = 30
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 50, 0, 1) )
+        token[] xformOpOrder = ["xformOp:transform"]
+        color3f[] primvars:displayColor = [(0.2, 0.75, 0.3)]
+    }
+    def Cone "MeterCone" (
+        prepend apiSchemas = ["GeomMetricsAPI"]
+    )
+    {
+        double metrics:metersPerUnit = 1.0
+        token axis = "Y"
+        double height = 1
+        double radius = 0.3
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.8, 0.5, 0, 1) )
+        token[] xformOpOrder = ["xformOp:transform"]
+        color3f[] primvars:displayColor = [(0.9, 0.35, 0.2)]
+    }
+
+    def Camera "Camera" {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float2 clippingRange = (1, 50000)
+        double3 xformOp:translate = (0, 50, 250)
+        double3 xformOp:rotateXYZ = (-3, 0, 0)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}
