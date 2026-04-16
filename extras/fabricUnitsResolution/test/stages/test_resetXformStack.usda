@@ -1,0 +1,19 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1.0
+    upAxis = "Y"
+    doc = """Test resetXformStack interaction with unit correction.
+    /CmRoot/Parent is in cm-space (translate 100,0,0 = 1m).
+    /CmRoot/Parent/ResetChild has !resetXformStack! and translate (200,0,0) in cm = 2m.
+    The reset child should ignore its parent and appear at world (2,0,0) in meters."""
+)
+
+def Xform "World"
+{
+    def Xform "CmRef" (
+        references = @./cm_resetXform_asset.usda@</CmRoot>
+    )
+    {
+    }
+}
