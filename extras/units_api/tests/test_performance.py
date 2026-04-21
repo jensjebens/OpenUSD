@@ -15,6 +15,9 @@ from test_stages import build_stage1_bolt_in_factory, build_stage6_point_instanc
 class TestTimeSamples:
     """Reading and writing animated (time-sampled) attributes."""
 
+    def setup_method(self):
+        UnitsLens.clear_cache()
+
     def test_get_attr_at_specific_time(self):
         """get_attr with explicit time code reads the right sample."""
         stage = Usd.Stage.CreateInMemory()

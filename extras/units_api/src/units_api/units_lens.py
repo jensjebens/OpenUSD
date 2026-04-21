@@ -3,7 +3,10 @@
 from pxr import Usd, Gf, Vt, UsdGeom
 
 from .metrics_api import MetricsAPI
-from .dimensions import get_dimension, conversion_factor, Dimension
+from .dimensions import (
+    get_dimension, conversion_factor, Dimension,
+    AxisTransform, get_axis_transform, axis_rotation_matrix, remap_axis_token,
+)
 
 _ZERO_DIM = Dimension(0, 0, 0)
 
@@ -118,6 +121,64 @@ def _apply_factor(val, factor: float):
     return val
 
 
+def _rotate_vec3(v, rot_matrix):
+    """Rotate a single 3-vector by a Gf.Matrix3d rotation.
+
+    Uses pre-multiplication: result = rot_matrix * v
+    """
+    if isinstance(v, Gf.Vec3d):
+        return rot_matrix * v
+    if isinstance(v, Gf.Vec3f):
+        return Gf.Vec3f(rot_matrix * Gf.Vec3d(v))
+    # Tuple/list fallback
+    vd = Gf.Vec3d(float(v[0]), float(v[1]), float(v[2]))
+    result = rot_matrix * vd
+    return type(v)(result[0], result[1], result[2]) if hasattr(type(v), '__init__') else result
+
+
+def _apply_axis_transform(val, source_up: str, target_up: str, transform_type: AxisTransform):
+    """Apply axis-change correction to a value based on its transform type.
+
+    For VECTOR3: apply the rotation matrix to each vector element.
+    For AXIS_TOKEN: remap the token string.
+    For NONE or matching axes: return unchanged.
+    """
+    if transform_type == AxisTransform.NONE or source_up == target_up:
+        return val
+
+    if transform_type == AxisTransform.AXIS_TOKEN:
+        if isinstance(val, str):
+            return remap_axis_token(val, source_up, target_up)
+        return val
+
+    if transform_type == AxisTransform.VECTOR3:
+        rot = axis_rotation_matrix(source_up, target_up)
+        if rot is None:
+            return val
+        # Single vectors
+        if isinstance(val, (Gf.Vec3f, Gf.Vec3d)):
+            return _rotate_vec3(val, rot)
+        # Vt arrays of Vec3
+        if isinstance(val, Vt.Vec3fArray):
+            if _HAS_NUMPY:
+                arr = np.array(val)
+                rot_np = np.array([[rot[i][j] for j in range(3)] for i in range(3)])
+                rotated = arr @ rot_np.T
+                return Vt.Vec3fArray.FromNumpy(rotated.astype(np.float32))
+            return Vt.Vec3fArray([_rotate_vec3(v, rot) for v in val])
+        if isinstance(val, Vt.Vec3dArray):
+            if _HAS_NUMPY:
+                arr = np.array(val)
+                rot_np = np.array([[rot[i][j] for j in range(3)] for i in range(3)])
+                rotated = arr @ rot_np.T
+                return Vt.Vec3dArray.FromNumpy(rotated)
+            return Vt.Vec3dArray([_rotate_vec3(v, rot) for v in val])
+        # Vec2 — not affected by up-axis rotation (only XY plane)
+        return val
+
+    return val
+
+
 def _scale_spline(spline, factor: float):
     """Scale a Ts.Spline: multiply knot values and tangent slopes by factor.
 
@@ -153,12 +214,15 @@ class UnitsLens:
 
     @staticmethod
     def get_attr(attr: Usd.Attribute, target_mpu: float = 1.0, target_kpu: float = 1.0,
-                 time=None):
-        """Get an attribute value converted to target units.
+                 target_up: str = None, time=None):
+        """Get an attribute value converted to target units and optionally target up-axis.
 
         If the attribute has no authored value, returns None.
         If the attribute is not in the dimension registry, returns the raw value.
         If the attribute is dimensionless (Dimension(0,0,0)), returns the raw value.
+
+        Args:
+            target_up: Target up-axis ("Y" or "Z"). If None, no axis conversion.
         """
         if time is None:
             time = Usd.TimeCode.Default()
@@ -174,23 +238,39 @@ class UnitsLens:
             if annotation is not None:
                 return PerAttributeUnits.get_attr(attr, target_mpu, target_kpu, time)
             return val
-        if dim == _ZERO_DIM:
-            return val
 
-        prim = attr.GetPrim()
-        metrics = _metrics_cache.get(prim)
-        source_mpu = metrics["metersPerUnit"]
-        source_kpu = metrics["kilogramsPerUnit"]
+        result = val
 
-        factor = conversion_factor(source_mpu, target_mpu, dim, source_kpu, target_kpu)
-        return _apply_factor(val, factor)
+        # Unit scaling (skip for dimensionless)
+        if dim != _ZERO_DIM:
+            prim = attr.GetPrim()
+            metrics = _metrics_cache.get(prim)
+            source_mpu = metrics["metersPerUnit"]
+            source_kpu = metrics["kilogramsPerUnit"]
+
+            factor = conversion_factor(source_mpu, target_mpu, dim, source_kpu, target_kpu)
+            result = _apply_factor(result, factor)
+
+        # Axis transform (only when target_up is specified)
+        if target_up is not None:
+            prim = attr.GetPrim()
+            metrics = _metrics_cache.get(prim)
+            source_up = metrics["upAxis"]
+            axis_type = get_axis_transform(attr.GetName())
+            if axis_type is not None:
+                result = _apply_axis_transform(result, source_up, target_up, axis_type)
+
+        return result
 
     @staticmethod
     def set_attr(attr: Usd.Attribute, value, source_mpu: float = 1.0, source_kpu: float = 1.0,
-                 time=None) -> bool:
+                 source_up: str = None, time=None) -> bool:
         """Set a value expressed in source units, converting to the prim's native units.
 
         The inverse of get_attr(): value is in source units, stored in the prim's native units.
+
+        Args:
+            source_up: Up-axis of the source value ("Y" or "Z"). If None, no axis conversion.
 
         Example: set a 5-meter distance on a cm-scale prim
             set_attr(attr, 5.0, source_mpu=1.0)  # prim is cm → stores 500.0
@@ -205,16 +285,28 @@ class UnitsLens:
             if annotation is not None:
                 return PerAttributeUnits.set_attr(attr, value, source_mpu, source_kpu, time)
             return attr.Set(value, time)
-        if dim == _ZERO_DIM:
-            return attr.Set(value, time)
 
-        prim = attr.GetPrim()
-        metrics = _metrics_cache.get(prim)
-        target_mpu = metrics["metersPerUnit"]
-        target_kpu = metrics["kilogramsPerUnit"]
+        converted = value
 
-        factor = conversion_factor(source_mpu, target_mpu, dim, source_kpu, target_kpu)
-        converted = _apply_factor(value, factor)
+        # Axis transform first (rotate from source_up to prim's native up)
+        if source_up is not None:
+            prim = attr.GetPrim()
+            metrics = _metrics_cache.get(prim)
+            target_up = metrics["upAxis"]
+            axis_type = get_axis_transform(attr.GetName())
+            if axis_type is not None:
+                converted = _apply_axis_transform(converted, source_up, target_up, axis_type)
+
+        # Unit scaling (skip for dimensionless)
+        if dim != _ZERO_DIM:
+            prim = attr.GetPrim()
+            metrics = _metrics_cache.get(prim)
+            target_mpu = metrics["metersPerUnit"]
+            target_kpu = metrics["kilogramsPerUnit"]
+
+            factor = conversion_factor(source_mpu, target_mpu, dim, source_kpu, target_kpu)
+            converted = _apply_factor(converted, factor)
+
         return attr.Set(converted, time)
 
     @staticmethod
@@ -222,19 +314,32 @@ class UnitsLens:
         """Convenience: get attribute value converted to meters."""
         return UnitsLens.get_attr(attr, target_mpu=1.0, time=time)
 
+    @staticmethod
+    def get_in_zup(attr: Usd.Attribute, target_mpu: float = 1.0, time=None):
+        """Convenience: get attribute value converted to target units in Z-up."""
+        return UnitsLens.get_attr(attr, target_mpu=target_mpu, target_up="Z", time=time)
+
+    @staticmethod
+    def get_in_yup(attr: Usd.Attribute, target_mpu: float = 1.0, time=None):
+        """Convenience: get attribute value converted to target units in Y-up."""
+        return UnitsLens.get_attr(attr, target_mpu=target_mpu, target_up="Y", time=time)
+
     # ------------------------------------------------------------------
     # Time-sampled bulk access
     # ------------------------------------------------------------------
 
     @staticmethod
     def get_time_samples(attr: Usd.Attribute, target_mpu: float = 1.0,
-                         target_kpu: float = 1.0) -> list[tuple[float, object]]:
+                         target_kpu: float = 1.0, target_up: str = None) -> list[tuple[float, object]]:
         """Get ALL time samples for an attribute, each converted to target units.
 
         Returns list of (time, converted_value) tuples.
         Resolves the conversion factor once and applies it to every sample.
         Much faster than calling get_attr() in a loop (avoids repeated ancestor walks).
         
+        Args:
+            target_up: Target up-axis ("Y" or "Z"). If None, no axis conversion.
+
         Returns empty list if no time samples exist.
         """
         times = attr.GetTimeSamples()
@@ -263,15 +368,34 @@ class UnitsLens:
             source_kpu = metrics["kilogramsPerUnit"]
             factor = conversion_factor(source_mpu, target_mpu, dim, source_kpu, target_kpu)
 
-        return [(t, _apply_factor(attr.Get(t), factor)) for t in times]
+        # Resolve axis transform once
+        axis_type = None
+        source_up = None
+        if target_up is not None:
+            prim = attr.GetPrim()
+            metrics = _metrics_cache.get(prim)
+            source_up = metrics["upAxis"]
+            axis_type = get_axis_transform(attr.GetName())
+
+        results = []
+        for t in times:
+            v = _apply_factor(attr.Get(t), factor)
+            if axis_type is not None and axis_type != AxisTransform.NONE and source_up != target_up:
+                v = _apply_axis_transform(v, source_up, target_up, axis_type)
+            results.append((t, v))
+        return results
 
     @staticmethod
     def set_time_samples(attr: Usd.Attribute, samples: list[tuple[float, object]],
-                         source_mpu: float = 1.0, source_kpu: float = 1.0) -> bool:
+                         source_mpu: float = 1.0, source_kpu: float = 1.0,
+                         source_up: str = None) -> bool:
         """Set multiple time samples, converting each from source units.
 
         samples: list of (time, value) tuples in source units.
         Resolves the conversion factor once and applies it to every sample.
+
+        Args:
+            source_up: Up-axis of the source values ("Y" or "Z"). If None, no axis conversion.
         """
         if not samples:
             return True
@@ -288,8 +412,18 @@ class UnitsLens:
         target_kpu = metrics["kilogramsPerUnit"]
         factor = conversion_factor(source_mpu, target_mpu, dim, source_kpu, target_kpu)
 
+        # Resolve axis transform once
+        axis_type = None
+        target_up = None
+        if source_up is not None:
+            target_up = metrics["upAxis"]
+            axis_type = get_axis_transform(attr.GetName())
+
         for t, v in samples:
-            attr.Set(_apply_factor(v, factor), t)
+            converted = v
+            if axis_type is not None and axis_type != AxisTransform.NONE and source_up != target_up:
+                converted = _apply_axis_transform(converted, source_up, target_up, axis_type)
+            attr.Set(_apply_factor(converted, factor), t)
         return True
 
     # ------------------------------------------------------------------
@@ -398,6 +532,8 @@ class UnitsLens:
             "dimension": dim,
             "conversion_factor_to_meters": factor_to_m,
             "unit_source": unit_source,
+            "source_up": metrics["upAxis"],
+            "axis_transform": get_axis_transform(attr.GetName()),
         }
 
     @staticmethod

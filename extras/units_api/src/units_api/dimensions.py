@@ -1,4 +1,5 @@
 from typing import NamedTuple
+from enum import Enum
 
 
 class Dimension(NamedTuple):
@@ -6,6 +7,18 @@ class Dimension(NamedTuple):
     L: int = 0  # length
     M: int = 0  # mass
     T: int = 0  # time
+
+
+class AxisTransform(Enum):
+    """How an attribute value transforms under an up-axis change.
+
+    NONE:       Scalar or axis-invariant — no correction needed.
+    VECTOR3:    3-vector — apply the axis-change rotation matrix.
+    AXIS_TOKEN: Token naming an axis ("X", "Y", "Z") — remap through the mapping.
+    """
+    NONE = "none"
+    VECTOR3 = "vector3"
+    AXIS_TOKEN = "axisToken"
 
 
 # Registry: attr_name -> Dimension
@@ -49,6 +62,85 @@ DIMENSION_REGISTRY: dict[str, Dimension] = {
     "purpose": Dimension(),
     "doubleSided": Dimension(),
 }
+
+
+# ---------------------------------------------------------------------------
+# Axis transform registry: how each attribute transforms under up-axis change
+# ---------------------------------------------------------------------------
+
+AXIS_TRANSFORM_REGISTRY: dict[str, AxisTransform] = {
+    # Spatial vectors — rotate
+    "xformOp:translate": AxisTransform.VECTOR3,
+    "points": AxisTransform.VECTOR3,
+    "extent": AxisTransform.VECTOR3,
+    "positions": AxisTransform.VECTOR3,
+    "velocities": AxisTransform.VECTOR3,
+    "accelerations": AxisTransform.VECTOR3,
+    "physics:velocity": AxisTransform.VECTOR3,
+    "physics:angularVelocity": AxisTransform.VECTOR3,
+
+    # Scalars / magnitudes — no axis correction
+    "physics:density": AxisTransform.NONE,
+    "physics:mass": AxisTransform.NONE,
+    "physics:gravityMagnitude": AxisTransform.NONE,
+    "size": AxisTransform.NONE,
+    "focusDistance": AxisTransform.NONE,
+    "clippingRange": AxisTransform.NONE,
+
+    # Lights — scalar dimensions, not directional
+    "inputs:width": AxisTransform.NONE,
+    "inputs:height": AxisTransform.NONE,
+    "inputs:radius": AxisTransform.NONE,
+    "inputs:length": AxisTransform.NONE,
+
+    # Transform matrices handled by xformOp assembly, not per-value rotation
+    "xformOp:transform": AxisTransform.NONE,
+    "xformOp:scale": AxisTransform.NONE,
+
+    # Unitless / non-spatial
+    "visibility": AxisTransform.NONE,
+    "purpose": AxisTransform.NONE,
+    "doubleSided": AxisTransform.NONE,
+    "orientations": AxisTransform.NONE,
+    "orientationsf": AxisTransform.NONE,
+    "angularVelocities": AxisTransform.NONE,  # rad/s — magnitude, direction implicit
+}
+
+
+def get_axis_transform(attr_name: str) -> AxisTransform | None:
+    """Look up axis-transform type for an attribute name.
+    Returns None if not in registry (unknown attribute)."""
+    return AXIS_TRANSFORM_REGISTRY.get(attr_name)
+
+
+def axis_rotation_matrix(source_up: str, target_up: str):
+    """Return the 3×3 rotation matrix for an up-axis change, or None if same.
+
+    Y→Z: rotate −90° around X.
+    Z→Y: rotate +90° around X.
+    """
+    if source_up == target_up:
+        return None
+    from pxr import Gf
+    if source_up == "Y" and target_up == "Z":
+        return Gf.Matrix3d(Gf.Rotation(Gf.Vec3d(1, 0, 0), -90.0))
+    if source_up == "Z" and target_up == "Y":
+        return Gf.Matrix3d(Gf.Rotation(Gf.Vec3d(1, 0, 0), 90.0))
+    return None
+
+
+def remap_axis_token(token: str, source_up: str, target_up: str) -> str:
+    """Remap an axis-name token through an up-axis change.
+
+    For Y↔Z swaps: "Y"↔"Z", "X" stays.
+    Returns the token unchanged if axes match or the token isn't an axis name.
+    """
+    if source_up == target_up:
+        return token
+    mapping = {}
+    if {source_up, target_up} == {"Y", "Z"}:
+        mapping = {"Y": "Z", "Z": "Y", "X": "X"}
+    return mapping.get(token, token)
 
 
 def get_dimension(attr_name: str) -> Dimension | None:
