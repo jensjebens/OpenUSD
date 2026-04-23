@@ -10,6 +10,7 @@
 #include "pxr/imaging/hd/dataSourceTypeDefs.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/tokens.h"
+#include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
 
@@ -60,42 +61,24 @@ void HdLodSceneIndex::SetGlobalStage(const UsdStageRefPtr &s) {
 }
 
 // ---------------------------------------------------------------------------
-// Thread-safe invisible visibility data source
+// Singleton invisible visibility overlay (issue #43)
 // ---------------------------------------------------------------------------
 namespace {
 
-class _InvisibleDataSource : public HdContainerDataSource
+// Static visibility=false data source, shared across all hidden prims.
+// HdOverlayContainerDataSource checks sources in order — first hit wins.
+// "visibility" → hits this overlay. Anything else → falls through to
+// the original prim data source.
+static const HdContainerDataSourceHandle &_GetInvisibleOverlay()
 {
-public:
-    HD_DECLARE_DATASOURCE(_InvisibleDataSource);
-
-    _InvisibleDataSource(HdContainerDataSourceHandle const &input)
-        : _input(input) {}
-
-    TfTokenVector GetNames() override {
-        if (!_input) return {HdVisibilitySchemaTokens->visibility};
-        TfTokenVector n = _input->GetNames();
-        if (std::find(n.begin(), n.end(),
-                HdVisibilitySchemaTokens->visibility) == n.end())
-            n.push_back(HdVisibilitySchemaTokens->visibility);
-        return n;
-    }
-
-    HdDataSourceBaseHandle Get(const TfToken &name) override {
-        if (name == HdVisibilitySchemaTokens->visibility) {
-            static HdContainerDataSourceHandle s =
-                HdRetainedContainerDataSource::New(
-                    HdVisibilitySchemaTokens->visibility,
-                    HdRetainedTypedSampledDataSource<bool>::New(false));
-            return s;
-        }
-        return _input ? _input->Get(name) : nullptr;
-    }
-
-private:
-    HdContainerDataSourceHandle _input;
-};
-HD_DECLARE_DATASOURCE_HANDLES(_InvisibleDataSource);
+    static HdContainerDataSourceHandle s =
+        HdRetainedContainerDataSource::New(
+            HdVisibilitySchemaTokens->visibility,
+            HdRetainedContainerDataSource::New(
+                HdVisibilitySchemaTokens->visibility,
+                HdRetainedTypedSampledDataSource<bool>::New(false)));
+    return s;
+}
 
 } // anon
 
@@ -159,7 +142,8 @@ HdLodSceneIndex::GetPrim(const SdfPath &primPath) const
 
     HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
     if (_hiddenRenderables.count(primPath) && prim.dataSource) {
-        prim.dataSource = _InvisibleDataSource::New(prim.dataSource);
+        prim.dataSource = HdOverlayContainerDataSource::New(
+            _GetInvisibleOverlay(), prim.dataSource);
     }
     return prim;
 }
@@ -256,8 +240,14 @@ void HdLodSceneIndex::_PrimsDirtied(
     }
 
     if (xformDirty && !_cameraPath.IsEmpty()) {
+        GfVec3d prevPos = _cachedCameraPos;
         _UpdateCameraPosition();
-        _EvaluateLod();
+        // Only re-evaluate LOD if the camera actually moved (issue #42).
+        // Without this guard, every xform dirty (physics bodies, animated
+        // characters) would trigger a full LOD re-evaluation.
+        if ((_cachedCameraPos - prevPos).GetLengthSq() > 1e-12) {
+            _EvaluateLod();
+        }
     }
 
     // Also evaluate on first dirty after prims are fully added
@@ -406,14 +396,26 @@ void HdLodSceneIndex::_EvaluateLod()
             continue;
         }
 
-        // Group position — read from USD stage (issue #22 workaround)
+        // Group position — read from Hydra's flattened xform (issue #41).
+        // Post-flattening plugins receive world-space matrices via
+        // HdXformSchema.  GetTypedValue(0) is a shutter offset (current
+        // frame, no motion blur), NOT a USD time code.
+        // Read from _GetInputSceneIndex() (upstream) to avoid recursing
+        // into our own visibility overlay.
         GfVec3d groupPos(0, 0, 0);
-        if (_stage) {
-            UsdPrim gp = _stage->GetPrimAtPath(groupPath);
-            if (gp) {
-                UsdGeomXformable xf(gp);
-                groupPos = xf.ComputeLocalToWorldTransform(
-                    UsdTimeCode::Default()).ExtractTranslation();
+        {
+            const auto &input = _GetInputSceneIndex();
+            HdSceneIndexPrim gPrim = input->GetPrim(groupPath);
+            if (gPrim.dataSource) {
+                HdXformSchema xs =
+                    HdXformSchema::GetFromParent(gPrim.dataSource);
+                if (xs.IsDefined()) {
+                    HdMatrixDataSourceHandle matDs = xs.GetMatrix();
+                    if (matDs) {
+                        groupPos = matDs->GetTypedValue(0.0f)
+                            .ExtractTranslation();
+                    }
+                }
             }
         }
 
