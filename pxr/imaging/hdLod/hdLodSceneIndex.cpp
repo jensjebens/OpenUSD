@@ -168,7 +168,19 @@ void HdLodSceneIndex::_PrimsAdded(
     }
 
     if (_stage) {
-        _RebuildGroupCache();
+        if (!_groupCacheBuilt) {
+            // First PrimsAdded after construction — full rebuild once.
+            // This handles the initial scene-load batch.
+            _RebuildGroupCache();
+            _groupCacheBuilt = true;
+        } else {
+            // Incremental: only inspect added paths (issue #40).
+            // Newton’s pattern from HdExec: evict on add, lazy rebuild.
+            for (const auto &e : entries) {
+                _UpdateGroupForPrim(e.primPath);
+                _InvalidateDescendantCache(e.primPath);
+            }
+        }
     }
 
     // Discover camera path from added prims — only accept cameras on the stage
@@ -209,6 +221,8 @@ void HdLodSceneIndex::_PrimsRemoved(
         _lodGroups.erase(e.primPath);
         _descendantCache.erase(e.primPath);
         _hiddenRenderables.erase(e.primPath);
+        _prevActiveIndex.erase(e.primPath);
+        _InvalidateDescendantCache(e.primPath);
         if (e.primPath == _cameraPath) {
             _cameraPath = SdfPath();
         }
@@ -322,6 +336,68 @@ void HdLodSceneIndex::_CollectRenderables(
         _CollectRenderables(c, out);
 }
 
+void HdLodSceneIndex::_UpdateGroupForPrim(const SdfPath &primPath)
+{
+    if (!_stage) return;
+    UsdPrim prim = _stage->GetPrimAtPath(primPath);
+    if (!prim) return;
+
+    UsdRelationship rel = prim.GetRelationship(TfToken("lod:lodItems"));
+    if (!rel || !rel.HasAuthoredTargets()) return;
+
+    SdfPathVector targets;
+    rel.GetTargets(&targets);
+    if (targets.empty()) return;
+
+    _GroupData gd;
+    gd.lodItems = {targets.begin(), targets.end()};
+
+    for (UsdAttribute attr : prim.GetAttributes()) {
+        const std::string &n = attr.GetName().GetString();
+        VtArray<float> val;
+        if (TfStringStartsWith(n, "lod:Heuristic:") &&
+            TfStringEndsWith(n, ":distance:minThresholds") &&
+            attr.Get(&val))
+            gd.minThresholds = val;
+        else if (TfStringStartsWith(n, "lod:Heuristic:") &&
+                 TfStringEndsWith(n, ":distance:maxThresholds") &&
+                 attr.Get(&val))
+            gd.maxThresholds = val;
+    }
+    if (gd.maxThresholds.empty() && !gd.minThresholds.empty())
+        gd.maxThresholds = gd.minThresholds;
+
+    _lodGroups[prim.GetPath()] = std::move(gd);
+}
+
+void HdLodSceneIndex::_InvalidateDescendantCache(const SdfPath &changedPath)
+{
+    // Evict any descendant cache entry whose item path is an ancestor of,
+    // or equal to, the changed path.  This handles:
+    //   - A renderable mesh added/removed under an existing LOD item
+    //   - An LOD item itself being added/removed
+    for (auto it = _descendantCache.begin(); it != _descendantCache.end();) {
+        if (changedPath.HasPrefix(it->first) ||
+            it->first.HasPrefix(changedPath)) {
+            it = _descendantCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void HdLodSceneIndex::_EnsureDescendantCache(const SdfPath &itemPath) const
+{
+    if (_descendantCache.count(itemPath)) return;
+    std::vector<SdfPath> renderables;
+    _CollectRenderables(itemPath, renderables);
+    // const_cast is safe here — lazy cache population from const GetPrim/
+    // _EvaluateLod paths.  The cache is a performance optimisation, not
+    // semantic state.
+    const_cast<HdLodSceneIndex*>(this)->_descendantCache[itemPath] =
+        std::move(renderables);
+}
+
 void HdLodSceneIndex::_RebuildGroupCache()
 {
     _lodGroups.clear();
@@ -389,6 +465,7 @@ void HdLodSceneIndex::_EvaluateLod()
             if (groupPath.HasPrefix(is)) { skip = true; break; }
         if (skip) {
             for (const auto &ip : gd.lodItems) {
+                _EnsureDescendantCache(ip);
                 auto it = _descendantCache.find(ip);
                 if (it != _descendantCache.end())
                     for (const auto &r : it->second) newHidden.insert(r);
@@ -452,6 +529,7 @@ void HdLodSceneIndex::_EvaluateLod()
         }
         for (int i = 0; i < nItems; ++i) {
             if (i == active) continue;
+            _EnsureDescendantCache(gd.lodItems[i]);
             auto it = _descendantCache.find(gd.lodItems[i]);
             if (it != _descendantCache.end())
                 for (const auto &r : it->second) newHidden.insert(r);

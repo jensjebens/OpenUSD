@@ -56,8 +56,11 @@ protected:
         const HdSceneIndexObserver::DirtiedPrimEntries &entries) override;
 
 private:
-    // Cache rebuild (safe in _PrimsAdded — no xform reads)
+    // Cache rebuild (full — constructor only; incremental via _PrimsAdded)
     void _RebuildGroupCache();
+    void _UpdateGroupForPrim(const SdfPath &primPath);
+    void _InvalidateDescendantCache(const SdfPath &changedPath);
+    void _EnsureDescendantCache(const SdfPath &itemPath) const;
     void _CollectRenderables(const SdfPath &primPath,
                              std::vector<SdfPath> &out) const;
     static bool _IsRenderable(const TfToken &primType);
@@ -95,6 +98,7 @@ private:
     // Stage reference
     UsdStageRefPtr _stage;
     static UsdStageRefPtr _sGlobalStage;
+    bool _groupCacheBuilt = false;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
