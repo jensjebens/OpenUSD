@@ -27,7 +27,7 @@
 | Material | tri_ke | tri_ka | tri_kd | edge_ke | edge_kd | mass (kg) |
 |----------|--------|--------|--------|---------|---------|-----------|
 | Cotton | 5,000 | 5,000 | 5.0 | 100 | 0.5 | 0.030 |
-| Silk | 2,000 | 2,000 | 2.0 | 20 | 0.2 | 0.010 |
+| Silk | 1,000 | 1,000 | 8.0 | 5 | 1.0 | 0.005 |
 | Paper | 50,000 | 50,000 | 5.0 | 500 | 1.0 | 0.015 |
 | Cardboard | 100,000 | 100,000 | 10.0 | 10,000 | 1.0 | 0.050 |
 | PVC Thin (0.5mm) | 200,000 | 200,000 | 8.0 | 2,000 | 2.0 | 0.030 |
@@ -74,9 +74,9 @@
 
 ![silk](silk_vbd.gif)
 
-**Behavior:** Silk is the lightest and softest material. It drapes extremely tightly over the sphere with almost no resistance to bending. Fine wrinkles form naturally. The low mass means it settles quickly but also responds dramatically to any contact. The cloth tends to "cling" to the sphere surface.
+**Behavior:** Silk is the lightest and softest material. It drapes very tightly over the sphere with minimal resistance to bending. The low mass and high damping help it settle quickly and conform closely to the sphere. Compared to cotton, silk shows noticeably less structure — the edges hang more limply and the cloth clings rather than folds. Some residual bounce-back from VBD's rest shape constraints is visible but dampened.
 
-**VBD verdict:** ✅ Excellent — the near-zero bending stiffness produces a convincing silk-like drape.
+**VBD verdict:** ✅ Good — significantly softer than cotton, though VBD's elastic rest shape prevents fully fluid silk behavior. Higher damping (tri_kd=8, edge_kd=1) helps suppress oscillation.
 
 ---
 
