@@ -175,6 +175,35 @@
 | Cardboard | 3e9 | 0.3 | 0.003 | 300 |
 | PVC Thin | 1e9 | 0.4 | 0.0005 | 1400 |
 | PVC Thick | 3e9 | 0.4 | 0.003 | 1400 |
+| **Brown Paper (FEM)** | **2e7** | **0.3** | **0.003** | **300** |
+
+---
+
+## FEM Shell Results (SolverFEMShell)
+
+### 7. Brown Paper (thick) — FEM Shell
+*Stiff thick paper, high bending resistance*
+
+**Solver:** SolverFEMShell (membrane + bending + contact)
+
+| Parameter | Value |
+|-----------|-------|
+| Young's Modulus | 20 MPa |
+| Poisson's Ratio | 0.3 |
+| Thickness | 3 mm |
+| Grid | 24×24 (0.8m × 0.8m) |
+| Substeps | 8 |
+| Damping | 0.002 |
+| Contact stiffness | 50,000 |
+| Contact damping | 80 |
+
+![brown_paper_fem](brown_paper_fem.gif)
+
+**Behavior:** The thick brown paper sheet drops stiffly onto the sphere. Unlike VBD materials which drape conformally, the FEM sheet maintains its flat shape during the fall and tents over the sphere with visible angular creasing at the contact edge. The edges stay elevated rather than hanging down — this is the bending resistance that VBD cannot achieve.
+
+**FEM verdict:** ✅ Good — clearly different from VBD cloth behavior. Membrane inextensibility + bending resistance produce plate-like behavior. Creasing could be sharper with higher mesh resolution or plastic deformation.
+
+**Comparison with VBD Paper:** The VBD paper (above) drapes with smooth curvature and conforms to the sphere. The FEM version maintains structural rigidity — exactly the difference between thin office paper and thick brown packaging paper.
 
 ---
 
