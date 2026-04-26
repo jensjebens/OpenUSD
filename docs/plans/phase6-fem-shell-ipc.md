@@ -1,5 +1,37 @@
 # Phase 6: Warp FEM Thin Shell Solver + IPC Contact for Newton
 
+## Baseline Results (VBD Solver — "Before")
+
+Ran cardboard simulation with VBD to establish baseline for comparison.
+
+### Setup
+- 16×16 grid, 5cm cells → 0.80m × 0.80m sheet, 289 particles, 512 triangles
+- Left edge fixed (cantilever), gravity, ground plane
+- 120 frames @ 60fps, GPU (L40)
+
+### Test 1: Normal stiffness (tri_ke=1e5, edge_ke=1e4, 20 iters, 4 substeps)
+| Metric | Result | Expected (cardboard) |
+|--------|--------|--------------------|
+| Stretch ratio | 1.36x | ~1.0 (inextensible) |
+| Max sag | 0.16-1.0m oscillating | ~0.05m steady |
+| Settled? | No (still oscillating at 2s) | Should settle <1s |
+
+### Test 2: Extreme stiffness (tri_ke=1e7, edge_ke=1e6, 50 iters, 16 substeps)
+| Metric | Result | Expected |
+|--------|--------|----------|
+| Stretch ratio | 0.86x (compressed!) | ~1.0 |
+| Max sag | 0.20-0.74m oscillating | ~0.05m |
+| Settled? | No | Should settle |
+| Compute cost | 4x baseline | — |
+
+### Conclusion
+VBD cannot properly simulate stiff thin shells like cardboard. Even with 100x stiffness params, 2.5x iterations, and 4x substeps, the sheet:
+- Still stretches/compresses significantly
+- Never reaches steady state (oscillates indefinitely)
+- Bending behavior is cloth-like, not plate-like
+
+This validates the need for a proper FEM shell formulation with implicit time integration.
+
 ## Motivation
 
 Newton's current soft body solvers (VBD, XPBD, Style3D) are designed primarily for cloth and volumetric deformables. For stiff thin-shell materials like **cardboard, sheet metal, plastic panels** — materials with high stretch resistance and significant bending stiffness — we need a proper FEM thin shell formulation.
