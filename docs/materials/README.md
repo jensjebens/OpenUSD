@@ -181,34 +181,93 @@
 
 ## FEM Shell Results (SolverFEMShell)
 
-### 7. Brown Paper (thick) — FEM Shell
-*Stiff thick paper, high bending resistance*
+**Solver:** `SolverFEMShell` — GPU-accelerated FEM thin shell with:
+- StVK membrane energy (analytic Hessian, global PCG solve)
+- Dihedral angle bending energy (Kirchhoff plate stiffness κ = Eh³/12(1-ν²))
+- Plastic deformation (permanent creasing past yield angle)
+- Contact: cubic penalty + position projection (no penetration)
+- Implicit Euler time integration via `warp.optim.linear.cg`
 
-**Solver:** SolverFEMShell (membrane + bending + contact)
+### FEM Parameters
 
-| Parameter | Value |
-|-----------|-------|
-| Young's Modulus | 20 MPa |
-| Poisson's Ratio | 0.3 |
-| Thickness | 3 mm |
-| Grid | 24×24 (0.8m × 0.8m) |
-| Substeps | 8 |
-| Damping | 0.002 |
-| Contact stiffness | 50,000 |
-| Contact damping | 80 |
+| Material | E (Pa) | h (m) | ν | κ (N) | yield (rad) | plasticity |
+|----------|--------|-------|---|-------|-------------|------------|
+| Thin Paper | 5e6 | 0.0001 | 0.3 | ≈0 | 0.30 | 0.5 |
+| Office Paper | 2e7 | 0.0003 | 0.3 | ≈0 | 0.20 | 0.6 |
+| Thick Paper | 5e7 | 0.001 | 0.3 | 0.005 | 0.15 | 0.7 |
+| Cardstock | 1e8 | 0.002 | 0.3 | 0.073 | 0.10 | 0.8 |
+| Thin Cardboard | 2e8 | 0.002 | 0.3 | 0.147 | 0.08 | 0.85 |
+| Cardboard | 2e8 | 0.003 | 0.3 | 0.495 | 0.08 | 0.9 |
+| Thick Cardboard | 3e8 | 0.004 | 0.3 | 1.758 | 0.06 | 0.9 |
 
-![brown_paper_fem](brown_paper_fem.gif)
+### 7. Thin Paper — FEM Shell
+*Very thin, almost no bending resistance*
 
-**Behavior:** The thick brown paper sheet drops stiffly onto the sphere. Unlike VBD materials which drape conformally, the FEM sheet maintains its flat shape during the fall and tents over the sphere with visible angular creasing at the contact edge. The edges stay elevated rather than hanging down — this is the bending resistance that VBD cannot achieve.
+![paper_thin_fem](paper_thin_fem.gif)
 
-**FEM verdict:** ✅ Good — clearly different from VBD cloth behavior. Membrane inextensibility + bending resistance produce plate-like behavior. Creasing could be sharper with higher mesh resolution or plastic deformation.
+**Behavior:** Drapes and crumples on the sphere like tissue paper. 95% of edges yield permanently. Very little structural integrity — conforms to the sphere surface.
 
-**Comparison with VBD Paper:** The VBD paper (above) drapes with smooth curvature and conforms to the sphere. The FEM version maintains structural rigidity — exactly the difference between thin office paper and thick brown packaging paper.
+### 8. Office Paper — FEM Shell
+*Standard A4 paper weight*
+
+![paper_office_fem](paper_office_fem.gif)
+
+**Behavior:** Slightly stiffer than tissue, but still flexible. Wraps around the sphere with visible folds. Almost all edges yield.
+
+### 9. Thick Paper / Brown Paper — FEM Shell
+*Heavy stock paper, packaging paper*
+
+![paper_thick_fem](paper_thick_fem.gif)
+
+**Behavior:** Noticeable stiffness — holds shape briefly during the fall before folding around the sphere. The folds are broader and more angular than thin paper.
+
+### 10. Cardstock — FEM Shell
+*Card stock, invitation cards, manila folders*
+
+![cardstock_fem](cardstock_fem.gif)
+
+**Behavior:** Significant bending resistance. The sheet deforms stiffly around the sphere with clear angular creasing. Still flexible enough to conform but maintains structural rigidity.
+
+### 11. Thin Cardboard — FEM Shell
+*Cereal box, thin shipping box*
+
+![cardboard_thin_fem](cardboard_thin_fem.gif)
+
+**Behavior:** Plate-like behavior — the sheet tents over the sphere rather than draping. Angular crease at contact edge, edges settle on the ground. 82% of edges yield.
+
+### 12. Cardboard — FEM Shell
+*Standard corrugated cardboard*
+
+![cardboard_fem](cardboard_fem.gif)
+
+**Behavior:** Very stiff plate. Drops onto sphere and tents rigidly with permanent creases at the contact edge. 68% of edges yield. This is the target behavior that VBD could not achieve.
+
+### 13. Thick Cardboard — FEM Shell
+*Heavy duty cardboard, shipping crate material*
+
+![cardboard_thick_fem](cardboard_thick_fem.gif)
+
+**Behavior:** Nearly rigid plate. Minimal deformation on contact with sphere. The sheet barely bends — 67% of edges yield but the bending stiffness (κ=1.76) keeps it nearly flat.
+
+### FEM Solver Notes
+
+**What the FEM solver does that VBD cannot:**
+- Physical material parameters (E, ν, h) instead of tuning parameters
+- Bending stiffness scales correctly with h³ (Kirchhoff plate theory)
+- Plastic deformation — permanent creases when yield angle exceeded
+- Global implicit solve (PCG) handles stiff materials without diverging
+
+**Current limitations:**
+- No self-collision (sheet can fold through itself)
+- No friction (sheet slides on contact surfaces)
+- Implicit Euler over-damps rigid body motion at very high E (workaround: initial velocity)
+- Bending uses rank-1 Hessian approximation (curvature terms omitted)
 
 ---
 
 ## Files
 
+### VBD Solver
 | File | Description |
 |------|-------------|
 | `cotton_vbd.gif` | Cotton drape animation |
@@ -223,6 +282,18 @@
 | `pvc_thin_vbd.usda` | PVC Thin simulation USD |
 | `pvc_thick_vbd.gif` | PVC Thick (3mm) drape animation |
 | `pvc_thick_vbd.usda` | PVC Thick simulation USD |
+
+### FEM Shell Solver
+| File | Description |
+|------|-------------|
+| `paper_thin_fem.gif` | Thin paper FEM animation |
+| `paper_office_fem.gif` | Office paper FEM animation |
+| `paper_thick_fem.gif` | Thick paper FEM animation |
+| `brown_paper_fem.gif` | Brown paper FEM animation (early version) |
+| `cardstock_fem.gif` | Cardstock FEM animation |
+| `cardboard_thin_fem.gif` | Thin cardboard FEM animation |
+| `cardboard_fem.gif` | Cardboard FEM animation |
+| `cardboard_thick_fem.gif` | Thick cardboard FEM animation |
 
 All USD files contain:
 - `/World/Camera` — Perspective camera (focal=35mm)
