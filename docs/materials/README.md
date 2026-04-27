@@ -1,8 +1,8 @@
-# Material Simulation Reference — VBD Cloth Drape Test
+# Material Simulation Reference
 
-> **Newton Physics Engine** · VBD (Vertex Block Descent) Solver  
-> 6 materials simulated as cloth draping onto a static sphere  
-> Generated: April 2025
+> **Newton Physics Engine** — Material drape & structural tests  
+> VBD (6 cloth materials) + FEM Shell (7 paper-to-cardboard, flat + 3D box)  
+> Generated: April 2026
 
 ## Scene Setup
 
@@ -151,20 +151,17 @@
 
 ## FEM Shell + IPC Comparison
 
-> **TODO:** This section will be filled when the FEM Shell solver with IPC (Incremental Potential Contact) is implemented.
+The FEM Shell solver (`SolverFEMShell`) was built specifically because VBD cannot handle stiff thin-shell materials. Key differences:
 
-### Planned comparisons:
-- Same 6 materials with FEM Shell elements
-- Direct GIF comparison: VBD vs FEM Shell
-- Quantitative metrics:
-  - Final drape shape error vs analytical solutions
-  - Energy conservation
-  - Convergence behavior
-  - Bending accuracy for thick materials
-- Expected improvements:
-  - Cardboard/thick PVC: proper shell bending mechanics
-  - Paper: potential for plastic deformation modeling
-  - All materials: more physically-based parameter mapping (Young's modulus → shell stiffness)
+| Aspect | VBD | FEM Shell |
+|--------|-----|------------|
+| **Parameters** | Tuning (tri_ke, edge_ke) | Physical (E, ν, h) |
+| **Bending model** | Dihedral angle (local solve) | Dihedral angle (global PCG) |
+| **Bending stiffness** | Arbitrary edge_ke | Kirchhoff: κ = Eh³/12(1-ν²) |
+| **Stiff materials** | Diverges at high stiffness | Stable via implicit Euler + PCG |
+| **Plastic deformation** | None | Yield angle + permanent rest angle update |
+| **Contact** | Newton penalty (ke/kd) | Cubic penalty + position projection |
+| **Best for** | Soft fabrics (cotton, silk) | Stiff sheets (cardboard, plastic) |
 
 ### Target parameters for FEM Shell:
 | Material | Young's Modulus (Pa) | Poisson's Ratio | Thickness (m) | Density (kg/m³) |
@@ -265,6 +262,68 @@
 
 ---
 
+## Paper Bag Test (3D Structural)
+
+**Scene:** Open-top box (0.3×0.3×0.4m, 5 faces, no lid) dropped onto the same red sphere.
+Tests 3D structural integrity — can the solver maintain a box shape under gravity + contact?
+
+| Parameter | Value |
+|-----------|-------|
+| **Mesh** | 241 vertices, 456 triangles (6×6 per wall face, 6×8 per side) |
+| **Box size** | 0.3m × 0.3m × 0.4m (open top) |
+| **Start height** | bottom at z = 0.5m |
+| **Sphere** | same as flat test |
+| **Materials** | same 7 FEM materials as flat sheet test |
+
+### Bag Results
+
+| # | Material | z_max (settled) | Yielded | Behaviour |
+|---|----------|----------------|---------|------------|
+| 1 | Thin Paper | 0.30 | 91% | Collapses completely flat |
+| 2 | Office Paper | 0.30 | 96% | Collapses flat |
+| 3 | Thick Paper | 0.11 | 97% | Flattens on ground |
+| 4 | Cardstock | 0.54 | 95% | Partially collapses, walls fold in |
+| 5 | Thin Cardboard | 0.58 | 79% | Walls fold inward |
+| 6 | Cardboard | 0.64 | 32% | Holds box shape |
+| 7 | Thick Cardboard | 0.66 | 24% | Nearly rigid box |
+
+### 14. Thin Paper Bag
+![bag_paper_thin_fem](bag_paper_thin_fem.gif)
+
+**Behavior:** The paper bag collapses completely — walls crumple inward and the whole structure flattens around the sphere. 91% of edges yield permanently. Like a wet paper bag.
+
+### 15. Office Paper Bag
+![bag_paper_office_fem](bag_paper_office_fem.gif)
+
+**Behavior:** Similar to thin paper — collapses flat. Slightly more structure visible during the fall but cannot maintain box shape.
+
+### 16. Thick Paper Bag
+![bag_paper_thick_fem](bag_paper_thick_fem.gif)
+
+**Behavior:** Noticeable stiffness during fall but still collapses. The walls fold more cleanly than thin paper, with broader creases.
+
+### 17. Cardstock Box
+![bag_cardstock_fem](bag_cardstock_fem.gif)
+
+**Behavior:** The box partially holds shape — walls fold inward but don't collapse completely. The bottom maintains structural integrity. Transition point between "bag" and "box" behavior.
+
+### 18. Thin Cardboard Box
+![bag_cardboard_thin_fem](bag_cardboard_thin_fem.gif)
+
+**Behavior:** Walls maintain vertical orientation but buckle inward. The box retains most of its volume. 79% of edges yield but the bending stiffness prevents full collapse.
+
+### 19. Cardboard Box
+![bag_cardboard_fem](bag_cardboard_fem.gif)
+
+**Behavior:** The box holds its shape — walls stay upright, bottom stays flat, only the contact zone with the sphere shows deformation. Only 32% of edges yield. This is realistic cardboard box behavior.
+
+### 20. Thick Cardboard Box
+![bag_cardboard_thick_fem](bag_cardboard_thick_fem.gif)
+
+**Behavior:** Nearly rigid box. Barely deforms on contact. 24% yield. The box essentially bounces off the sphere and settles on the ground with minimal structural damage.
+
+---
+
 ## Files
 
 ### VBD Solver
@@ -283,7 +342,7 @@
 | `pvc_thick_vbd.gif` | PVC Thick (3mm) drape animation |
 | `pvc_thick_vbd.usda` | PVC Thick simulation USD |
 
-### FEM Shell Solver
+### FEM Shell Solver — Flat Sheet
 | File | Description |
 |------|-------------|
 | `paper_thin_fem.gif` | Thin paper FEM animation |
@@ -294,6 +353,17 @@
 | `cardboard_thin_fem.gif` | Thin cardboard FEM animation |
 | `cardboard_fem.gif` | Cardboard FEM animation |
 | `cardboard_thick_fem.gif` | Thick cardboard FEM animation |
+
+### FEM Shell Solver — Paper Bag (3D Box)
+| File | Description |
+|------|-------------|
+| `bag_paper_thin_fem.gif` | Thin paper bag collapse |
+| `bag_paper_office_fem.gif` | Office paper bag collapse |
+| `bag_paper_thick_fem.gif` | Thick paper bag collapse |
+| `bag_cardstock_fem.gif` | Cardstock box (partial collapse) |
+| `bag_cardboard_thin_fem.gif` | Thin cardboard box |
+| `bag_cardboard_fem.gif` | Cardboard box (holds shape) |
+| `bag_cardboard_thick_fem.gif` | Thick cardboard box (rigid) |
 
 All USD files contain:
 - `/World/Camera` — Perspective camera (focal=35mm)
