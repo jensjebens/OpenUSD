@@ -1,187 +1,257 @@
-# USD Solid Tessellator Plugin
+# usdSolidTessellator — Hydra Generative Procedural for BrepArray
 
-**Location:** `extras/usd/usdSolidTessellator`
+## Overview
 
-A tessellation plugin for OpenUSD that converts **UsdSolid BrepArray** geometry
-(as defined in [USD Proposal #109](https://github.com/PixarAnimationStudios/OpenUSD-proposals/pull/109))
-into standard `UsdGeomMesh` triangle meshes using **OpenCascade (OCCT)** as the
-geometry kernel.
+This plugin tessellates **BrepArray** prims (from the UsdSolid schema / Proposal #109)
+into renderable triangle meshes at runtime via OpenUSD's **hdGp** generative procedural
+architecture. No pre-baked meshes needed — drop a `.usd` file containing BrepArray prims
+into any Hydra viewport and they render as tessellated geometry.
 
-## Purpose
+**Status:** Phase 1 complete. Live Hydra tessellation works. Known issue: hub ring
+faces have mixed winding (faceuse orientation logic needs per-body shell analysis).
 
-USD Proposal #109 introduces `UsdSolidBrepArray` — a Boundary Representation
-(Brep) schema built on the Radial Edge Data Model. While the schema stores
-exact NURBS-based solid geometry, most renderers, physics engines, and game
-engines require tessellated triangle meshes. This plugin bridges that gap.
+---
 
 ## Architecture
 
 ```
-┌─────────────────────┐     ┌──────────────────┐     ┌────────────────────┐
-│  UsdSolidBrepArray  │────▶│  UsdSolidBrep    │────▶│  UsdSolidTessella  │
-│  (flat-packed USD   │     │  Builder         │     │  tor               │
-│   attributes)       │     │  (→ TopoDS_Shape)│     │  (→ triangle mesh) │
-└─────────────────────┘     └──────────────────┘     └────────────────────┘
-                                                              │
-                                                              ▼
-                                                     ┌────────────────────┐
-                                                     │  UsdSolidMesh      │
-                                                     │  Exporter          │
-                                                     │  (→ UsdGeomMesh)   │
-                                                     └────────────────────┘
+BrepArray prim (USD stage)
+    │
+    ├─ BrepArrayAdapter (usdImaging adapter)
+    │   ├─ Reads BrepArray attributes
+    │   ├─ Calls BrepBuilder → OCCT TopoDS_Shape
+    │   ├─ Calls Tessellator → triangles + normals
+    │   ├─ Injects mesh data as "usdSolidTessellatorData" data source
+    │   └─ Reports prim type as "generativeProcedural"
+    │
+    └─ UsdSolidTessellationProcedural (hdGp plugin)
+        ├─ Reads pre-computed mesh data from adapter's data source
+        ├─ Creates child mesh prims (one per body)
+        └─ Sets displayColor, topology, normals, points
 ```
 
-### Components
+### Key Design Decisions
 
-| Component | Description |
-|-----------|-------------|
-| `UsdSolidBrepBuilder` | Reads BrepArray attributes and reconstructs OCCT `TopoDS_Shape` topology (vertices → edges → wires → faces → shells → solids) |
-| `UsdSolidTessellator` | Runs OCCT `BRepMesh_IncrementalMesh` on the reconstructed shape, extracts triangulation data |
-| `UsdSolidMeshExporter` | Writes tessellation results as `UsdGeomMesh` prims with normals, UVs, extent, and `GeomSubset` per-face material groups |
+1. **Adapter does the heavy lifting** — has access to UsdPrim (stage data).
+   The procedural only maps pre-computed data to Hydra mesh schema.
 
-## Schema Mapping (Proposal #109 → OCCT)
+2. **Schema registration via generatedSchema.usda** — required so
+   `UsdImagingStageSceneIndex` recognizes `BrepArray` as a concrete type
+   and calls our adapter.
 
-| USD BrepArray Concept | OCCT Equivalent |
-|----------------------|-----------------|
-| `brep:regionCount` | `TopoDS_Solid` / `TopoDS_CompSolid` |
-| `region:shellCount` | `TopoDS_Shell` |
-| `shell:faceuseCount` | Faces in shell |
-| `face:surfaceType` → `BrepSurfaceNurbAPI` | `Geom_BSplineSurface` |
-| `edge:curveType` → `BrepCurve3dNurbAPI` | `Geom_BSplineCurve` |
-| `BrepCurveUvNurbAPI` (trim curves) | `Geom2d_BSplineCurve` |
-| `BrepPointAPI:vertexPoint` | `gp_Pnt` / `TopoDS_Vertex` |
-| `edgeuse:orientationType` | `TopAbs_Orientation` |
-| `brep:intersectTol3d` | Sewing/healing tolerance |
+3. **displayName in plugInfo.json = "usdSolidTessellation"** — the hdGp
+   resolving scene index matches the `hdGp:proceduralType` primvar value
+   against this string to find our procedural plugin.
 
-## Dependencies
+4. **No material binding** — meshes get `displayColor` (bright grey) for
+   Storm camera-light shading. Material pass-through is Phase 3 work.
 
-- **OpenUSD** (pxr) — USD core libraries
-- **OpenCascade Technology (OCCT) 7.7+** — Geometry kernel
-  - `TKernel`, `TKMath`, `TKG2d`, `TKG3d`, `TKGeomBase`
-  - `TKBRep`, `TKGeomAlgo`, `TKTopAlgo`, `TKMesh`, `TKShHealing`
+5. **Untrimmed surface path** — when BrepCurveUvNurbAPI (pcurves) are absent,
+   faces are built as untrimmed NURBS surfaces. Faces with multiple loops
+   (trim boundaries we can't reconstruct) are skipped to avoid oversized
+   rectangular artifacts.
+
+---
 
 ## Building
 
+### Standalone (out-of-tree, recommended for dev)
+
 ```bash
-cd OpenUSD
-mkdir build && cd build
-
-cmake .. \
-  -DCMAKE_PREFIX_PATH="/path/to/usd/install;/path/to/occt/install" \
-  -DBUILD_TESTING=ON
-
-cmake --build . --target usdSolidTessellator
-ctest -R testUsdSolidTessellator
+cd /home/horde/projects/usd-tessellation
+mkdir -p build-plugin && cd build-plugin
+cmake -DCMAKE_PREFIX_PATH=../usd-install \
+      -DCMAKE_INSTALL_PREFIX=../usd-install \
+      ../<path-to-OpenUSD>
+cmake --build . --target usdSolidTessellator -j$(nproc)
+cp extras/usd/usdSolidTessellator/usdSolidTessellator.so \
+   ../usd-install/plugin/usd/usdSolidTessellator.so
 ```
 
-## Usage
+### Dependencies
 
-### C++ API
+- OpenUSD 0.26.8+ (built from source with Python, imaging, hdGp)
+- OpenCASCADE 7.5 (`apt install libocct-*-dev`)
+- CMake 3.20+
 
-```cpp
-#include "extras/usd/usdSolidTessellator/lib/tessellator.h"
+---
 
-PXR_NAMESPACE_USING_DIRECTIVE
+## Running
 
-// Open stage with BrepArray prims
-auto stage = UsdStage::Open("model.usda");
-UsdPrim brep = stage->GetPrimAtPath(SdfPath("/Assembly/Part1"));
+### Environment Variables
 
-// Configure tessellation
-UsdSolidTessellationParams params;
-params.linearDeflection = 0.01;   // 10μm chord tolerance
-params.angularDeflection = 0.5;   // ~28° max angle
-params.computeNormals = true;
-params.computeUVs = true;
-
-// Tessellate
-UsdSolidTessellator tess;
-auto results = tess.Tessellate(brep, params);
-
-// Or write directly to stage
-auto meshPaths = tess.TessellateToStage(
-    brep, SdfPath("/Meshes/Part1"), params);
+```bash
+export LD_LIBRARY_PATH=/home/horde/projects/usd-tessellation/usd-install/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=/home/horde/projects/usd-tessellation/usd-install/lib/python
+export PXR_PLUGINPATH_NAME=/home/horde/projects/usd-tessellation/usd-install/plugin/usd/
+export HDGP_INCLUDE_DEFAULT_RESOLVER=1
+export DISPLAY=:99
+export QT_QPA_PLATFORM=offscreen
 ```
 
-### Tessellation Parameters
+### Render Command (usdrecord)
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `linearDeflection` | 0.1 | Max chord-to-surface distance |
-| `angularDeflection` | 0.5 rad | Max angle between adjacent normals |
-| `computeNormals` | true | Generate smooth vertex normals from surface |
-| `computeUVs` | true | Generate parametric UV coordinates |
-| `mergeBreps` | false | Combine all Breps into single mesh |
-| `relativeDeflection` | false | Deflection as fraction of bbox diagonal |
+```bash
+python3 /home/horde/projects/usd-tessellation/OpenUSD/pxr/usdImaging/bin/usdrecord/usdrecord.py \
+  --renderer Storm \
+  --imageWidth 1920 \
+  --camera /World/Camera \
+  scene.usda output.jpg
+```
 
-## Supported Geometry (Current)
+**Notes:**
+- Do NOT use `--disableCameraLight` — scene distant lights don't work on
+  llvmpipe/Xvfb software rendering. Camera headlamp is the only working
+  light source in this environment.
+- Use `.jpg` output to avoid transparent-background-appearing-as-white issue
+  with `.png` on some viewers.
+- `HDGP_INCLUDE_DEFAULT_RESOLVER=1` is required for the procedural to fire.
 
-- ✅ NURBS Surfaces (`BrepSurfaceNurbAPI`)
-- ✅ NURBS 3D Curves (`BrepCurve3dNurbAPI`)
-- ✅ NURBS 2D Trim Curves (`BrepCurveUvNurbAPI`)
-- ✅ Vertex Points (`BrepPointAPI`)
-
-## Hydra Generative Procedural Plugin
-
-The plugin registers a **Hydra Generative Procedural** so that BrepArray prims
-are automatically tessellated for any Hydra renderer (Storm, HdPrman, etc.)
-without requiring explicit stage-side conversion.
-
-### How It Works
-
-1. When Hydra encounters a prim with `hdGp:proceduralType = "usdSolidTessellation"`,
-   the `UsdSolidTessellationProceduralPlugin` is activated.
-2. It reads the BrepArray attributes from the scene index data source.
-3. OCCT tessellates the Brep topology into triangle meshes.
-4. Child mesh prims (`tessellated_mesh_0`, `tessellated_mesh_1`, ...) are
-   injected into the Hydra scene index.
-5. Any Hydra renderer picks them up as standard mesh prims.
-
-### Authoring for Hydra
-
-To mark a BrepArray prim for Hydra tessellation, author the procedural type:
+### Minimal Scene File
 
 ```usda
-def PrelimUsdSolidBrepArray "Part" (
-    prepend apiSchemas = ["HydraGenerativeProceduralAPI"]
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
 )
+
+def Xform "World"
 {
-    token hdGp:proceduralType = "usdSolidTessellation"
+    def "Brep0" (
+        references = @/path/to/BrepArray.usd@</World/Brep0>
+    )
+    {
+    }
 
-    # Optional tessellation quality controls
-    double primvars:tessellation:linearDeflection = 0.01
-    double primvars:tessellation:angularDeflection = 0.5
-    bool primvars:tessellation:computeNormals = true
-
-    # ... BrepArray topology and geometry attributes ...
-}
-```
-
-### Plugin Registration (plugInfo.json)
-
-```json
-{
-    "Info": {
-        "Types": {
-            "UsdSolidTessellationProceduralPlugin": {
-                "bases": ["HdGpGenerativeProceduralPlugin"],
-                "proceduralType": "usdSolidTessellation"
-            }
-        }
+    def Camera "Camera"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        double3 xformOp:translate = (60, 30, 60)
+        float3 xformOp:rotateXYZ = (-20, 45, 0)
+        token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }
 ```
 
-## Planned Extensions
+---
 
-- ⬜ Analytic surfaces (plane, cylinder, cone, sphere, torus)
-- ⬜ Analytic curves (line, circle, ellipse)
-- ⬜ Wire edge tessellation (as `UsdGeomBasisCurves`)
-- ⬜ Multi-region solid decomposition
-- ⬜ Async Hydra procedural (progressive tessellation)
-- ⬜ LOD generation (multiple deflection levels)
-- ⬜ Parallel per-face tessellation
+## How It Works — Data Flow
 
-## License
+### 1. BrepBuilder (`brepBuilder.cpp`)
 
-Apache-2.0
+Reads BrepArray attributes from USD prim:
+- `brep:surface:nurb:*` — NURBS surface control points, knots, orders
+- `face:loopCount`, `loop:edgeuseCount` — topology
+- `faceuse:orientationType` — normal direction ("same" = outward, "opposite" = flip)
+- `brep:edge:nurb:*` — 3D edge curves (used in pcurve path)
+- `region:*`, `shell:*` — body/shell structure
+
+Constructs OCCT `TopoDS_Shape` per body:
+- Builds `Geom_BSplineSurface` for each face
+- **No-pcurve path:** `BRepBuilderAPI_MakeFace(surface, tol)` → untrimmed face
+- **Pcurve path (TODO):** Full edge wires with `ShapeFix_Shape` pcurve projection
+- Skips multi-loop faces (trim boundaries without pcurves → rectangular artifacts)
+- Applies `face.Reverse()` for faces where faceuse says "opposite"
+- Sews faces into solid via `BRepBuilderAPI_Sewing`
+
+### 2. Tessellator (`tessellator.cpp`)
+
+Runs `BRepMesh_IncrementalMesh` on each body shape:
+- Default deflection: 0.01 (linear), 0.5 (angular)
+- Extracts vertices, triangle indices, normals from `Poly_Triangulation`
+- Normals computed from parametric surface `D1()` derivatives
+- **Winding convention:** `!isReversed` → swap(n1,n3) and reverse normal
+  (empirically correct for Storm's front-face convention)
+
+### 3. Adapter (`brepArrayAdapter.cpp`)
+
+- Registered via plugInfo.json: `primTypeName = "BrepArray"`
+- `GetImagingSubprimType()` → returns `generativeProcedural`
+- Pre-tessellates on first call, caches result as data source
+- Injects `hdGp:proceduralType = "usdSolidTessellation"` primvar
+
+### 4. Procedural (`hydraGenerativePlugin.cpp`)
+
+- Registered via `displayName = "usdSolidTessellation"` in plugInfo.json
+- `_Tessellate()` reads mesh data from adapter's data source
+- `Update()` returns child prim map: `tessellated_mesh_0..N`
+- `GetChildPrim()` builds Hydra data source per mesh:
+  - MeshTopology (faceVertexCounts, faceVertexIndices)
+  - Primvars: points (vertex), normals (vertex), displayColor (constant)
+
+---
+
+## Known Issues
+
+1. **`_MarkRprimDirty` errors** — cosmetic. Legacy UsdImagingDelegate tries to
+   dirty `/World/Brep0` which doesn't exist as an rprim. Non-fatal.
+
+2. **Hub ring normals mixed** — body 0 faces 3-5 have "opposite" faceuse
+   orientation. The current fix reverses those faces, but the winding swap
+   logic (`!isReversed`) was calibrated for the blade bodies. Need per-face
+   winding logic that considers both `face.Orientation()` AND faceuse direction.
+
+3. **No pcurve trimming** — faces with multiple loops (e.g., circular end-caps)
+   are skipped. Full trim support requires projecting 3D edges onto surface UV
+   space (OCCT `ShapeFix_Shape` + `FixAddPCurveMode`). Attempted but produced
+   broken topology — needs investigation.
+
+4. **Scene lights don't work** — Storm on llvmpipe/Xvfb doesn't process
+   DistantLight prims. Camera headlamp is the only working illumination.
+
+5. **Material binding** — BrepArray prims in TurbineFan.usd have GeomSubsets
+   with material bindings (`brushed_titanium`, `machined_steel_grey`), but
+   these materials live at `/World/Materials/*` which is out-of-scope when
+   referencing just the Brep0 prim. Need to either reference the full stage
+   or forward material bindings to procedural children.
+
+---
+
+## Test Asset
+
+`TurbineFan.usd` (652KB binary crate):
+- 25 bodies (1 hub + 24 blades)
+- 150 NURBS surfaces, 442 edges
+- No UV trim curves (BrepCurveUvNurbAPI absent)
+- 2 materials: `brushed_titanium`, `machined_steel_grey`
+- Extent: x=[-6,12] y=[-35,35] z=[-35,35]
+
+Current tessellation: 148 faces → ~1988 vertices (skipping 2 end-cap faces)
+at deflection 0.01.
+
+---
+
+## File Map
+
+```
+extras/usd/usdSolidTessellator/
+├── CMakeLists.txt              # Build rules (standalone out-of-tree)
+├── brepArrayAdapter.cpp/h      # UsdImaging adapter: BrepArray → procedural
+├── brepBuilder.cpp/h           # USD BrepArray → OCCT TopoDS_Shape
+├── hydraGenerativePlugin.cpp/h # hdGp procedural: mesh data → Hydra prims
+├── meshExporter.cpp/h          # Mesh → USD (for standalone CLI, Phase 2)
+├── module.cpp                  # Python module stub (placeholder)
+├── plugInfo.json               # Plugin registration metadata
+├── tessellator.cpp/h           # OCCT shape → triangles + normals
+└── resources/
+    └── plugInfo.json           # Runtime-discoverable copy
+```
+
+---
+
+## Next Steps
+
+- **Phase 2:** Standalone CLI `usdsolidtessellate` (C++ binary)
+- **Phase 3:** Material pass-through, GeomSubsets, per-body caching, thread safety
+- **Phase 4:** Tests, docs, upstream PR to PixarAnimationStudios/OpenUSD
+
+---
+
+## Git Info
+
+- Fork: `github.com/jensjebens/OpenUSD`
+- Branch: `feature/usd-solid-tessellator`
+- Remotes: `origin` = PixarAnimationStudios, `fork` = jensjebens
+- Upstream: `412f38c66` (dev branch, 2026-06-09)

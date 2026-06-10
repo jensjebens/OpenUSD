@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Hydra Generative Procedural Plugin implementation.
-// Tessellates UsdSolid BrepArray prims for live Hydra visualization.
+// Reads pre-tessellated mesh data injected by BrepArrayAdapter and
+// emits child mesh prims into the Hydra scene index.
 
 #include "hydraGenerativePlugin.h"
-#include "tessellator.h"
-#include "brepBuilder.h"
 
 #include "pxr/pxr.h"
+#include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/registryManager.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/meshTopologySchema.h"
@@ -24,11 +25,13 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
-    (UsdSolidBrepArray)
-    (usdSolidTessellation)
-    ((linearDeflection, "primvars:tessellation:linearDeflection"))
-    ((angularDeflection, "primvars:tessellation:angularDeflection"))
-    ((computeNormals, "primvars:tessellation:computeNormals"))
+    (usdSolidTessellatorData)
+    (meshCount)
+    (points)
+    (faceVertexCounts)
+    (faceVertexIndices)
+    (normals)
+    (displayColor)
 );
 
 // --------------------------------------------------------------------------
@@ -48,8 +51,9 @@ UsdSolidTessellationProcedural::UpdateDependencies(
     const HdSceneIndexBaseRefPtr &inputScene)
 {
     DependencyMap deps;
-    // We depend on our own prim (all BrepArray attributes)
-    deps[_GetProceduralPrimPath()] = HdDataSourceLocatorSet::UniversalSet();
+    // Depend on our own prim so we get dirtied when the adapter re-tessellates
+    deps[_GetProceduralPrimPath()] = HdDataSourceLocatorSet(
+        HdDataSourceLocator(_tokens->usdSolidTessellatorData));
     return deps;
 }
 
@@ -58,66 +62,97 @@ UsdSolidTessellationProcedural::_Tessellate(
     const HdSceneIndexBaseRefPtr &inputScene)
 {
     _meshes.clear();
-    _dirty = false;
 
-    // Get data from the input scene for our procedural prim
-    HdSceneIndexPrim prim = inputScene->GetPrim(_GetProceduralPrimPath());
+    const SdfPath primPath = _GetProceduralPrimPath();
+    HdSceneIndexPrim prim = inputScene->GetPrim(primPath);
+
     if (!prim.dataSource) {
+        TF_WARN("UsdSolidTessellationProcedural: No data source for '%s'",
+                primPath.GetText());
         return;
     }
 
-    // Read tessellation parameters from primvars (if authored)
-    double linearDeflection = 0.1;
-    double angularDeflection = 0.5;
-    bool computeNormals = true;
+    // Read pre-tessellated data from the adapter-injected container
+    HdContainerDataSourceHandle tessDs =
+        HdContainerDataSource::Cast(
+            prim.dataSource->Get(_tokens->usdSolidTessellatorData));
 
-    // In a full implementation, we'd read these from the prim's data source:
-    //   auto primvarsDs = HdPrimvarsSchema::GetFromParent(prim.dataSource);
-    //   ... extract linearDeflection, angularDeflection, computeNormals ...
-    // For now, use defaults.
+    if (!tessDs) {
+        TF_WARN("UsdSolidTessellationProcedural: No tessellation data for '%s'. "
+                "BrepArrayAdapter may not have injected it.",
+                primPath.GetText());
+        return;
+    }
 
-    // The actual tessellation happens here. In a real integration, we'd read
-    // the BrepArray topology directly from the Hydra data sources. For this
-    // plugin, we access the USD stage via the scene index's typed data sources.
-    //
-    // For the initial implementation, we produce a placeholder mesh that
-    // signals the pipeline is working. Full integration requires the
-    // BrepArray schema to be registered as a Hydra prim type with proper
-    // data source translation.
-    //
-    // TODO: When UsdSolid is integrated into the USD schema registry,
-    // access BrepArray attributes from the scene index data source directly.
-    // For now, the procedural demonstrates the plugin architecture.
+    // Read mesh count
+    int meshCount = 0;
+    if (auto countDs = HdTypedSampledDataSource<int>::Cast(
+            tessDs->Get(_tokens->meshCount))) {
+        meshCount = countDs->GetTypedValue(0.0f);
+    }
 
-    // Placeholder: emit a unit cube mesh to prove the pipeline works
-    _MeshData mesh;
-    mesh.points = {
-        GfVec3f(-0.5f, -0.5f, -0.5f), GfVec3f(0.5f, -0.5f, -0.5f),
-        GfVec3f(0.5f, 0.5f, -0.5f),   GfVec3f(-0.5f, 0.5f, -0.5f),
-        GfVec3f(-0.5f, -0.5f, 0.5f),  GfVec3f(0.5f, -0.5f, 0.5f),
-        GfVec3f(0.5f, 0.5f, 0.5f),    GfVec3f(-0.5f, 0.5f, 0.5f),
-    };
-    mesh.faceVertexCounts = {4, 4, 4, 4, 4, 4};
-    mesh.faceVertexIndices = {
-        0, 1, 2, 3,  // front
-        4, 7, 6, 5,  // back
-        0, 4, 5, 1,  // bottom
-        2, 6, 7, 3,  // top
-        0, 3, 7, 4,  // left
-        1, 5, 6, 2,  // right
-    };
-    mesh.normals = {
-        GfVec3f(-0.577f, -0.577f, -0.577f),
-        GfVec3f(0.577f, -0.577f, -0.577f),
-        GfVec3f(0.577f, 0.577f, -0.577f),
-        GfVec3f(-0.577f, 0.577f, -0.577f),
-        GfVec3f(-0.577f, -0.577f, 0.577f),
-        GfVec3f(0.577f, -0.577f, 0.577f),
-        GfVec3f(0.577f, 0.577f, 0.577f),
-        GfVec3f(-0.577f, 0.577f, 0.577f),
-    };
+    if (meshCount <= 0) {
+        TF_WARN("UsdSolidTessellationProcedural: meshCount=0 for '%s'",
+                primPath.GetText());
+        return;
+    }
 
-    _meshes.push_back(std::move(mesh));
+    // Read each mesh
+    for (int i = 0; i < meshCount; ++i) {
+        TfToken meshName(TfStringPrintf("mesh_%d", i));
+        HdContainerDataSourceHandle meshDs =
+            HdContainerDataSource::Cast(tessDs->Get(meshName));
+
+        if (!meshDs) {
+            TF_WARN("UsdSolidTessellationProcedural: Missing mesh data "
+                    "'%s' for '%s'", meshName.GetText(), primPath.GetText());
+            continue;
+        }
+
+        _MeshData mesh;
+
+        // Points
+        if (auto pointsDs =
+                HdTypedSampledDataSource<VtArray<GfVec3f>>::Cast(
+                    meshDs->Get(_tokens->points))) {
+            mesh.points = pointsDs->GetTypedValue(0.0f);
+        }
+
+        // Face vertex counts
+        if (auto fvcDs =
+                HdTypedSampledDataSource<VtArray<int>>::Cast(
+                    meshDs->Get(_tokens->faceVertexCounts))) {
+            mesh.faceVertexCounts = fvcDs->GetTypedValue(0.0f);
+        }
+
+        // Face vertex indices
+        if (auto fviDs =
+                HdTypedSampledDataSource<VtArray<int>>::Cast(
+                    meshDs->Get(_tokens->faceVertexIndices))) {
+            mesh.faceVertexIndices = fviDs->GetTypedValue(0.0f);
+        }
+
+        // Normals (optional)
+        if (auto normDs =
+                HdTypedSampledDataSource<VtArray<GfVec3f>>::Cast(
+                    meshDs->Get(_tokens->normals))) {
+            mesh.normals = normDs->GetTypedValue(0.0f);
+        }
+
+        if (!mesh.points.empty() && !mesh.faceVertexIndices.empty()) {
+            _meshes.push_back(std::move(mesh));
+        }
+    }
+
+    TF_STATUS("UsdSolidTessellationProcedural: Read %zu mesh(es) for '%s' "
+              "(%zu total verts)",
+              _meshes.size(), primPath.GetText(),
+              [&]() {
+                  size_t total = 0;
+                  for (const auto& m : _meshes)
+                      total += m.points.size();
+                  return total;
+              }());
 }
 
 HdGpGenerativeProcedural::ChildPrimTypeMap
@@ -127,12 +162,13 @@ UsdSolidTessellationProcedural::Update(
     const DependencyMap &dirtiedDependencies,
     HdSceneIndexObserver::DirtiedPrimEntries *outputDirtiedPrims)
 {
-    // Re-tessellate if dirty
-    if (_dirty || previousResult.empty()) {
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    if (!_cooked || !dirtiedDependencies.empty()) {
         _Tessellate(inputScene);
+        _cooked = true;
     }
 
-    // Return child prim paths for each tessellated mesh
     ChildPrimTypeMap result;
     for (size_t i = 0; i < _meshes.size(); ++i) {
         SdfPath childPath = _GetProceduralPrimPath().AppendChild(
@@ -140,7 +176,7 @@ UsdSolidTessellationProcedural::Update(
         result[childPath] = HdPrimTypeTokens->mesh;
     }
 
-    // If we had previous results, mark all as dirty
+    // If previous results existed, dirty all children
     if (!previousResult.empty() && outputDirtiedPrims) {
         for (const auto &[path, type] : result) {
             outputDirtiedPrims->emplace_back(
@@ -156,10 +192,12 @@ UsdSolidTessellationProcedural::GetChildPrim(
     const HdSceneIndexBaseRefPtr &inputScene,
     const SdfPath &childPrimPath)
 {
+    std::lock_guard<std::mutex> lock(_mutex);
+
     HdSceneIndexPrim result;
     result.primType = HdPrimTypeTokens->mesh;
 
-    // Determine which mesh this child path corresponds to
+    // Parse mesh index from child name
     const std::string childName = childPrimPath.GetName();
     size_t meshIdx = 0;
     if (sscanf(childName.c_str(), "tessellated_mesh_%zu", &meshIdx) != 1) {
@@ -171,7 +209,7 @@ UsdSolidTessellationProcedural::GetChildPrim(
 
     const _MeshData &mesh = _meshes[meshIdx];
 
-    // Build mesh topology data source
+    // Build mesh topology
     HdContainerDataSourceHandle topologyDs =
         HdMeshTopologySchema::Builder()
             .SetFaceVertexCounts(
@@ -182,13 +220,11 @@ UsdSolidTessellationProcedural::GetChildPrim(
                     mesh.faceVertexIndices))
             .Build();
 
-    // Build mesh data source
     HdContainerDataSourceHandle meshDs =
         HdMeshSchema::Builder()
             .SetTopology(topologyDs)
             .Build();
 
-    // Build primvars data source (points + normals)
     // Points primvar
     HdContainerDataSourceHandle pointsPvDs =
         HdRetainedContainerDataSource::New(
@@ -204,7 +240,6 @@ UsdSolidTessellationProcedural::GetChildPrim(
 
     HdContainerDataSourceHandle primvarsDs;
     if (!mesh.normals.empty()) {
-        // Normals primvar
         HdContainerDataSourceHandle normalsPvDs =
             HdRetainedContainerDataSource::New(
                 HdPrimvarSchemaTokens->primvarValue,
@@ -217,15 +252,44 @@ UsdSolidTessellationProcedural::GetChildPrim(
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->normal));
 
+        // displayColor for Storm shading (bright metallic grey)
+        VtArray<GfVec3f> displayColor(1, GfVec3f(0.85f, 0.87f, 0.9f));
+        HdContainerDataSourceHandle displayColorPvDs =
+            HdRetainedContainerDataSource::New(
+                HdPrimvarSchemaTokens->primvarValue,
+                HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                    displayColor),
+                HdPrimvarSchemaTokens->interpolation,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->constant),
+                HdPrimvarSchemaTokens->role,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->color));
+
         primvarsDs = HdRetainedContainerDataSource::New(
             HdTokens->points, pointsPvDs,
-            HdTokens->normals, normalsPvDs);
+            HdTokens->normals, normalsPvDs,
+            HdTokens->displayColor, displayColorPvDs);
     } else {
+        // displayColor for Storm shading (bright metallic grey)
+        VtArray<GfVec3f> displayColor(1, GfVec3f(0.85f, 0.87f, 0.9f));
+        HdContainerDataSourceHandle displayColorPvDs =
+            HdRetainedContainerDataSource::New(
+                HdPrimvarSchemaTokens->primvarValue,
+                HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                    displayColor),
+                HdPrimvarSchemaTokens->interpolation,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->constant),
+                HdPrimvarSchemaTokens->role,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->color));
+
         primvarsDs = HdRetainedContainerDataSource::New(
-            HdTokens->points, pointsPvDs);
+            HdTokens->points, pointsPvDs,
+            HdTokens->displayColor, displayColorPvDs);
     }
 
-    // Compose the full prim data source
     result.dataSource = HdRetainedContainerDataSource::New(
         HdMeshSchemaTokens->mesh, meshDs,
         HdPrimvarsSchemaTokens->primvars, primvarsDs);

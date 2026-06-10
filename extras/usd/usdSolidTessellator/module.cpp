@@ -1,11 +1,10 @@
 // Copyright 2024 NVIDIA Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
-// Module registration for TF_REGISTRY (type system and debug codes).
+// Module registration for TF_REGISTRY (debug codes).
 
 #include "pxr/pxr.h"
 #include "pxr/base/tf/registryManager.h"
-#include "pxr/base/tf/debugCodes.h"
 #include "pxr/base/tf/debug.h"
 
 PXR_NAMESPACE_OPEN_SCOPE

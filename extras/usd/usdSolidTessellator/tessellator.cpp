@@ -157,7 +157,7 @@ UsdSolidTessellationResult _ExtractMesh(
                 gp_Vec normal = du.Crossed(dv);
                 if (normal.Magnitude() > 1e-10) {
                     normal.Normalize();
-                    if (isReversed) normal.Reverse();
+                    if (!isReversed) normal.Reverse();
                     result.normals[vertOffset + i - 1] =
                         GfVec3f((float)normal.X(),
                                 (float)normal.Y(),
@@ -182,8 +182,9 @@ UsdSolidTessellationResult _ExtractMesh(
             int n1, n2, n3;
             tri->Triangle(i).Get(n1, n2, n3);
 
-            // Adjust for face orientation
-            if (isReversed) std::swap(n1, n3);
+            // Adjust for face orientation — swap winding to ensure
+            // outward-facing triangles have correct front-face winding.
+            if (!isReversed) std::swap(n1, n3);
 
             result.faceVertexCounts[triOffset + i - 1] = 3;
             result.faceVertexIndices[(triOffset + i - 1) * 3 + 0] =
