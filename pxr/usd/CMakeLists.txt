@@ -21,6 +21,7 @@ set(DIRS
     usdUI
     usdUtils
     usdPhysics
+    usdSolid
     plugin
 )
 

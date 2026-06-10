@@ -1,72 +1,59 @@
-# USD Solid Tessellator — in-tree extras plugin
-#
-# Tessellates UsdSolid BrepArray (Proposal #109) into UsdGeomMesh
-# using OpenCascade (OCCT) and provides a Hydra Generative Procedural
-# for live BrepArray visualization.
-
-set(PXR_PREFIX pxr/usd)
+set(PXR_PREFIX extras/usd)
 set(PXR_PACKAGE usdSolidTessellator)
 
-# --- Find OpenCascade ---
-# OCCT is an external dependency not part of the USD build.
-# Users must set OCCT_ROOT or have it discoverable.
-find_package(OpenCASCADE QUIET)
-if(NOT OpenCASCADE_FOUND)
-    # Fallback: try Ubuntu system paths
-    set(OCCT_INCLUDE_DIR "/usr/include/opencascade" CACHE PATH "OCCT headers")
-    if(EXISTS "${OCCT_INCLUDE_DIR}/BRep_Builder.hxx")
-        set(OpenCASCADE_FOUND TRUE)
-        message(STATUS "usdSolidTessellator: Using system OCCT at ${OCCT_INCLUDE_DIR}")
-    else()
-        message(WARNING "usdSolidTessellator: OpenCASCADE not found — skipping build")
-        return()
-    endif()
-else()
-    set(OCCT_INCLUDE_DIR ${OpenCASCADE_INCLUDE_DIR})
+# usdsolidtessellate: Command-line tool to convert BrepArray prims to Mesh.
+# Requires PXR_BUILD_OCCT_PLUGIN=ON (the hdOcct library provides tessellation).
+
+if (NOT ${PXR_BUILD_OCCT_PLUGIN})
+    message(STATUS
+        "Skipping ${PXR_PACKAGE} because PXR_BUILD_OCCT_PLUGIN=OFF")
+    return()
 endif()
 
-set(OCCT_LIBRARIES
-    TKernel
-    TKMath
-    TKG2d
-    TKG3d
-    TKGeomBase
-    TKBRep
-    TKGeomAlgo
-    TKTopAlgo
-    TKMesh
-    TKShHealing
+if(NOT OpenCASCADE_FOUND AND NOT OCCT_INCLUDE_DIR)
+    message(WARNING "Not building ${PXR_PACKAGE}: OpenCASCADE not found")
+    return()
+endif()
+
+# Determine OCCT paths
+if (OpenCASCADE_FOUND AND DEFINED OpenCASCADE_INCLUDE_DIR)
+    set(_OCCT_INCLUDE_DIR ${OpenCASCADE_INCLUDE_DIR})
+    set(_OCCT_LIBRARIES ${OpenCASCADE_LIBRARIES})
+else()
+    set(_OCCT_INCLUDE_DIR ${OCCT_INCLUDE_DIR})
+    set(_OCCT_LIBRARIES ${OCCT_LIBRARIES})
+endif()
+
+add_executable(usdsolidtessellate
+    meshExport.cpp
 )
 
-pxr_plugin(${PXR_PACKAGE}
-    LIBRARIES
-        tf
-        gf
-        vt
-        sdf
-        usd
-        usdGeom
-        hd
-        hdGp
-        hf
-        usdImaging
-        ${OCCT_LIBRARIES}
+target_include_directories(usdsolidtessellate PRIVATE
+    ${PROJECT_SOURCE_DIR}/pxr/imaging/plugin/hdOcct
+    ${_OCCT_INCLUDE_DIR}
+    /usr/include/python3.10
+)
 
-    INCLUDE_DIRS
-        ${OCCT_INCLUDE_DIR}
+target_link_libraries(usdsolidtessellate PRIVATE
+    hdOcct
+    tf
+    gf
+    vt
+    sdf
+    usd
+    usdGeom
+    ${_OCCT_LIBRARIES}
+)
 
-    PUBLIC_CLASSES
-        tessellator
-        brepBuilder
-        meshExporter
-        hydraGenerativePlugin
-        brepArrayAdapter
+# If USD was built with Python support, the CLI needs to link against
+# libpython to resolve VtValue template instantiations.
+find_package(Python3 COMPONENTS Development QUIET)
+if (Python3_FOUND)
+    target_link_libraries(usdsolidtessellate PRIVATE Python3::Python)
+elseif(EXISTS "/usr/lib/x86_64-linux-gnu/libpython3.10.so")
+    target_link_libraries(usdsolidtessellate PRIVATE python3.10)
+endif()
 
-    PUBLIC_HEADERS
-        api.h
-
-    RESOURCE_FILES
-        plugInfo.json
-
-    DISABLE_PRECOMPILED_HEADERS
+install(TARGETS usdsolidtessellate
+    RUNTIME DESTINATION bin
 )

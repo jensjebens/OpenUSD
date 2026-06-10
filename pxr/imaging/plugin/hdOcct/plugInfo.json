@@ -11,19 +11,11 @@
                     "UsdSolidBrepArrayAdapter": {
                         "bases": ["UsdImagingInstanceablePrimAdapter"],
                         "primTypeName": "BrepArray"
-                    },
-                    "UsdSolidBrepArray": {
-                        "alias": {
-                            "UsdSchemaBase": "BrepArray"
-                        },
-                        "bases": ["UsdTyped"],
-                        "schemaIdentifier": "BrepArray",
-                        "schemaKind": "concreteTyped"
                     }
                 }
             },
             "LibraryPath": "@PLUG_INFO_LIBRARY_PATH@",
-            "Name": "usdSolidTessellator",
+            "Name": "hdOcct",
             "ResourcePath": "@PLUG_INFO_RESOURCE_PATH@",
             "Root": "@PLUG_INFO_ROOT@",
             "Type": "library"
