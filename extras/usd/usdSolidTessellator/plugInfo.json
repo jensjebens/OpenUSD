@@ -5,8 +5,20 @@
                 "Types": {
                     "UsdSolidTessellationProceduralPlugin": {
                         "bases": ["HdGpGenerativeProceduralPlugin"],
-                        "displayName": "USD Solid BrepArray Tessellation",
-                        "proceduralType": "usdSolidTessellation"
+                        "displayName": "usdSolidTessellation",
+                        "priority": 0
+                    },
+                    "UsdSolidBrepArrayAdapter": {
+                        "bases": ["UsdImagingInstanceablePrimAdapter"],
+                        "primTypeName": "BrepArray"
+                    },
+                    "UsdSolidBrepArray": {
+                        "alias": {
+                            "UsdSchemaBase": "BrepArray"
+                        },
+                        "bases": ["UsdTyped"],
+                        "schemaIdentifier": "BrepArray",
+                        "schemaKind": "concreteTyped"
                     }
                 }
             },

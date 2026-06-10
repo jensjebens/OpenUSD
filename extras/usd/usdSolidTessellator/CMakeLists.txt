@@ -49,6 +49,7 @@ pxr_plugin(${PXR_PACKAGE}
         hd
         hdGp
         hf
+        usdImaging
         ${OCCT_LIBRARIES}
 
     INCLUDE_DIRS
@@ -59,6 +60,7 @@ pxr_plugin(${PXR_PACKAGE}
         brepBuilder
         meshExporter
         hydraGenerativePlugin
+        brepArrayAdapter
 
     PUBLIC_HEADERS
         api.h

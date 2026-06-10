@@ -17,6 +17,8 @@
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 
+#include <mutex>
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 // --------------------------------------------------------------------------
@@ -29,7 +31,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 /// into child mesh prims on the fly. When a BrepArray prim is encountered
 /// during Hydra scene index traversal, this procedural:
 ///
-///   1. Reads the BrepArray topology and NURBS geometry
+///   1. Reads the BrepArray topology and NURBS geometry from the USD stage
 ///   2. Builds OCCT TopoDS_Shape via UsdSolidBrepBuilder
 ///   3. Tessellates via BRepMesh_IncrementalMesh
 ///   4. Emits child mesh prim(s) into the Hydra scene index
@@ -72,7 +74,8 @@ private:
     };
 
     std::vector<_MeshData> _meshes;
-    bool _dirty = true;
+    bool _cooked = false;
+    std::mutex _mutex;  // OCCT is not thread-safe
 
     void _Tessellate(const HdSceneIndexBaseRefPtr &inputScene);
 };
