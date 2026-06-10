@@ -266,10 +266,28 @@ if (PXR_BUILD_IMAGING)
     if (PXR_BUILD_OCCT_PLUGIN)
         find_package(OpenCASCADE QUIET)
         if (NOT OpenCASCADE_FOUND)
-            # Fallback: look for OCCT headers/libs in system paths
-            find_path(OCCT_INCLUDE_DIR "Standard.hxx"
-                PATHS /usr/include/opencascade
-                      /usr/local/include/opencascade)
+            # Fallback: look for OCCT headers/libs in platform-specific paths
+            if (WIN32)
+                # Common Windows install locations:
+                #   - vcpkg: detected automatically via CMAKE_TOOLCHAIN_FILE
+                #   - conda: $ENV{CONDA_PREFIX}/Library/include/opencascade
+                #   - Official installer: C:/OpenCASCADE-7.x/opencascade-7.x
+                find_path(OCCT_INCLUDE_DIR "Standard.hxx"
+                    PATHS
+                        "$ENV{CONDA_PREFIX}/Library/include/opencascade"
+                        "$ENV{OpenCASCADE_DIR}/inc"
+                        "C:/OpenCASCADE-7.8.0/opencascade-7.8.0/inc"
+                        "C:/OpenCASCADE-7.7.0/opencascade-7.7.0/inc"
+                    PATH_SUFFIXES opencascade)
+            else()
+                # Linux/macOS: system packages or Homebrew
+                find_path(OCCT_INCLUDE_DIR "Standard.hxx"
+                    PATHS
+                        /usr/include/opencascade
+                        /usr/local/include/opencascade
+                        /opt/homebrew/include/opencascade)
+            endif()
+
             if (OCCT_INCLUDE_DIR)
                 set(OpenCASCADE_FOUND TRUE)
                 set(OCCT_LIBRARIES
@@ -278,8 +296,11 @@ if (PXR_BUILD_IMAGING)
                 message(STATUS "hdOcct: Using system OCCT at ${OCCT_INCLUDE_DIR}")
             else()
                 message(FATAL_ERROR
-                    "PXR_BUILD_OCCT_PLUGIN=ON but OpenCASCADE not found. "
-                    "Install libocct-*-dev or set OpenCASCADE_DIR.")
+                    "PXR_BUILD_OCCT_PLUGIN=ON but OpenCASCADE not found.\n"
+                    "  Linux:   apt install libocct-foundation-dev libocct-modeling-dev\n"
+                    "  macOS:   brew install opencascade\n"
+                    "  Windows: vcpkg install opencascade, or set OpenCASCADE_DIR\n"
+                    "  All:     cmake -DOpenCASCADE_DIR=/path/to/occt/lib/cmake/opencascade")
             endif()
         endif()
     endif()

@@ -189,8 +189,14 @@ UsdSolidTessellationProcedural::GetChildPrim(
 
     // Parse mesh index from child name
     const std::string childName = childPrimPath.GetName();
+    const std::string prefix = "tessellated_mesh_";
     size_t meshIdx = 0;
-    if (sscanf(childName.c_str(), "tessellated_mesh_%zu", &meshIdx) != 1) {
+    if (childName.substr(0, prefix.size()) != prefix) {
+        return result;
+    }
+    try {
+        meshIdx = std::stoul(childName.substr(prefix.size()));
+    } catch (...) {
         return result;
     }
     if (meshIdx >= _meshes.size()) {
