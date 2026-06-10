@@ -1,0 +1,264 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    doc = "Test BrepArray cube for usdSolidTessellator. Defines a unit cube"
+         " as a single Brep with 6 faces, 12 edges, 8 vertices using the"
+         " UsdSolid schema from Proposal #109."
+    metersPerUnit = 1.0
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def PrelimUsdSolidBrepArray "Cube" (
+        prepend apiSchemas = [
+            "PrelimUsdSolidBrepPointAPI:vertexPoint",
+            "PrelimUsdSolidBrepCurve3dNurbAPI:edge3dNurb",
+            "PrelimUsdSolidBrepSurfaceNurbAPI"
+        ]
+    )
+    {
+        # === Brep-level ===
+        # Single Brep with tolerance
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform double3[] brep:extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+        uniform uint[] brep:regionCount = [2]
+
+        # === Regions ===
+        # Region 0: solid interior (1 shell = outer shell)
+        # Region 1: void exterior (1 shell = same outer shell, opposite orientation)
+        uniform uint[] region:shellCount = [1, 1]
+        uniform token[] region:type = ["solidRegion", "voidRegion"]
+
+        # === Shells ===
+        # Shell 0 (solid outer): 12 faceuses (6 faces x 2 orientations), 0 wireEdges
+        # Shell 1 (void): 12 faceuses (same 6 faces, opposite), 0 wireEdges
+        uniform uint[] shell:faceuseCount = [12, 12]
+        uniform uint[] shell:wireEdgeCount = [0, 0]
+        uniform token[] shell:pointType = ["none", "none"]
+
+        # === Faceuses ===
+        # 12 faceuses for solid shell + 12 for void = 24 total
+        # Each face has 2 faceuses. Faces 0-5 map to the 6 cube faces.
+        # Solid: faceuse 0,2,4,6,8,10 = same orientation
+        # Solid: faceuse 1,3,5,7,9,11 = opposite orientation
+        uniform uint[] faceuse:faceIndex = [
+            0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5,
+            0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5
+        ]
+        uniform token[] faceuse:orientationType = [
+            "same", "opposite", "same", "opposite",
+            "same", "opposite", "same", "opposite",
+            "same", "opposite", "same", "opposite",
+            "opposite", "same", "opposite", "same",
+            "opposite", "same", "opposite", "same",
+            "opposite", "same", "opposite", "same"
+        ]
+
+        # === Faces ===
+        # 6 planar faces of the cube, each with 1 outer loop, represented as
+        # bilinear NURBS patches (order 2x2, 2x2 control points).
+        uniform uint[] face:loopCount = [1, 1, 1, 1, 1, 1]
+        uniform token[] face:surfaceType = [
+            "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI",
+            "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI",
+            "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI"
+        ]
+        uniform token[] face:trimType = [
+            "rectangular", "rectangular", "rectangular",
+            "rectangular", "rectangular", "rectangular"
+        ]
+        uniform double2[] face:range = [
+            (0, 0), (1, 1),
+            (0, 0), (1, 1),
+            (0, 0), (1, 1),
+            (0, 0), (1, 1),
+            (0, 0), (1, 1),
+            (0, 0), (1, 1)
+        ]
+
+        # === Loops ===
+        # 6 loops, each with 4 edgeuses
+        uniform uint[] loop:edgeuseCount = [4, 4, 4, 4, 4, 4]
+        uniform uint[] loop:vertexIndex = [0, 0, 0, 0, 0, 0]
+
+        # === Edgeuses ===
+        # 24 edgeuses (6 faces x 4 edges each)
+        # Each edgeuse references an edge index and has an orientation.
+        # Cube edges: 12 edges, each shared by 2 faces.
+        #
+        # Face 0 (-Z front): edges 0,1,2,3 (v0-v1, v1-v2, v2-v3, v3-v0)
+        # Face 1 (+Z back):  edges 4,5,6,7 (v4-v5, v5-v6, v6-v7, v7-v4)
+        # Face 2 (-Y bottom):edges 0,4,8,9 (v0-v1, v4-v5, v0-v4, v1-v5)
+        # Face 3 (+Y top):   edges 2,6,10,11 (v2-v3, v6-v7, v2-v6, v3-v7)
+        # Face 4 (-X left):  edges 3,7,8,10 (v3-v0, v7-v4, v0-v4, v3-v7... wait)
+        # Face 5 (+X right): edges 1,5,9,11 (v1-v2, v5-v6, v1-v5, v2-v6)
+        uniform uint[] edgeuse:edgeIndex = [
+            0, 1, 2, 3,
+            4, 5, 6, 7,
+            0, 9, 4, 8,
+            2, 11, 6, 10,
+            3, 8, 7, 10,
+            1, 9, 5, 11
+        ]
+        uniform token[] edgeuse:orientationType = [
+            "same", "same", "same", "same",
+            "same", "same", "same", "same",
+            "same", "same", "opposite", "same",
+            "opposite", "same", "same", "opposite",
+            "opposite", "same", "opposite", "same",
+            "same", "opposite", "same", "same"
+        ]
+        uniform uint[] edgeuse:nextRadialEUIndex = [
+            8, 21, 13, 16,
+            10, 22, 14, 18,
+            0, 11, 4, 9,
+            2, 23, 6, 19,
+            3, 12, 7, 15,
+            1, 20, 5, 17
+        ]
+        uniform token[] edgeuse:thisRadialEntryType = [
+            "topEntry", "topEntry", "topEntry", "topEntry",
+            "topEntry", "topEntry", "topEntry", "topEntry",
+            "bottomEntry", "topEntry", "bottomEntry", "bottomEntry",
+            "bottomEntry", "topEntry", "bottomEntry", "bottomEntry",
+            "bottomEntry", "bottomEntry", "bottomEntry", "bottomEntry",
+            "bottomEntry", "bottomEntry", "bottomEntry", "topEntry"
+        ]
+
+        # === Edges ===
+        # 12 edges of the cube, each a linear NURBS (order 2, 2 control pts)
+        uniform token[] edge:curveType = [
+            "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI",
+            "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI",
+            "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI",
+            "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI",
+            "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI",
+            "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"
+        ]
+        uniform double[] edge:range = [
+            0, 1, 0, 1, 0, 1, 0, 1,
+            0, 1, 0, 1, 0, 1, 0, 1,
+            0, 1, 0, 1, 0, 1, 0, 1
+        ]
+        # Vertex layout:
+        #   0: (-0.5, -0.5, -0.5)  front-bottom-left
+        #   1: ( 0.5, -0.5, -0.5)  front-bottom-right
+        #   2: ( 0.5,  0.5, -0.5)  front-top-right
+        #   3: (-0.5,  0.5, -0.5)  front-top-left
+        #   4: (-0.5, -0.5,  0.5)  back-bottom-left
+        #   5: ( 0.5, -0.5,  0.5)  back-bottom-right
+        #   6: ( 0.5,  0.5,  0.5)  back-top-right
+        #   7: (-0.5,  0.5,  0.5)  back-top-left
+        uniform int2[] edge:vertexIndices = [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7)
+        ]
+
+        # === Vertices ===
+        uniform token[] vertex:pointType = [
+            "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI",
+            "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI"
+        ]
+
+        # === BrepPointAPI:vertexPoint ===
+        uniform point3d[] brep:vertexPoint:point:position = [
+            (-0.5, -0.5, -0.5),
+            ( 0.5, -0.5, -0.5),
+            ( 0.5,  0.5, -0.5),
+            (-0.5,  0.5, -0.5),
+            (-0.5, -0.5,  0.5),
+            ( 0.5, -0.5,  0.5),
+            ( 0.5,  0.5,  0.5),
+            (-0.5,  0.5,  0.5)
+        ]
+
+        # === BrepCurve3dNurbAPI:edge3dNurb ===
+        # 12 linear edges: each has order=2, 2 control points, knots=[0,0,1,1]
+        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [
+            (-0.5, -0.5, -0.5), ( 0.5, -0.5, -0.5),
+            ( 0.5, -0.5, -0.5), ( 0.5,  0.5, -0.5),
+            ( 0.5,  0.5, -0.5), (-0.5,  0.5, -0.5),
+            (-0.5,  0.5, -0.5), (-0.5, -0.5, -0.5),
+            (-0.5, -0.5,  0.5), ( 0.5, -0.5,  0.5),
+            ( 0.5, -0.5,  0.5), ( 0.5,  0.5,  0.5),
+            ( 0.5,  0.5,  0.5), (-0.5,  0.5,  0.5),
+            (-0.5,  0.5,  0.5), (-0.5, -0.5,  0.5),
+            (-0.5, -0.5, -0.5), (-0.5, -0.5,  0.5),
+            ( 0.5, -0.5, -0.5), ( 0.5, -0.5,  0.5),
+            ( 0.5,  0.5, -0.5), ( 0.5,  0.5,  0.5),
+            (-0.5,  0.5, -0.5), (-0.5,  0.5,  0.5)
+        ]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
+        ]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2
+        ]
+        # Each linear curve: knots = [0, 0, 1, 1] (vertexCount + order = 4 knots each)
+        uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1
+        ]
+
+        # === BrepSurfaceNurbAPI ===
+        # 6 bilinear patches (order 2x2), each with 4 control points (2x2 grid)
+        # Face 0: -Z (front) - vertices 0,1,3,2 in UV order
+        # Face 1: +Z (back)  - vertices 4,5,7,6
+        # Face 2: -Y (bottom)- vertices 0,1,4,5
+        # Face 3: +Y (top)   - vertices 3,2,7,6
+        # Face 4: -X (left)  - vertices 0,3,4,7
+        # Face 5: +X (right) - vertices 1,2,5,6
+        uniform point3d[] brep:surface:nurb:controlVertices = [
+            (-0.5, -0.5, -0.5), ( 0.5, -0.5, -0.5),
+            (-0.5,  0.5, -0.5), ( 0.5,  0.5, -0.5),
+
+            (-0.5, -0.5,  0.5), ( 0.5, -0.5,  0.5),
+            (-0.5,  0.5,  0.5), ( 0.5,  0.5,  0.5),
+
+            (-0.5, -0.5, -0.5), ( 0.5, -0.5, -0.5),
+            (-0.5, -0.5,  0.5), ( 0.5, -0.5,  0.5),
+
+            (-0.5,  0.5, -0.5), ( 0.5,  0.5, -0.5),
+            (-0.5,  0.5,  0.5), ( 0.5,  0.5,  0.5),
+
+            (-0.5, -0.5, -0.5), (-0.5,  0.5, -0.5),
+            (-0.5, -0.5,  0.5), (-0.5,  0.5,  0.5),
+
+            ( 0.5, -0.5, -0.5), ( 0.5,  0.5, -0.5),
+            ( 0.5, -0.5,  0.5), ( 0.5,  0.5,  0.5)
+        ]
+        uniform uint[] brep:surface:nurb:uVertexCount = [2, 2, 2, 2, 2, 2]
+        uniform uint[] brep:surface:nurb:vVertexCount = [2, 2, 2, 2, 2, 2]
+        uniform uint[] brep:surface:nurb:uOrder = [2, 2, 2, 2, 2, 2]
+        uniform uint[] brep:surface:nurb:vOrder = [2, 2, 2, 2, 2, 2]
+        # Each bilinear surface: uKnots=[0,0,1,1], vKnots=[0,0,1,1]
+        uniform double[] brep:surface:nurb:uKnots = [
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1
+        ]
+        uniform double[] brep:surface:nurb:vKnots = [
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1,
+            0, 0, 1, 1
+        ]
+    }
+}
