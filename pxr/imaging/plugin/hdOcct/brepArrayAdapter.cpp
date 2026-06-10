@@ -92,9 +92,6 @@ _BuildTessellationDataSource(const UsdPrim &prim)
             HdRetainedTypedSampledDataSource<int>::New(0));
     }
 
-    TF_STATUS("BrepArrayAdapter: Tessellated '%s' -> %zu mesh(es)",
-              prim.GetPath().GetText(), goodResults.size());
-
     // Pack each mesh's data into a numbered child container:
     // usdSolidTessellatorData/meshCount -> int
     // usdSolidTessellatorData/mesh_0/points -> VtArray<GfVec3f>
@@ -108,16 +105,40 @@ _BuildTessellationDataSource(const UsdPrim &prim)
     for (size_t i = 0; i < goodResults.size(); ++i) {
         const auto& result = *goodResults[i];
 
-        // Convert double points to float
-        VtArray<GfVec3f> floatPoints(result.points.size());
+        // Compact vertices: remove unreferenced points and remap indices.
+        // OCCT tessellation can produce vertices unused by final triangulation.
+        std::vector<int> oldToNew(result.points.size(), -1);
+        int newIdx = 0;
+        for (int idx : result.faceVertexIndices) {
+            if (idx >= 0 && (size_t)idx < result.points.size()
+                && oldToNew[idx] == -1) {
+                oldToNew[idx] = newIdx++;
+            }
+        }
+
+        VtArray<GfVec3f> floatPoints(newIdx);
         for (size_t j = 0; j < result.points.size(); ++j) {
-            const GfVec3d& p = result.points[j];
-            floatPoints[j] = GfVec3f(
-                (float)p[0], (float)p[1], (float)p[2]);
+            if (oldToNew[j] >= 0) {
+                const GfVec3d& p = result.points[j];
+                floatPoints[oldToNew[j]] = GfVec3f(
+                    (float)p[0], (float)p[1], (float)p[2]);
+            }
+        }
+
+        VtArray<int> remappedIndices(result.faceVertexIndices.size());
+        for (size_t j = 0; j < result.faceVertexIndices.size(); ++j) {
+            remappedIndices[j] = oldToNew[result.faceVertexIndices[j]];
         }
 
         HdContainerDataSourceHandle meshDs;
         if (!result.normals.empty()) {
+            VtArray<GfVec3f> compactNormals(newIdx);
+            for (size_t j = 0; j < result.normals.size()
+                 && j < result.points.size(); ++j) {
+                if (oldToNew[j] >= 0) {
+                    compactNormals[oldToNew[j]] = result.normals[j];
+                }
+            }
             meshDs = HdRetainedContainerDataSource::New(
                 _tokens->points,
                 HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
@@ -127,10 +148,10 @@ _BuildTessellationDataSource(const UsdPrim &prim)
                     result.faceVertexCounts),
                 _tokens->faceVertexIndices,
                 HdRetainedTypedSampledDataSource<VtArray<int>>::New(
-                    result.faceVertexIndices),
+                    remappedIndices),
                 _tokens->normals,
                 HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
-                    result.normals));
+                    compactNormals));
         } else {
             meshDs = HdRetainedContainerDataSource::New(
                 _tokens->points,
@@ -141,7 +162,7 @@ _BuildTessellationDataSource(const UsdPrim &prim)
                     result.faceVertexCounts),
                 _tokens->faceVertexIndices,
                 HdRetainedTypedSampledDataSource<VtArray<int>>::New(
-                    result.faceVertexIndices));
+                    remappedIndices));
         }
 
         meshNames.push_back(
@@ -168,8 +189,6 @@ _BuildTessellationDataSource(const UsdPrim &prim)
 TfTokenVector
 UsdSolidBrepArrayAdapter::GetImagingSubprims(UsdPrim const& prim)
 {
-    TF_STATUS("BrepArrayAdapter::GetImagingSubprims called for '%s'",
-              prim.GetPath().GetText());
     return { TfToken() };
 }
 
@@ -179,8 +198,6 @@ UsdSolidBrepArrayAdapter::GetImagingSubprimType(
     TfToken const& subprim)
 {
     if (subprim.IsEmpty()) {
-        TF_STATUS("BrepArrayAdapter::GetImagingSubprimType -> generativeProcedural for '%s'",
-                  prim.GetPath().GetText());
         return HdGpGenerativeProceduralTokens->generativeProcedural;
     }
     return TfToken();
@@ -336,7 +353,11 @@ UsdSolidBrepArrayAdapter::MarkDirty(
     HdDirtyBits dirty,
     UsdImagingIndexProxy* index)
 {
-    index->MarkRprimDirty(cachePath, dirty);
+    // In the scene index path (USD 0.26+), Populate() is never called,
+    // so no rprim exists at this path. Only dirty if populated.
+    if (index->IsPopulated(cachePath)) {
+        index->MarkRprimDirty(cachePath, dirty);
+    }
 }
 
 void
@@ -345,7 +366,9 @@ UsdSolidBrepArrayAdapter::MarkTransformDirty(
     SdfPath const& cachePath,
     UsdImagingIndexProxy* index)
 {
-    index->MarkRprimDirty(cachePath, HdChangeTracker::DirtyTransform);
+    if (index->IsPopulated(cachePath)) {
+        index->MarkRprimDirty(cachePath, HdChangeTracker::DirtyTransform);
+    }
 }
 
 void
@@ -354,7 +377,9 @@ UsdSolidBrepArrayAdapter::MarkVisibilityDirty(
     SdfPath const& cachePath,
     UsdImagingIndexProxy* index)
 {
-    index->MarkRprimDirty(cachePath, HdChangeTracker::DirtyVisibility);
+    if (index->IsPopulated(cachePath)) {
+        index->MarkRprimDirty(cachePath, HdChangeTracker::DirtyVisibility);
+    }
 }
 
 void
