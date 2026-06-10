@@ -1,4 +1,5 @@
-// C-callable mesh export for use via ctypes/Python
+// C-callable mesh export for use via ctypes/Python and the CLI tool.
+#include "api.h"
 #include "tessellator.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/mesh.h"
@@ -13,6 +14,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 extern "C" {
 
+HDOCCT_API
 int UsdSolid_ExportMesh(const char* inputPath, const char* outputPath, const char* primPath) {
     auto inputStage = UsdStage::Open(inputPath);
     if (!inputStage) return -1;

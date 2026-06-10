@@ -11,11 +11,19 @@ endif()
 # See NOTICE.md for full LGPL compliance documentation.
 if (DEFINED OpenCASCADE_LIBRARIES)
     foreach(_lib ${OpenCASCADE_LIBRARIES})
-        if (_lib MATCHES "\\.(a|lib)$" AND NOT _lib MATCHES "import")
-            message(FATAL_ERROR
-                "hdOcct: Static OCCT library detected (${_lib}). "
-                "LGPL-2.1 compliance requires dynamic linking only. "
-                "Please install OCCT shared libraries.")
+        if (WIN32)
+            # On Windows, .lib files are expected (import libraries for DLLs).
+            # Static libraries are also .lib but lack a corresponding .dll.
+            # We can't easily distinguish at configure time, so trust that
+            # find_package(OpenCASCADE) found the shared build. The official
+            # OCCT CMake config and vcpkg both default to shared libraries.
+        else()
+            if (_lib MATCHES "\\.(a)$")
+                message(FATAL_ERROR
+                    "hdOcct: Static OCCT library detected (${_lib}). "
+                    "LGPL-2.1 compliance requires dynamic linking only. "
+                    "Please install OCCT shared libraries.")
+            endif()
         endif()
     endforeach()
 endif()

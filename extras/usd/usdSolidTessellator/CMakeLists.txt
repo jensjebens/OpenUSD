@@ -31,7 +31,6 @@ add_executable(usdsolidtessellate
 target_include_directories(usdsolidtessellate PRIVATE
     ${PROJECT_SOURCE_DIR}/pxr/imaging/plugin/hdOcct
     ${_OCCT_INCLUDE_DIR}
-    /usr/include/python3.10
 )
 
 target_link_libraries(usdsolidtessellate PRIVATE
@@ -47,11 +46,11 @@ target_link_libraries(usdsolidtessellate PRIVATE
 
 # If USD was built with Python support, the CLI needs to link against
 # libpython to resolve VtValue template instantiations.
-find_package(Python3 COMPONENTS Development QUIET)
-if (Python3_FOUND)
-    target_link_libraries(usdsolidtessellate PRIVATE Python3::Python)
-elseif(EXISTS "/usr/lib/x86_64-linux-gnu/libpython3.10.so")
-    target_link_libraries(usdsolidtessellate PRIVATE python3.10)
+if (NOT WIN32)
+    find_package(Python3 COMPONENTS Development QUIET)
+    if (Python3_FOUND)
+        target_link_libraries(usdsolidtessellate PRIVATE Python3::Python)
+    endif()
 endif()
 
 install(TARGETS usdsolidtessellate

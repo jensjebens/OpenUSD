@@ -4,8 +4,15 @@
 #include <iostream>
 #include <string>
 
-// C-callable function from hdOcct
-extern "C" int UsdSolid_ExportMesh(
+// Platform-specific import declaration for the hdOcct library function.
+// On Windows, symbols must be explicitly imported from DLLs.
+#if defined(_WIN32)
+#   define HDOCCT_IMPORT __declspec(dllimport)
+#else
+#   define HDOCCT_IMPORT
+#endif
+
+extern "C" HDOCCT_IMPORT int UsdSolid_ExportMesh(
     const char* inputPath, const char* outputPath, const char* primPath);
 
 int main(int argc, char* argv[]) {
