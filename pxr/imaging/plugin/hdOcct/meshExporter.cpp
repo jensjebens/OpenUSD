@@ -39,67 +39,39 @@ UsdSolidMeshExporter::Export(
         return SdfPath();
     }
 
-    // Points (convert double -> float for USD mesh)
-    // Also compact: remove unreferenced vertices and remap indices.
-    // OCCT tessellation can produce vertices unused by the final triangulation
-    // (trimming curves, degenerate triangles removed).
-    std::vector<int> oldToNew(result.points.size(), -1);
-    int newIdx = 0;
-    for (int idx : result.faceVertexIndices) {
-        if (idx >= 0 && (size_t)idx < result.points.size() && oldToNew[idx] == -1) {
-            oldToNew[idx] = newIdx++;
-        }
-    }
-
-    VtArray<GfVec3f> pointsF(newIdx);
+    // Expects pre-compacted result (call result.Compact() before Export).
+    // Points: convert double -> float for USD mesh
+    VtArray<GfVec3f> pointsF(result.points.size());
     for (size_t i = 0; i < result.points.size(); ++i) {
-        if (oldToNew[i] >= 0) {
-            pointsF[oldToNew[i]] = GfVec3f(result.points[i]);
-        }
+        pointsF[i] = GfVec3f(result.points[i]);
     }
     mesh.GetPointsAttr().Set(pointsF);
 
-    // Face vertex counts and remapped indices
-    VtArray<int> remappedIndices(result.faceVertexIndices.size());
-    for (size_t i = 0; i < result.faceVertexIndices.size(); ++i) {
-        remappedIndices[i] = oldToNew[result.faceVertexIndices[i]];
-    }
+    // Face vertex counts and indices (already compacted)
     mesh.GetFaceVertexCountsAttr().Set(result.faceVertexCounts);
-    mesh.GetFaceVertexIndicesAttr().Set(remappedIndices);
+    mesh.GetFaceVertexIndicesAttr().Set(result.faceVertexIndices);
 
     // Subdivision scheme = none (triangle mesh)
     mesh.GetSubdivisionSchemeAttr().Set(subdivisionScheme);
 
-    // Normals as primvar (vertex interpolation — must be compacted like points)
+    // Normals as primvar (vertex interpolation — already compacted)
     if (!result.normals.empty()) {
-        VtArray<GfVec3f> compactNormals(newIdx);
-        for (size_t i = 0; i < result.normals.size() && i < result.points.size(); ++i) {
-            if (oldToNew[i] >= 0) {
-                compactNormals[oldToNew[i]] = result.normals[i];
-            }
-        }
         UsdGeomPrimvarsAPI primvarsAPI(mesh);
         auto normalsPv = primvarsAPI.CreatePrimvar(
             TfToken("normals"),
             SdfValueTypeNames->Float3Array,
             UsdGeomTokens->vertex);
-        normalsPv.Set(compactNormals);
+        normalsPv.Set(result.normals);
     }
 
-    // UVs as primvar (vertex interpolation — must be compacted like points)
+    // UVs as primvar (vertex interpolation — already compacted)
     if (!result.uvs.empty()) {
-        VtArray<GfVec2f> compactUvs(newIdx);
-        for (size_t i = 0; i < result.uvs.size() && i < result.points.size(); ++i) {
-            if (oldToNew[i] >= 0) {
-                compactUvs[oldToNew[i]] = result.uvs[i];
-            }
-        }
         UsdGeomPrimvarsAPI primvarsAPI(mesh);
         auto uvPv = primvarsAPI.CreatePrimvar(
             TfToken("st"),
             SdfValueTypeNames->Float2Array,
             UsdGeomTokens->vertex);
-        uvPv.Set(compactUvs);
+        uvPv.Set(result.uvs);
     }
 
     // Compute and set extent

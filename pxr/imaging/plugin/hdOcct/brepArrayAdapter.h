@@ -11,6 +11,10 @@
 
 #include "pxr/pxr.h"
 #include "pxr/usdImaging/usdImaging/instanceablePrimAdapter.h"
+#include "pxr/imaging/hd/dataSource.h"
+
+#include <mutex>
+#include <unordered_map>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -114,6 +118,16 @@ protected:
     void _RemovePrim(
         SdfPath const& cachePath,
         UsdImagingIndexProxy* index) override;
+
+private:
+    // Tessellation cache: keyed by prim path, stores computed data source.
+    // Invalidated when brep: attributes change (via ProcessPropertyChange).
+    mutable std::mutex _cacheMutex;
+    mutable std::unordered_map<SdfPath, HdContainerDataSourceHandle,
+                               SdfPath::Hash> _tessellationCache;
+
+    HdContainerDataSourceHandle _BuildTessellationDataSource(
+        UsdPrim const& prim) const;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

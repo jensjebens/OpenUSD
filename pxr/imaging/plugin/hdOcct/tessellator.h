@@ -81,6 +81,13 @@ struct USDSOLIDTESSELLATOR_API UsdSolidTessellationResult {
 
     /// Error message if tessellation failed.
     std::string errorMessage;
+
+    /// Compact the mesh by removing unreferenced vertices and remapping
+    /// indices. OCCT tessellation can produce vertices that are not referenced
+    /// by any triangle (from trimming curves, degenerate triangles removed).
+    /// After compaction: len(points) == number of unique referenced indices.
+    /// Normals and UVs are compacted in lockstep.
+    void Compact();
 };
 
 /// \class UsdSolidTessellator

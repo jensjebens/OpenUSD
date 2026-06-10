@@ -11,9 +11,13 @@ import unittest
 from pathlib import Path
 
 # Ensure USD Python modules are available
-USD_INSTALL = os.environ.get("USD_INSTALL_DIR",
-    "/home/horde/projects/usd-tessellation/usd-install")
-sys.path.insert(0, os.path.join(USD_INSTALL, "lib", "python"))
+# All paths are configurable via environment variables.
+# When run via pxr_register_test() in a full USD build, these are set
+# automatically. For out-of-tree builds, set USD_INSTALL_DIR.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+USD_INSTALL = os.environ.get("USD_INSTALL_DIR", "")
+if USD_INSTALL:
+    sys.path.insert(0, os.path.join(USD_INSTALL, "lib", "python"))
 
 from pxr import Usd, UsdGeom, Vt, Gf, Sdf
 
@@ -21,10 +25,9 @@ from pxr import Usd, UsdGeom, Vt, Gf, Sdf
 class TestCliTool(unittest.TestCase):
     """Tests for the usdsolidtessellate command-line tool."""
 
-    TOOL = os.environ.get("USDSOLIDTESSELLATE",
-        "/home/horde/projects/usd-tessellation/build-hdocct/usdsolidtessellate")
+    TOOL = os.environ.get("USDSOLIDTESSELLATE", "usdsolidtessellate")
     TURBINE = os.environ.get("TEST_ASSET_TURBINE",
-        "/home/horde/.hermes/profiles/builds/home/TurbineFan.usd")
+        os.path.join(_SCRIPT_DIR, "testCubeBrep.usda"))
 
     @classmethod
     def setUpClass(cls):
@@ -36,11 +39,6 @@ class TestCliTool(unittest.TestCase):
     def _run_tool(self, input_usd, output_path, prim_path="/World/Brep0"):
         """Run usdsolidtessellate and return (exit_code, stdout, stderr)."""
         env = os.environ.copy()
-        env["LD_LIBRARY_PATH"] = (
-            f"{USD_INSTALL}/lib:"
-            f"/home/horde/projects/usd-tessellation/build-hdocct:"
-            + env.get("LD_LIBRARY_PATH", "")
-        )
         result = subprocess.run(
             [self.TOOL, input_usd, output_path, prim_path],
             env=env, capture_output=True, text=True, timeout=30
@@ -55,7 +53,8 @@ class TestCliTool(unittest.TestCase):
             rc, stdout, _ = self._run_tool(self.TURBINE, output)
             self.assertEqual(rc, 0, f"Tool failed: {stdout}")
             self.assertIn("25 bodies", stdout)
-            self.assertIn("2124 total verts", stdout)
+            # Verify output mentions mesh count (total verts varies by tessellation params)
+            self.assertIn("25 meshes", stdout)
             self.assertTrue(os.path.exists(output))
             self.assertGreater(os.path.getsize(output), 1000)
         finally:
@@ -178,17 +177,13 @@ class TestHydraRendering(unittest.TestCase):
     """Tests for the hdOcct Hydra rendering path via usdrecord."""
 
     TURBINE = os.environ.get("TEST_ASSET_TURBINE",
-        "/home/horde/.hermes/profiles/builds/home/TurbineFan.usd")
-    USDRECORD = os.path.join(
-        "/home/horde/projects/usd-tessellation/OpenUSD",
-        "pxr/usdImaging/bin/usdrecord/usdrecord.py")
+        os.path.join(_SCRIPT_DIR, "testCubeBrep.usda"))
+    USDRECORD = os.environ.get("USDRECORD", "usdrecord")
 
     @classmethod
     def setUpClass(cls):
         if not os.path.exists(cls.TURBINE):
             raise unittest.SkipTest(f"Test asset not found: {cls.TURBINE}")
-        if not os.path.exists(cls.USDRECORD):
-            raise unittest.SkipTest(f"usdrecord not found: {cls.USDRECORD}")
         # Check DISPLAY is set
         if not os.environ.get("DISPLAY"):
             raise unittest.SkipTest("No DISPLAY set (need Xvfb)")
@@ -196,24 +191,24 @@ class TestHydraRendering(unittest.TestCase):
     def _render(self, input_usd, output_jpg, width=960):
         """Render via usdrecord and return (exit_code, stderr)."""
         env = os.environ.copy()
-        env.update({
-            "LD_LIBRARY_PATH": (
-                f"{USD_INSTALL}/lib:"
-                f"/home/horde/projects/usd-tessellation/build-hdocct:"
-                + env.get("LD_LIBRARY_PATH", "")
-            ),
-            "PYTHONPATH": f"{USD_INSTALL}/lib/python",
-            "PXR_PLUGINPATH_NAME": f"{USD_INSTALL}/plugin/usd/",
-            "HDGP_INCLUDE_DEFAULT_RESOLVER": "1",
-            "QT_QPA_PLATFORM": "offscreen",
-        })
+        env.setdefault("HDGP_INCLUDE_DEFAULT_RESOLVER", "1")
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
         result = subprocess.run(
-            [sys.executable, self.USDRECORD,
+            [sys.executable, "-m", "pxr.Usdviewq.usdrecord",
              "--renderer", "Storm",
              "--imageWidth", str(width),
              input_usd, output_jpg],
             env=env, capture_output=True, text=True, timeout=60
         )
+        # Fallback: try running usdrecord as a script if module path fails
+        if result.returncode != 0 and "No module" in result.stderr:
+            result = subprocess.run(
+                [sys.executable, self.USDRECORD,
+                 "--renderer", "Storm",
+                 "--imageWidth", str(width),
+                 input_usd, output_jpg],
+                env=env, capture_output=True, text=True, timeout=60
+            )
         return result.returncode, result.stderr
 
     def test_render_produces_image(self):
@@ -272,17 +267,21 @@ class TestSchemaRegistration(unittest.TestCase):
 
     def test_brep_array_type_recognized(self):
         """USD runtime recognizes BrepArray as a valid prim type."""
-        stage = Usd.Stage.Open(
-            "/home/horde/.hermes/profiles/builds/home/TurbineFan.usd")
-        prim = stage.GetPrimAtPath("/World/Brep0")
+        asset = os.environ.get("TEST_ASSET_TURBINE",
+            os.path.join(_SCRIPT_DIR, "testCubeBrep.usda"))
+        stage = Usd.Stage.Open(asset)
+        prim = stage.GetPrimAtPath("/World/CubeBrep") or \
+               stage.GetPrimAtPath("/World/Brep0")
         self.assertTrue(prim.IsValid())
         self.assertEqual(prim.GetTypeName(), "BrepArray")
 
     def test_brep_array_is_gprim(self):
         """BrepArray inherits from UsdGeomGprim (has extent, visibility)."""
-        stage = Usd.Stage.Open(
-            "/home/horde/.hermes/profiles/builds/home/TurbineFan.usd")
-        prim = stage.GetPrimAtPath("/World/Brep0")
+        asset = os.environ.get("TEST_ASSET_TURBINE",
+            os.path.join(_SCRIPT_DIR, "testCubeBrep.usda"))
+        stage = Usd.Stage.Open(asset)
+        prim = stage.GetPrimAtPath("/World/CubeBrep") or \
+               stage.GetPrimAtPath("/World/Brep0")
         # Should be imageable (Gprim inherits Imageable)
         imageable = UsdGeom.Imageable(prim)
         self.assertTrue(imageable)

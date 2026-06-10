@@ -46,8 +46,8 @@ TF_REGISTRY_FUNCTION(TfType)
 // Helper: Build a container data source holding tessellation results.
 // The procedural reads this to emit child mesh prims without needing
 // stage access.
-static HdContainerDataSourceHandle
-_BuildTessellationDataSource(const UsdPrim &prim)
+HdContainerDataSourceHandle
+UsdSolidBrepArrayAdapter::_BuildTessellationDataSource(const UsdPrim &prim) const
 {
     UsdSolidTessellator tessellator;
     UsdSolidTessellationParams params;
@@ -75,6 +75,11 @@ _BuildTessellationDataSource(const UsdPrim &prim)
 
     std::vector<UsdSolidTessellationResult> results =
         tessellator.Tessellate(prim, params);
+
+    // Compact all results (removes unreferenced vertices)
+    for (auto& r : results) {
+        if (r.success) r.Compact();
+    }
 
     // Filter to successful results
     std::vector<const UsdSolidTessellationResult*> goodResults;
@@ -105,40 +110,18 @@ _BuildTessellationDataSource(const UsdPrim &prim)
     for (size_t i = 0; i < goodResults.size(); ++i) {
         const auto& result = *goodResults[i];
 
-        // Compact vertices: remove unreferenced points and remap indices.
-        // OCCT tessellation can produce vertices unused by final triangulation.
-        std::vector<int> oldToNew(result.points.size(), -1);
-        int newIdx = 0;
-        for (int idx : result.faceVertexIndices) {
-            if (idx >= 0 && (size_t)idx < result.points.size()
-                && oldToNew[idx] == -1) {
-                oldToNew[idx] = newIdx++;
-            }
-        }
-
-        VtArray<GfVec3f> floatPoints(newIdx);
+        // Convert double → float points (already compacted)
+        VtArray<GfVec3f> floatPoints(result.points.size());
         for (size_t j = 0; j < result.points.size(); ++j) {
-            if (oldToNew[j] >= 0) {
-                const GfVec3d& p = result.points[j];
-                floatPoints[oldToNew[j]] = GfVec3f(
-                    (float)p[0], (float)p[1], (float)p[2]);
-            }
-        }
-
-        VtArray<int> remappedIndices(result.faceVertexIndices.size());
-        for (size_t j = 0; j < result.faceVertexIndices.size(); ++j) {
-            remappedIndices[j] = oldToNew[result.faceVertexIndices[j]];
+            const GfVec3d& p = result.points[j];
+            floatPoints[j] = GfVec3f(
+                static_cast<float>(p[0]),
+                static_cast<float>(p[1]),
+                static_cast<float>(p[2]));
         }
 
         HdContainerDataSourceHandle meshDs;
         if (!result.normals.empty()) {
-            VtArray<GfVec3f> compactNormals(newIdx);
-            for (size_t j = 0; j < result.normals.size()
-                 && j < result.points.size(); ++j) {
-                if (oldToNew[j] >= 0) {
-                    compactNormals[oldToNew[j]] = result.normals[j];
-                }
-            }
             meshDs = HdRetainedContainerDataSource::New(
                 _tokens->points,
                 HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
@@ -148,10 +131,10 @@ _BuildTessellationDataSource(const UsdPrim &prim)
                     result.faceVertexCounts),
                 _tokens->faceVertexIndices,
                 HdRetainedTypedSampledDataSource<VtArray<int>>::New(
-                    remappedIndices),
+                    result.faceVertexIndices),
                 _tokens->normals,
                 HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
-                    compactNormals));
+                    result.normals));
         } else {
             meshDs = HdRetainedContainerDataSource::New(
                 _tokens->points,
@@ -162,7 +145,7 @@ _BuildTessellationDataSource(const UsdPrim &prim)
                     result.faceVertexCounts),
                 _tokens->faceVertexIndices,
                 HdRetainedTypedSampledDataSource<VtArray<int>>::New(
-                    remappedIndices));
+                    result.faceVertexIndices));
         }
 
         meshNames.push_back(
@@ -251,8 +234,18 @@ UsdSolidBrepArrayAdapter::GetImagingSubprimData(
         fullPrimvars = primvarsOverlay;
     }
 
-    // Pre-tessellate and inject mesh data
-    HdContainerDataSourceHandle tessData = _BuildTessellationDataSource(prim);
+    // Pre-tessellate and inject mesh data (cached)
+    HdContainerDataSourceHandle tessData;
+    {
+        std::lock_guard<std::mutex> lock(_cacheMutex);
+        auto it = _tessellationCache.find(prim.GetPath());
+        if (it != _tessellationCache.end()) {
+            tessData = it->second;
+        } else {
+            tessData = _BuildTessellationDataSource(prim);
+            _tessellationCache[prim.GetPath()] = tessData;
+        }
+    }
 
     // Compose: our primvars + tessellation data overlaid on base
     return HdOverlayContainerDataSource::New(
@@ -271,6 +264,19 @@ UsdSolidBrepArrayAdapter::InvalidateImagingSubprim(
 {
     if (!subprim.IsEmpty()) {
         return HdDataSourceLocatorSet();
+    }
+
+    // Invalidate tessellation cache if brep properties changed
+    for (const auto& prop : properties) {
+        const std::string& name = prop.GetString();
+        if (name.find("brep:") != std::string::npos ||
+            name.find("surface:") != std::string::npos ||
+            name.find("face:") != std::string::npos ||
+            name.find("tessellation:") != std::string::npos) {
+            std::lock_guard<std::mutex> lock(_cacheMutex);
+            _tessellationCache.erase(prim.GetPath());
+            break;
+        }
     }
 
     return UsdImagingDataSourcePrim::Invalidate(
@@ -343,7 +349,31 @@ UsdSolidBrepArrayAdapter::ProcessPropertyChange(
     SdfPath const& cachePath,
     TfToken const& propertyName)
 {
-    return HdChangeTracker::AllDirty;
+    // Only re-tessellate for brep-related attribute changes.
+    // Ignore irrelevant properties like displayOpacity, visibility, etc.
+    const std::string& name = propertyName.GetString();
+    if (name.find("brep:") != std::string::npos ||
+        name.find("region:") != std::string::npos ||
+        name.find("shell:") != std::string::npos ||
+        name.find("face:") != std::string::npos ||
+        name.find("edge:") != std::string::npos ||
+        name.find("loop:") != std::string::npos ||
+        name.find("surface:") != std::string::npos ||
+        name.find("vertex:") != std::string::npos ||
+        name.find("tessellation:") != std::string::npos) {
+        return HdChangeTracker::AllDirty;
+    }
+    // Transform changes need marking but not re-tessellation
+    if (propertyName == UsdGeomTokens->xformOpOrder ||
+        name.find("xformOp:") != std::string::npos) {
+        return HdChangeTracker::DirtyTransform;
+    }
+    // Visibility
+    if (propertyName == UsdGeomTokens->visibility) {
+        return HdChangeTracker::DirtyVisibility;
+    }
+    // Everything else: no dirty bits (ignore it)
+    return HdChangeTracker::Clean;
 }
 
 void

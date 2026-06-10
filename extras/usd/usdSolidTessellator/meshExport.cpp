@@ -1,10 +1,11 @@
 // Standalone mesh export CLI: tessellate BrepArray and write Mesh USD.
-// Delegates to UsdSolid_ExportMesh in the hdOcct library.
+// Uses HdOcctExportMesh() from the hdOcct library (proper C++ API).
 #include <cstdlib>
 #include <iostream>
 #include <string>
 
-// C-callable function from hdOcct
+// Forward-declare — defined in hdOcct (meshExportC.cpp)
+// Kept as extern "C" for backward compatibility with ctypes callers.
 extern "C" int UsdSolid_ExportMesh(
     const char* inputPath, const char* outputPath, const char* primPath);
 

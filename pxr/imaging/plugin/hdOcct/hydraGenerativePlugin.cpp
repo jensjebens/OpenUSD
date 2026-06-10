@@ -189,8 +189,14 @@ UsdSolidTessellationProcedural::GetChildPrim(
 
     // Parse mesh index from child name
     const std::string childName = childPrimPath.GetName();
+    static const std::string kPrefix = "tessellated_mesh_";
+    if (childName.substr(0, kPrefix.size()) != kPrefix) {
+        return result;
+    }
     size_t meshIdx = 0;
-    if (sscanf(childName.c_str(), "tessellated_mesh_%zu", &meshIdx) != 1) {
+    try {
+        meshIdx = std::stoul(childName.substr(kPrefix.size()));
+    } catch (...) {
         return result;
     }
     if (meshIdx >= _meshes.size()) {
@@ -243,12 +249,13 @@ UsdSolidTessellationProcedural::GetChildPrim(
                     HdPrimvarSchemaTokens->normal));
 
         // displayColor for Storm shading (bright metallic grey)
-        VtArray<GfVec3f> displayColor(1, GfVec3f(0.85f, 0.87f, 0.9f));
+        static const VtArray<GfVec3f> kDisplayColor(
+            1, GfVec3f(0.85f, 0.87f, 0.9f));
         HdContainerDataSourceHandle displayColorPvDs =
             HdRetainedContainerDataSource::New(
                 HdPrimvarSchemaTokens->primvarValue,
                 HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
-                    displayColor),
+                    kDisplayColor),
                 HdPrimvarSchemaTokens->interpolation,
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->constant),
@@ -262,12 +269,13 @@ UsdSolidTessellationProcedural::GetChildPrim(
             HdTokens->displayColor, displayColorPvDs);
     } else {
         // displayColor for Storm shading (bright metallic grey)
-        VtArray<GfVec3f> displayColor(1, GfVec3f(0.85f, 0.87f, 0.9f));
+        static const VtArray<GfVec3f> kDisplayColor(
+            1, GfVec3f(0.85f, 0.87f, 0.9f));
         HdContainerDataSourceHandle displayColorPvDs =
             HdRetainedContainerDataSource::New(
                 HdPrimvarSchemaTokens->primvarValue,
                 HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
-                    displayColor),
+                    kDisplayColor),
                 HdPrimvarSchemaTokens->interpolation,
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->constant),

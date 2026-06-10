@@ -1,19 +1,25 @@
-// C-callable mesh export for use via ctypes/Python
+// hdOcct mesh export API — tessellates BrepArray and writes USD mesh.
+// Single source of truth for CLI and programmatic mesh export.
 #include "tessellator.h"
+
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/xform.h"
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/base/vt/array.h"
-#include <string>
-#include <vector>
+
 #include <cstdio>
+#include <string>
 
-PXR_NAMESPACE_USING_DIRECTIVE
+PXR_NAMESPACE_OPEN_SCOPE
 
-extern "C" {
-
-int UsdSolid_ExportMesh(const char* inputPath, const char* outputPath, const char* primPath) {
+int
+HdOcctExportMesh(
+    const std::string& inputPath,
+    const std::string& outputPath,
+    const std::string& primPath,
+    const UsdSolidTessellationParams& params)
+{
     auto inputStage = UsdStage::Open(inputPath);
     if (!inputStage) return -1;
 
@@ -21,12 +27,6 @@ int UsdSolid_ExportMesh(const char* inputPath, const char* outputPath, const cha
     if (!brepPrim) return -2;
 
     UsdSolidTessellator tessellator;
-    UsdSolidTessellationParams params;
-    params.linearDeflection = 0.1;
-    params.angularDeflection = 0.5;
-    params.computeNormals = true;
-    params.computeUVs = true;
-
     auto results = tessellator.Tessellate(brepPrim, params);
     fprintf(stdout, "Tessellated %zu bodies\n", results.size());
 
@@ -35,65 +35,62 @@ int UsdSolid_ExportMesh(const char* inputPath, const char* outputPath, const cha
     auto world = UsdGeomXform::Define(outStage, SdfPath("/World"));
     outStage->SetDefaultPrim(world.GetPrim());
 
+    static const GfVec3f kDefaultDisplayColor(0.85f, 0.87f, 0.9f);
+
     int meshCount = 0;
+    int totalVerts = 0;
     for (size_t i = 0; i < results.size(); ++i) {
-        const auto& result = results[i];
+        auto& result = results[i];
         if (result.points.empty()) continue;
+
+        // Compact: remove unreferenced vertices, remap indices
+        result.Compact();
+        totalVerts += result.points.size();
 
         std::string meshPathStr = "/World/mesh_" + std::to_string(i);
         auto mesh = UsdGeomMesh::Define(outStage, SdfPath(meshPathStr));
 
-        // Compact vertices: remove unreferenced points and remap indices.
-        // OCCT tessellation can produce vertices unused by final triangulation.
-        std::vector<int> oldToNew(result.points.size(), -1);
-        int newIdx = 0;
-        for (int idx : result.faceVertexIndices) {
-            if (idx >= 0 && (size_t)idx < result.points.size()
-                && oldToNew[idx] == -1) {
-                oldToNew[idx] = newIdx++;
-            }
-        }
-
-        VtArray<GfVec3f> points3f(newIdx);
+        // Convert double → float points for USD mesh
+        VtArray<GfVec3f> points3f(result.points.size());
         for (size_t j = 0; j < result.points.size(); ++j) {
-            if (oldToNew[j] >= 0) {
-                const auto& p = result.points[j];
-                points3f[oldToNew[j]] = GfVec3f((float)p[0], (float)p[1], (float)p[2]);
-            }
-        }
-
-        VtArray<int> remappedIndices(result.faceVertexIndices.size());
-        for (size_t j = 0; j < result.faceVertexIndices.size(); ++j) {
-            remappedIndices[j] = oldToNew[result.faceVertexIndices[j]];
+            const auto& p = result.points[j];
+            points3f[j] = GfVec3f(
+                static_cast<float>(p[0]),
+                static_cast<float>(p[1]),
+                static_cast<float>(p[2]));
         }
 
         mesh.GetPointsAttr().Set(points3f);
         mesh.GetFaceVertexCountsAttr().Set(result.faceVertexCounts);
-        mesh.GetFaceVertexIndicesAttr().Set(remappedIndices);
+        mesh.GetFaceVertexIndicesAttr().Set(result.faceVertexIndices);
 
         if (!result.normals.empty()) {
-            VtArray<GfVec3f> compactNormals(newIdx);
-            for (size_t j = 0; j < result.normals.size()
-                 && j < result.points.size(); ++j) {
-                if (oldToNew[j] >= 0) {
-                    compactNormals[oldToNew[j]] = result.normals[j];
-                }
-            }
-            mesh.GetNormalsAttr().Set(compactNormals);
+            mesh.GetNormalsAttr().Set(result.normals);
             mesh.SetNormalsInterpolation(UsdGeomTokens->vertex);
         }
 
-        VtArray<GfVec3f> colors(1, GfVec3f(0.85f, 0.87f, 0.9f));
+        VtArray<GfVec3f> colors(1, kDefaultDisplayColor);
         mesh.GetDisplayColorAttr().Set(colors);
         meshCount++;
     }
 
     outStage->Save();
-    int totalVerts = 0;
-    for (const auto& r : results) totalVerts += r.points.size();
     fprintf(stdout, "Wrote %d meshes (%d total verts) to %s\n",
-            meshCount, totalVerts, outputPath);
+            meshCount, totalVerts, outputPath.c_str());
     return meshCount;
 }
 
-} // extern "C"
+PXR_NAMESPACE_CLOSE_SCOPE
+
+// Legacy C-callable wrapper for ctypes/Python consumers.
+extern "C" int UsdSolid_ExportMesh(
+    const char* inputPath, const char* outputPath, const char* primPath)
+{
+    PXR_NAMESPACE_USING_DIRECTIVE
+    UsdSolidTessellationParams params;
+    params.linearDeflection = 0.1;
+    params.angularDeflection = 0.5;
+    params.computeNormals = true;
+    params.computeUVs = true;
+    return HdOcctExportMesh(inputPath, outputPath, primPath, params);
+}

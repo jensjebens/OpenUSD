@@ -141,26 +141,6 @@ UsdSolidTessellationResult _ExtractMesh(
         int nbNodes = tri->NbNodes();
         int nbTris = tri->NbTriangles();
 
-        // Check if surface is closed (cylinders, cones, tori) vs open (planes)
-        // This determines whether normals/winding need flipping.
-        // All BrepArray NURBS surfaces in this model have inward-pointing
-        // natural normals (du×dv toward axis) EXCEPT planar faces (end-caps)
-        // where the normal already points outward. This is because the NURBS
-        // cylinders are parameterized with U going around the circumference
-        // and V along the axis, giving du×dv pointing inward.
-        BRepAdaptor_Surface surfCheck(face, Standard_True);
-        GeomAbs_SurfaceType surfType = surfCheck.GetType();
-        // Planes don't need flip; everything else does
-        bool isClosed = (surfType != GeomAbs_Plane);
-        // For BSpline surfaces: check if it's degenerate-planar (degree 1×1)
-        if (surfType == GeomAbs_BSplineSurface) {
-            Handle(Geom_BSplineSurface) bsurf = surfCheck.BSpline();
-            if (bsurf->UDegree() == 1 && bsurf->VDegree() == 1) {
-                // Bilinear patch = planar face
-                isClosed = false;
-            }
-        }
-
         // Vertices
         for (int i = 1; i <= nbNodes; ++i) {
             gp_Pnt p = tri->Node(i).Transformed(trsf);
@@ -170,8 +150,7 @@ UsdSolidTessellationResult _ExtractMesh(
         // Normals from parametric surface
         if (params.computeNormals && tri->HasUVNodes()) {
             BRepAdaptor_Surface surfAdaptor(face, Standard_True);
-            bool flipNormal = isClosed;  // flip for closed surfaces only
-            
+
             for (int i = 1; i <= nbNodes; ++i) {
                 gp_Pnt2d uv = tri->UVNode(i);
                 gp_Pnt pnt;
@@ -180,13 +159,15 @@ UsdSolidTessellationResult _ExtractMesh(
                 gp_Vec normal = du.Crossed(dv);
                 if (normal.Magnitude() > 1e-10) {
                     normal.Normalize();
-                    if (flipNormal) {
+                    // Use face topology orientation (IsReversed) for flip.
+                    // This is topology-driven, not surface-type heuristic.
+                    if (isReversed) {
                         normal.Reverse();
                     }
                     result.normals[vertOffset + i - 1] =
-                        GfVec3f((float)normal.X(),
-                                (float)normal.Y(),
-                                (float)normal.Z());
+                        GfVec3f(static_cast<float>(normal.X()),
+                                static_cast<float>(normal.Y()),
+                                static_cast<float>(normal.Z()));
                 } else {
                     result.normals[vertOffset + i - 1] = GfVec3f(0, 0, 1);
                 }
@@ -207,9 +188,10 @@ UsdSolidTessellationResult _ExtractMesh(
             int n1, n2, n3;
             tri->Triangle(i).Get(n1, n2, n3);
 
-            // Winding swap: closed surfaces (cylinders) need swap to match
-            // Storm/USD's front-face convention. Open surfaces (planes) don't.
-            if (isClosed) {
+            // Winding swap: use face topology orientation.
+            // If face is reversed relative to its surface, swap winding
+            // to match Storm/USD's front-face convention.
+            if (isReversed) {
                 std::swap(n1, n3);
             }
 
@@ -256,8 +238,14 @@ UsdSolidTessellationResult _MergeResults(
     merged.faceBrepIndices.reserve(totalFaces);
     merged.faceSolidFaceIndices.reserve(totalFaces);
 
-    bool hasNormals = !results.empty() && !results[0].normals.empty();
-    bool hasUVs = !results.empty() && !results[0].uvs.empty();
+    // Check if ANY result has normals/UVs (not just the first one)
+    bool hasNormals = false;
+    bool hasUVs = false;
+    for (const auto& r : results) {
+        if (!r.normals.empty()) hasNormals = true;
+        if (!r.uvs.empty()) hasUVs = true;
+        if (hasNormals && hasUVs) break;
+    }
 
     if (hasNormals) merged.normals.reserve(totalVerts);
     if (hasUVs) merged.uvs.reserve(totalVerts);
@@ -350,11 +338,78 @@ UsdSolidTessellator::TessellateToStage(
 {
     auto results = Tessellate(brepArrayPrim, params);
 
+    // Compact before export
+    for (auto& r : results) {
+        if (r.success) r.Compact();
+    }
+
     UsdStageRefPtr stage = brepArrayPrim.GetStage();
     if (!stage) return {};
 
     UsdSolidMeshExporter exporter;
     return exporter.ExportAll(stage, destPath, results);
+}
+
+// ---------------------------------------------------------------------------
+// UsdSolidTessellationResult::Compact
+// ---------------------------------------------------------------------------
+
+void
+UsdSolidTessellationResult::Compact()
+{
+    if (points.empty() || faceVertexIndices.empty()) return;
+
+    const size_t numPoints = points.size();
+    std::vector<int> oldToNew(numPoints, -1);
+    int newIdx = 0;
+
+    // Build remapping: only vertices referenced by indices survive
+    for (int idx : faceVertexIndices) {
+        if (idx >= 0 && static_cast<size_t>(idx) < numPoints
+            && oldToNew[idx] == -1) {
+            oldToNew[idx] = newIdx++;
+        }
+    }
+
+    // Early out if already compact
+    if (static_cast<size_t>(newIdx) == numPoints) return;
+
+    // Compact points
+    VtArray<GfVec3d> newPoints(newIdx);
+    for (size_t i = 0; i < numPoints; ++i) {
+        if (oldToNew[i] >= 0) {
+            newPoints[oldToNew[i]] = points[i];
+        }
+    }
+    points = std::move(newPoints);
+
+    // Remap indices
+    for (int& idx : faceVertexIndices) {
+        idx = (idx >= 0 && static_cast<size_t>(idx) < numPoints)
+              ? oldToNew[idx] : 0;
+    }
+
+    // Compact normals (vertex interpolation)
+    if (!normals.empty()) {
+        VtArray<GfVec3f> newNormals(newIdx);
+        for (size_t i = 0; i < std::min(normals.size(), numPoints); ++i) {
+            if (oldToNew[i] >= 0) {
+                newNormals[oldToNew[i]] = normals[i];
+            }
+        }
+        normals = std::move(newNormals);
+    }
+
+    // Compact UVs (vertex interpolation)
+    if (!uvs.empty()) {
+        VtArray<GfVec2f> newUvs(newIdx);
+        for (size_t i = 0; i < std::min(uvs.size(), numPoints); ++i) {
+            if (oldToNew[i] >= 0) {
+                newUvs[oldToNew[i]] = uvs[i];
+            }
+        }
+        uvs = std::move(newUvs);
+    }
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
