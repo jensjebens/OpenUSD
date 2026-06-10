@@ -262,6 +262,27 @@ if (PXR_BUILD_IMAGING)
     if (PXR_BUILD_EMBREE_PLUGIN)
         find_package(Embree REQUIRED)
     endif()
+    # --OpenCASCADE (OCCT)
+    if (PXR_BUILD_OCCT_PLUGIN)
+        find_package(OpenCASCADE QUIET)
+        if (NOT OpenCASCADE_FOUND)
+            # Fallback: look for OCCT headers/libs in system paths
+            find_path(OCCT_INCLUDE_DIR "Standard.hxx"
+                PATHS /usr/include/opencascade
+                      /usr/local/include/opencascade)
+            if (OCCT_INCLUDE_DIR)
+                set(OpenCASCADE_FOUND TRUE)
+                set(OCCT_LIBRARIES
+                    TKernel TKMath TKG2d TKG3d TKGeomBase
+                    TKBRep TKGeomAlgo TKTopAlgo TKShHealing TKMesh)
+                message(STATUS "hdOcct: Using system OCCT at ${OCCT_INCLUDE_DIR}")
+            else()
+                message(FATAL_ERROR
+                    "PXR_BUILD_OCCT_PLUGIN=ON but OpenCASCADE not found. "
+                    "Install libocct-*-dev or set OpenCASCADE_DIR.")
+            endif()
+        endif()
+    endif()
 endif()
 
 if (PXR_BUILD_USDVIEW)
