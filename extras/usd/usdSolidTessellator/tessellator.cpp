@@ -27,6 +27,7 @@
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <Geom_BSplineSurface.hxx>
 #include <GeomLProp_SLProps.hxx>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -140,6 +141,26 @@ UsdSolidTessellationResult _ExtractMesh(
         int nbNodes = tri->NbNodes();
         int nbTris = tri->NbTriangles();
 
+        // Check if surface is closed (cylinders, cones, tori) vs open (planes)
+        // This determines whether normals/winding need flipping.
+        // All BrepArray NURBS surfaces in this model have inward-pointing
+        // natural normals (du×dv toward axis) EXCEPT planar faces (end-caps)
+        // where the normal already points outward. This is because the NURBS
+        // cylinders are parameterized with U going around the circumference
+        // and V along the axis, giving du×dv pointing inward.
+        BRepAdaptor_Surface surfCheck(face, Standard_True);
+        GeomAbs_SurfaceType surfType = surfCheck.GetType();
+        // Planes don't need flip; everything else does
+        bool isClosed = (surfType != GeomAbs_Plane);
+        // For BSpline surfaces: check if it's degenerate-planar (degree 1×1)
+        if (surfType == GeomAbs_BSplineSurface) {
+            Handle(Geom_BSplineSurface) bsurf = surfCheck.BSpline();
+            if (bsurf->UDegree() == 1 && bsurf->VDegree() == 1) {
+                // Bilinear patch = planar face
+                isClosed = false;
+            }
+        }
+
         // Vertices
         for (int i = 1; i <= nbNodes; ++i) {
             gp_Pnt p = tri->Node(i).Transformed(trsf);
@@ -149,6 +170,8 @@ UsdSolidTessellationResult _ExtractMesh(
         // Normals from parametric surface
         if (params.computeNormals && tri->HasUVNodes()) {
             BRepAdaptor_Surface surfAdaptor(face, Standard_True);
+            bool flipNormal = isClosed;  // flip for closed surfaces only
+            
             for (int i = 1; i <= nbNodes; ++i) {
                 gp_Pnt2d uv = tri->UVNode(i);
                 gp_Pnt pnt;
@@ -157,16 +180,9 @@ UsdSolidTessellationResult _ExtractMesh(
                 gp_Vec normal = du.Crossed(dv);
                 if (normal.Magnitude() > 1e-10) {
                     normal.Normalize();
-                    // Empirically: for FORWARD faces (blades), reversing
-                    // the normal gives correct outward direction.
-                    // For REVERSED faces (hub ring with "opposite" faceuse),
-                    // BRepAdaptor_Surface(face, Standard_True) does NOT
-                    // flip D1() derivatives despite the reversed flag.
-                    // The face was reversed to encode "opposite" orientation,
-                    // meaning the surface natural normal already points
-                    // inward — so we must ALSO reverse to get outward.
-                    // Conclusion: always reverse, unconditionally.
-                    normal.Reverse();
+                    if (flipNormal) {
+                        normal.Reverse();
+                    }
                     result.normals[vertOffset + i - 1] =
                         GfVec3f((float)normal.X(),
                                 (float)normal.Y(),
@@ -191,9 +207,11 @@ UsdSolidTessellationResult _ExtractMesh(
             int n1, n2, n3;
             tri->Triangle(i).Get(n1, n2, n3);
 
-            // Always swap winding: OCCT's triangle winding convention is
-            // opposite to Storm/USD's front-face convention for ALL faces.
-            std::swap(n1, n3);
+            // Winding swap: closed surfaces (cylinders) need swap to match
+            // Storm/USD's front-face convention. Open surfaces (planes) don't.
+            if (isClosed) {
+                std::swap(n1, n3);
+            }
 
             result.faceVertexCounts[triOffset + i - 1] = 3;
             result.faceVertexIndices[(triOffset + i - 1) * 3 + 0] =

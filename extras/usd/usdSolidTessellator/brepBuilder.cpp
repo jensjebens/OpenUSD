@@ -22,6 +22,7 @@
 #include <gp_Pnt.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <ShapeFix_Wire.hxx>
+#include <ShapeFix_Face.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColgp_Array1OfPnt2d.hxx>
@@ -509,37 +510,153 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     bool hasTrimCurves = !data.trimCurveControlVertices.empty();
 
     std::vector<TopoDS_Face> faces;
+    std::vector<bool> faceNeedsFlip;
     faces.reserve(numFaces);
+    faceNeedsFlip.reserve(numFaces);
 
     if (!hasTrimCurves) {
-        // Surface-only path: build untrimmed faces, skip multi-loop faces
+        // Surface-only path: build faces, use 3D edge curves for trimming
         for (size_t fi = 0; fi < numFaces; ++fi) {
             if (fi >= surfaces.size()) break;
             const auto& surface = surfaces[fi];
             if (surface.IsNull()) continue;
 
-            // Check if this face has multiple loops (needs trimming we can't do)
+            // Check if this face has multiple loops (needs trimming)
             size_t faceIdx = faceStart + fi;
             if (faceIdx < data.faceLoopCount.size() &&
                 data.faceLoopCount[faceIdx] > 1) {
-                // Skip: this face requires trim curves to render correctly.
-                // Without pcurves, it would produce an oversized rectangle.
+                // Multi-loop face: build trimmed face using 3D edge curves.
+                if (data.edgeCurveControlVertices.empty() ||
+                    data.edgeCurveVertexCount.empty()) {
+                    continue;  // No 3D edge data — can't trim
+                }
+
+                // Compute loop start for this face
+                size_t loopStartIdx = 0;
+                for (size_t f = 0; f < faceIdx; ++f) {
+                    if (f < data.faceLoopCount.size())
+                        loopStartIdx += data.faceLoopCount[f];
+                }
+
+                // Compute edgeuse start for this face's loops
+                size_t euStartIdx = 0;
+                for (size_t l = 0; l < loopStartIdx; ++l) {
+                    if (l < data.loopEdgeuseCount.size())
+                        euStartIdx += data.loopEdgeuseCount[l];
+                }
+
+                size_t numLoops = data.faceLoopCount[faceIdx];
+                bool success = true;
+                TopoDS_Face trimmedFace;
+
+                size_t currentEU = euStartIdx;
+                for (size_t li = 0; li < numLoops && success; ++li) {
+                    size_t globalLoop = loopStartIdx + li;
+                    if (globalLoop >= data.loopEdgeuseCount.size()) {
+                        success = false; break;
+                    }
+                    size_t numEU = data.loopEdgeuseCount[globalLoop];
+                    if (numEU == 0) { currentEU += numEU; continue; }
+
+                    // Build wire from edgeuses in this loop
+                    BRepBuilderAPI_MakeWire wireMaker;
+                    for (size_t eu = 0; eu < numEU; ++eu) {
+                        size_t euIdx = currentEU + eu;
+                        if (euIdx >= data.edgeuseEdgeIndex.size()) {
+                            success = false; break;
+                        }
+                        size_t edgeIdx = data.edgeuseEdgeIndex[euIdx];
+                        if (edgeIdx >= data.edgeCurveVertexCount.size()) {
+                            success = false; break;
+                        }
+
+                        // Compute offset into edge curve arrays
+                        size_t ecpOffset = 0, eknotOffset = 0, ewOffset = 0;
+                        for (size_t e = 0; e < edgeIdx; ++e) {
+                            ecpOffset += data.edgeCurveVertexCount[e];
+                            eknotOffset += data.edgeCurveVertexCount[e] +
+                                           data.edgeCurveOrder[e];
+                            ewOffset += data.edgeCurveVertexCount[e];
+                        }
+
+                        int numCPs = data.edgeCurveVertexCount[edgeIdx];
+                        int edgeOrder = data.edgeCurveOrder[edgeIdx];
+                        int numKnots = numCPs + edgeOrder;
+
+                        const GfVec3d* cps =
+                            data.edgeCurveControlVertices.cdata() + ecpOffset;
+                        const double* knots =
+                            data.edgeCurveKnots.cdata() + eknotOffset;
+                        const double* weights =
+                            (!data.edgeCurveWeights.empty())
+                            ? data.edgeCurveWeights.cdata() + ewOffset
+                            : nullptr;
+                        int numW = (!data.edgeCurveWeights.empty())
+                                   ? numCPs : 0;
+
+                        auto curve = _MakeBSplineCurve(
+                            cps, numCPs, edgeOrder, knots, numKnots,
+                            weights, numW);
+                        if (curve.IsNull()) { success = false; break; }
+
+                        // Check if edgeuse orientation is "opposite" → reverse
+                        bool euReversed = false;
+                        if (euIdx < data.edgeuseOrientationType.size()) {
+                            euReversed = (data.edgeuseOrientationType[euIdx]
+                                          == _tokens->opposite);
+                        }
+
+                        // Build edge from curve
+                        BRepBuilderAPI_MakeEdge edgeMaker(curve);
+                        if (!edgeMaker.IsDone()) { success = false; break; }
+                        TopoDS_Edge edge = edgeMaker.Edge();
+                        if (euReversed) edge.Reverse();
+                        wireMaker.Add(edge);
+                    }
+                    currentEU += numEU;
+
+                    if (!success || !wireMaker.IsDone()) {
+                        success = false; break;
+                    }
+                    TopoDS_Wire wire = wireMaker.Wire();
+
+                    if (li == 0) {
+                        // First loop = outer boundary
+                        BRepBuilderAPI_MakeFace faceMaker(surface, wire,
+                                                         Standard_True);
+                        if (!faceMaker.IsDone()) { success = false; break; }
+                        trimmedFace = faceMaker.Face();
+                    } else {
+                        // Inner loops = holes
+                        wire.Reverse();  // Inner wires must be reversed
+                        BRepBuilderAPI_MakeFace faceMaker(trimmedFace, wire);
+                        if (!faceMaker.IsDone()) { success = false; break; }
+                        trimmedFace = faceMaker.Face();
+                    }
+                }
+
+                if (success && !trimmedFace.IsNull()) {
+                    // Ensure pcurves exist for BRepMesh to work
+                    ShapeFix_Face fix(trimmedFace);
+                    fix.FixAddNaturalBoundMode() = Standard_False;
+                    fix.FixWireMode() = Standard_True;
+                    fix.Perform();
+                    trimmedFace = fix.Face();
+                    faces.push_back(trimmedFace);
+                    faceNeedsFlip.push_back(false);
+                }
                 continue;
             }
 
             BRepBuilderAPI_MakeFace faceMaker(surface, data.intersectTol3d);
             if (faceMaker.IsDone()) {
                 TopoDS_Face face = faceMaker.Face();
-                // Check faceuse orientation: if the outward faceuse says
-                // "opposite", the surface normal points inward and we need
-                // to reverse the face so BRepMesh produces correct normals.
-                size_t faceIdx = faceStart + fi;
-                size_t fuIdx = faceIdx * 2;  // 2 faceuses per face
-                if (fuIdx < data.faceuseOrientationType.size() &&
-                    data.faceuseOrientationType[fuIdx] == _tokens->opposite) {
-                    face.Reverse();
-                }
+                // Don't apply faceuse Reverse() — without the full closed
+                // shell (multi-loop end-caps), faceuse orientation is
+                // misleading for rendering. The surface natural normal is
+                // used as-is for display purposes.
                 faces.push_back(face);
+                faceNeedsFlip.push_back(false);
             }
         }
     } else {
@@ -679,26 +796,22 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         }
     }
 
-    // Assemble faces into a shell/solid using sewing
+    // Assemble faces into a compound (preserving face order/orientation).
+    // Don't sew — untrimmed faces aren't connected, and sewing can flip
+    // face orientations which breaks normal handling.
     if (faces.empty()) {
         TF_WARN("Brep %zu: no faces built", brepIndex);
         return TopoDS_Shape();
     }
 
-    BRepBuilderAPI_Sewing sewing(data.intersectTol3d);
+    TopoDS_Compound compound;
+    BRep_Builder compoundBuilder;
+    compoundBuilder.MakeCompound(compound);
     for (const auto& face : faces) {
-        sewing.Add(face);
+        compoundBuilder.Add(compound, face);
     }
-    sewing.Perform();
 
-    TopoDS_Shape sewedShape = sewing.SewedShape();
-
-    // Shape healing pass
-    ShapeFix_Shape fixer(sewedShape);
-    fixer.SetPrecision(data.intersectTol3d);
-    fixer.Perform();
-
-    return fixer.Shape();
+    return compound;
 }
 
 std::vector<TopoDS_Shape>
