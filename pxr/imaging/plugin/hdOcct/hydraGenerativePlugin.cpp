@@ -143,16 +143,6 @@ UsdSolidTessellationProcedural::_Tessellate(
             _meshes.push_back(std::move(mesh));
         }
     }
-
-    TF_STATUS("UsdSolidTessellationProcedural: Read %zu mesh(es) for '%s' "
-              "(%zu total verts)",
-              _meshes.size(), primPath.GetText(),
-              [&]() {
-                  size_t total = 0;
-                  for (const auto& m : _meshes)
-                      total += m.points.size();
-                  return total;
-              }());
 }
 
 HdGpGenerativeProcedural::ChildPrimTypeMap

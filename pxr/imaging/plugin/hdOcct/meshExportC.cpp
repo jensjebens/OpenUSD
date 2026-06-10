@@ -6,6 +6,8 @@
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/base/vt/array.h"
 #include <string>
+#include <vector>
+#include <cstdio>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -26,6 +28,7 @@ int UsdSolid_ExportMesh(const char* inputPath, const char* outputPath, const cha
     params.computeUVs = true;
 
     auto results = tessellator.Tessellate(brepPrim, params);
+    fprintf(stdout, "Tessellated %zu bodies\n", results.size());
 
     auto outStage = UsdStage::CreateNew(outputPath);
     outStage->SetMetadata(UsdGeomTokens->upAxis, VtValue(TfToken("Y")));
@@ -40,17 +43,43 @@ int UsdSolid_ExportMesh(const char* inputPath, const char* outputPath, const cha
         std::string meshPathStr = "/World/mesh_" + std::to_string(i);
         auto mesh = UsdGeomMesh::Define(outStage, SdfPath(meshPathStr));
 
-        VtArray<GfVec3f> points3f;
-        points3f.reserve(result.points.size());
-        for (const auto& p : result.points) {
-            points3f.push_back(GfVec3f((float)p[0], (float)p[1], (float)p[2]));
+        // Compact vertices: remove unreferenced points and remap indices.
+        // OCCT tessellation can produce vertices unused by final triangulation.
+        std::vector<int> oldToNew(result.points.size(), -1);
+        int newIdx = 0;
+        for (int idx : result.faceVertexIndices) {
+            if (idx >= 0 && (size_t)idx < result.points.size()
+                && oldToNew[idx] == -1) {
+                oldToNew[idx] = newIdx++;
+            }
         }
+
+        VtArray<GfVec3f> points3f(newIdx);
+        for (size_t j = 0; j < result.points.size(); ++j) {
+            if (oldToNew[j] >= 0) {
+                const auto& p = result.points[j];
+                points3f[oldToNew[j]] = GfVec3f((float)p[0], (float)p[1], (float)p[2]);
+            }
+        }
+
+        VtArray<int> remappedIndices(result.faceVertexIndices.size());
+        for (size_t j = 0; j < result.faceVertexIndices.size(); ++j) {
+            remappedIndices[j] = oldToNew[result.faceVertexIndices[j]];
+        }
+
         mesh.GetPointsAttr().Set(points3f);
         mesh.GetFaceVertexCountsAttr().Set(result.faceVertexCounts);
-        mesh.GetFaceVertexIndicesAttr().Set(result.faceVertexIndices);
+        mesh.GetFaceVertexIndicesAttr().Set(remappedIndices);
 
         if (!result.normals.empty()) {
-            mesh.GetNormalsAttr().Set(result.normals);
+            VtArray<GfVec3f> compactNormals(newIdx);
+            for (size_t j = 0; j < result.normals.size()
+                 && j < result.points.size(); ++j) {
+                if (oldToNew[j] >= 0) {
+                    compactNormals[oldToNew[j]] = result.normals[j];
+                }
+            }
+            mesh.GetNormalsAttr().Set(compactNormals);
             mesh.SetNormalsInterpolation(UsdGeomTokens->vertex);
         }
 
@@ -60,6 +89,10 @@ int UsdSolid_ExportMesh(const char* inputPath, const char* outputPath, const cha
     }
 
     outStage->Save();
+    int totalVerts = 0;
+    for (const auto& r : results) totalVerts += r.points.size();
+    fprintf(stdout, "Wrote %d meshes (%d total verts) to %s\n",
+            meshCount, totalVerts, outputPath);
     return meshCount;
 }
 
