@@ -4,3 +4,6 @@ endif()
 if (PXR_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
+
+# UsdSolid BrepArray tessellation plugin (requires OpenCASCADE)
+add_subdirectory(usdSolidTessellator)
