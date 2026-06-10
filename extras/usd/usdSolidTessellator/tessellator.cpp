@@ -157,7 +157,16 @@ UsdSolidTessellationResult _ExtractMesh(
                 gp_Vec normal = du.Crossed(dv);
                 if (normal.Magnitude() > 1e-10) {
                     normal.Normalize();
-                    if (!isReversed) normal.Reverse();
+                    // Empirically: for FORWARD faces (blades), reversing
+                    // the normal gives correct outward direction.
+                    // For REVERSED faces (hub ring with "opposite" faceuse),
+                    // BRepAdaptor_Surface(face, Standard_True) does NOT
+                    // flip D1() derivatives despite the reversed flag.
+                    // The face was reversed to encode "opposite" orientation,
+                    // meaning the surface natural normal already points
+                    // inward — so we must ALSO reverse to get outward.
+                    // Conclusion: always reverse, unconditionally.
+                    normal.Reverse();
                     result.normals[vertOffset + i - 1] =
                         GfVec3f((float)normal.X(),
                                 (float)normal.Y(),
@@ -182,9 +191,9 @@ UsdSolidTessellationResult _ExtractMesh(
             int n1, n2, n3;
             tri->Triangle(i).Get(n1, n2, n3);
 
-            // Adjust for face orientation — swap winding to ensure
-            // outward-facing triangles have correct front-face winding.
-            if (!isReversed) std::swap(n1, n3);
+            // Always swap winding: OCCT's triangle winding convention is
+            // opposite to Storm/USD's front-face convention for ALL faces.
+            std::swap(n1, n3);
 
             result.faceVertexCounts[triOffset + i - 1] = 3;
             result.faceVertexIndices[(triOffset + i - 1) * 3 + 0] =
