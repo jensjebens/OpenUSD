@@ -18,6 +18,7 @@
 #include "pxr/imaging/hd/primvarsSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/tokens.h"
+#include "pxr/imaging/pxOsd/tokens.h"
 #include "pxr/imaging/hd/xformSchema.h"
 #include "pxr/imaging/hdGp/generativeProceduralPluginRegistry.h"
 
@@ -219,6 +220,9 @@ UsdSolidTessellationProcedural::GetChildPrim(
     HdContainerDataSourceHandle meshDs =
         HdMeshSchema::Builder()
             .SetTopology(topologyDs)
+            .SetSubdivisionScheme(
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    PxOsdOpenSubdivTokens->none))
             .Build();
 
     // Points primvar

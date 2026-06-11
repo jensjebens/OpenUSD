@@ -63,6 +63,7 @@ HdOcctExportMesh(
         mesh.GetPointsAttr().Set(points3f);
         mesh.GetFaceVertexCountsAttr().Set(result.faceVertexCounts);
         mesh.GetFaceVertexIndicesAttr().Set(result.faceVertexIndices);
+        mesh.GetSubdivisionSchemeAttr().Set(UsdGeomTokens->none);
 
         if (!result.normals.empty()) {
             mesh.GetNormalsAttr().Set(result.normals);
