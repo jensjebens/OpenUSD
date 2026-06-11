@@ -365,8 +365,21 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
              data->wireEdgeCurveWeights);
 
     // UV trim curves (BrepCurveUvNurbAPI)
-    _GetAttr("brep:curveUv:nurb:controlVertices",
-             data->trimCurveControlVertices);
+    // Schema defines controlVertices as double2[], but some exporters
+    // write point3d[] (using z=0). Handle both.
+    if (!_GetAttr("brep:curveUv:nurb:controlVertices",
+                  data->trimCurveControlVertices)) {
+        // Try reading as GfVec3d and extracting xy
+        VtArray<GfVec3d> cv3d;
+        if (_GetAttr("brep:curveUv:nurb:controlVertices", cv3d) &&
+            !cv3d.empty()) {
+            data->trimCurveControlVertices.resize(cv3d.size());
+            for (size_t i = 0; i < cv3d.size(); ++i) {
+                data->trimCurveControlVertices[i] =
+                    GfVec2d(cv3d[i][0], cv3d[i][1]);
+            }
+        }
+    }
     _GetAttr("brep:curveUv:nurb:vertexCount",
              data->trimCurveVertexCount);
     _GetAttr("brep:curveUv:nurb:order",
@@ -768,7 +781,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 continue;
             }
 
-            BRepBuilderAPI_MakeFace faceMaker(surface, data.intersectTol3d);
+            // Build wires for all loops first
+            std::vector<TopoDS_Wire> loopWires;
+            loopWires.reserve(numLoops);
 
             for (int li = 0; li < numLoops; ++li) {
                 if (currentLoop >= data.loopEdgeuseCount.size()) break;
@@ -776,6 +791,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
 
                 if (numEdgeuses == 0) {
                     currentLoop++;
+                    loopWires.push_back(TopoDS_Wire());
                     continue;
                 }
 
@@ -798,21 +814,55 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 }
 
                 if (wireMaker.IsDone()) {
-                    TopoDS_Wire wire = wireMaker.Wire();
-                    if (li == 0) {
-                        faceMaker.Add(wire);
-                    } else {
-                        wire.Reverse();
-                        faceMaker.Add(wire);
-                    }
+                    loopWires.push_back(wireMaker.Wire());
+                } else {
+                    loopWires.push_back(TopoDS_Wire());
                 }
 
                 currentEdgeuse += numEdgeuses;
                 currentLoop++;
             }
 
+            // Build face: outer wire (loop 0) defines boundary,
+            // subsequent wires are holes.
+            //
+            // For planar surfaces where the natural bounds match the outer
+            // wire, use MakeFace(surface, tol) and only add inner wires.
+            // Otherwise use MakeFace(surface, outerWire, checkPlanarity).
+            BRepBuilderAPI_MakeFace faceMaker;
+
+            // Start with natural bounds — then replace with explicit outer wire
+            faceMaker = BRepBuilderAPI_MakeFace(surface, data.intersectTol3d);
+            if (faceMaker.IsDone() && numLoops > 0 &&
+                !loopWires.empty() && !loopWires[0].IsNull()) {
+                // Replace natural bounds with explicit outer wire
+                BRepBuilderAPI_MakeFace rebuilder(surface, loopWires[0],
+                                                  Standard_True);
+                if (rebuilder.IsDone()) {
+                    faceMaker = rebuilder;
+                }
+                // If outer wire rebuild fails, keep natural bounds
+            }
+
+            // Add inner wires as holes
+            for (size_t li = 1; li < loopWires.size(); ++li) {
+                if (!loopWires[li].IsNull()) {
+                    // Don't reverse — edgeuse orientations already define
+                    // the correct winding for each loop.
+                    faceMaker.Add(loopWires[li]);
+                }
+            }
+
             if (faceMaker.IsDone()) {
                 TopoDS_Face face = faceMaker.Face();
+
+                // Compute pcurves for BRepMesh — project 3D edges onto surface
+                ShapeFix_Face fix(face);
+                fix.FixAddNaturalBoundMode() = Standard_False;
+                fix.FixWireMode() = Standard_True;
+                fix.Perform();
+                face = fix.Face();
+
                 // Apply faceuse orientation: "opposite" means the surface
                 // natural normal opposes the shell outward direction — reverse
                 // the face so OCCT's face.Orientation() == TopAbs_REVERSED,
@@ -823,6 +873,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     face.Reverse();
                 }
                 faces.push_back(face);
+                faceNeedsFlip.push_back(false);
             }
         }
     }
