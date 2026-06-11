@@ -137,6 +137,10 @@ UsdSolidTessellationResult _ExtractMesh(
 
         const gp_Trsf& trsf = loc.Transformation();
         bool isReversed = (face.Orientation() == TopAbs_REVERSED);
+        // Check for mirrored transform (negative determinant).
+        // Reference: StdPrs_ShadedShape.cxx uses (isReversed ^ isMirrored)
+        // for normal flip. A mirrored Location flips the handedness.
+        bool isMirrored = (trsf.IsNegative() != Standard_False);
 
         int nbNodes = tri->NbNodes();
         int nbTris = tri->NbTriangles();
@@ -147,8 +151,26 @@ UsdSolidTessellationResult _ExtractMesh(
             result.points[vertOffset + i - 1] = GfVec3d(p.X(), p.Y(), p.Z());
         }
 
-        // Normals from parametric surface
-        if (params.computeNormals && tri->HasUVNodes()) {
+        // Normals
+        if (params.computeNormals) {
+            // Prefer pre-computed normals from Poly_Triangulation (already
+            // correctly oriented by BRepMesh). Fall back to du×dv + flip.
+            if (tri->HasNormals()) {
+                for (int i = 1; i <= nbNodes; ++i) {
+                    gp_Dir nd = tri->Normal(i);
+                    // Apply face orientation + mirror (same as StdPrs_ShadedShape)
+                    if (isReversed != isMirrored) {
+                        nd.Reverse();
+                    }
+                    if (!loc.IsIdentity()) {
+                        nd.Transform(trsf);
+                    }
+                    result.normals[vertOffset + i - 1] =
+                        GfVec3f(static_cast<float>(nd.X()),
+                                static_cast<float>(nd.Y()),
+                                static_cast<float>(nd.Z()));
+                }
+            } else if (tri->HasUVNodes()) {
             BRepAdaptor_Surface surfAdaptor(face, Standard_True);
 
             for (int i = 1; i <= nbNodes; ++i) {
@@ -159,10 +181,14 @@ UsdSolidTessellationResult _ExtractMesh(
                 gp_Vec normal = du.Crossed(dv);
                 if (normal.Magnitude() > 1e-10) {
                     normal.Normalize();
-                    // Use face topology orientation (IsReversed) for flip.
-                    // This is topology-driven, not surface-type heuristic.
-                    if (isReversed) {
+                    // Use face topology orientation XOR mirror for flip.
+                    // Reference: StdPrs_ShadedShape.cxx
+                    if (isReversed != isMirrored) {
                         normal.Reverse();
+                    }
+                    // Transform normal by location (rotation only)
+                    if (!loc.IsIdentity()) {
+                        normal.Transform(trsf);
                     }
                     result.normals[vertOffset + i - 1] =
                         GfVec3f(static_cast<float>(normal.X()),
@@ -172,7 +198,8 @@ UsdSolidTessellationResult _ExtractMesh(
                     result.normals[vertOffset + i - 1] = GfVec3f(0, 0, 1);
                 }
             }
-        }
+            } // end else if (tri->HasUVNodes())
+        } // end if (params.computeNormals)
 
         // UVs
         if (params.computeUVs && tri->HasUVNodes()) {
@@ -188,11 +215,13 @@ UsdSolidTessellationResult _ExtractMesh(
             int n1, n2, n3;
             tri->Triangle(i).Get(n1, n2, n3);
 
-            // Winding swap: use face topology orientation.
-            // If face is reversed relative to its surface, swap winding
-            // to match Storm/USD's front-face convention.
+            // Winding swap: OCCT tessellation winding convention.
+            // For REVERSED faces, swap indices to maintain consistent
+            // winding relative to the computed outward normal.
+            // For FORWARD faces, keep as-is (base winding matches du×dv).
+            // Reference: StdPrs_ShadedShape.cxx, IVtkOCC_ShapeMesher.cxx
             if (isReversed) {
-                std::swap(n1, n3);
+                std::swap(n2, n3);
             }
 
             result.faceVertexCounts[triOffset + i - 1] = 3;

@@ -642,6 +642,12 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     fix.FixWireMode() = Standard_True;
                     fix.Perform();
                     trimmedFace = fix.Face();
+                    // Apply faceuse orientation
+                    size_t fuIdx = faceuseStart + fi * 2;  // outer faceuse
+                    if (fuIdx < data.faceuseOrientationType.size() &&
+                        data.faceuseOrientationType[fuIdx] == _tokens->opposite) {
+                        trimmedFace.Reverse();
+                    }
                     faces.push_back(trimmedFace);
                     faceNeedsFlip.push_back(false);
                 }
@@ -651,10 +657,12 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             BRepBuilderAPI_MakeFace faceMaker(surface, data.intersectTol3d);
             if (faceMaker.IsDone()) {
                 TopoDS_Face face = faceMaker.Face();
-                // Don't apply faceuse Reverse() — without the full closed
-                // shell (multi-loop end-caps), faceuse orientation is
-                // misleading for rendering. The surface natural normal is
-                // used as-is for display purposes.
+                // Apply faceuse orientation for correct winding
+                size_t fuIdx = faceuseStart + fi * 2;  // outer faceuse
+                if (fuIdx < data.faceuseOrientationType.size() &&
+                    data.faceuseOrientationType[fuIdx] == _tokens->opposite) {
+                    face.Reverse();
+                }
                 faces.push_back(face);
                 faceNeedsFlip.push_back(false);
             }
@@ -791,7 +799,17 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             }
 
             if (faceMaker.IsDone()) {
-                faces.push_back(faceMaker.Face());
+                TopoDS_Face face = faceMaker.Face();
+                // Apply faceuse orientation: "opposite" means the surface
+                // natural normal opposes the shell outward direction — reverse
+                // the face so OCCT's face.Orientation() == TopAbs_REVERSED,
+                // which the tessellator uses for winding swap.
+                size_t fuIdx = faceuseStart + fi * 2;  // outer faceuse
+                if (fuIdx < data.faceuseOrientationType.size() &&
+                    data.faceuseOrientationType[fuIdx] == _tokens->opposite) {
+                    face.Reverse();
+                }
+                faces.push_back(face);
             }
         }
     }
