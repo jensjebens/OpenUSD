@@ -27,6 +27,7 @@
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <GeomLProp_SLProps.hxx>
 
@@ -73,8 +74,13 @@ UsdSolidTessellationResult _ExtractMesh(
         }
     }
 
+    // Fix shape topology (adds missing pcurves required by BRepMesh)
+    ShapeFix_Shape shapeFix(shape);
+    shapeFix.Perform();
+    const TopoDS_Shape& fixedShape = shapeFix.Shape();
+
     BRepMesh_IncrementalMesh mesher(
-        shape,
+        fixedShape,
         deflection,
         Standard_False,  // not relative (we handle it above)
         params.angularDeflection,
@@ -92,7 +98,7 @@ UsdSolidTessellationResult _ExtractMesh(
     int faceIndex = 0;
 
     // First pass: count totals
-    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+    for (TopExp_Explorer exp(fixedShape, TopAbs_FACE); exp.More(); exp.Next()) {
         const TopoDS_Face& face = TopoDS::Face(exp.Current());
         TopLoc_Location loc;
         Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
@@ -126,7 +132,7 @@ UsdSolidTessellationResult _ExtractMesh(
     int triOffset = 0;
     faceIndex = 0;
 
-    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+    for (TopExp_Explorer exp(fixedShape, TopAbs_FACE); exp.More(); exp.Next()) {
         const TopoDS_Face& face = TopoDS::Face(exp.Current());
         TopLoc_Location loc;
         Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
