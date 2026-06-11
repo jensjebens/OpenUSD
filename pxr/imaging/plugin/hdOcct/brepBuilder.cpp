@@ -131,9 +131,22 @@ Handle(Geom_BSplineCurve) _MakeBSplineCurve(
         } else {
             return new Geom_BSplineCurve(poles, knotsArr, multsArr, degree);
         }
-    } catch (...) {
+    } catch (Standard_Failure& e) {
+        // Dump actual knot data for diagnosis
+        std::string kstr;
+        for (size_t i = 0; i < knotVals.size(); ++i) {
+            char buf[32]; snprintf(buf, sizeof(buf), "%.4f(%d)", knotVals[i], mults[i]);
+            if (!kstr.empty()) kstr += ", ";
+            kstr += buf;
+        }
         TF_WARN("Failed to construct BSplineCurve: degree=%d, poles=%d, "
-                 "knots=%d", degree, numPts, (int)knotVals.size());
+                 "knots=%d [%s] reason: %s",
+                 degree, numPts, (int)knotVals.size(), kstr.c_str(),
+                 e.GetMessageString());
+        return nullptr;
+    } catch (...) {
+        TF_WARN("Failed to construct BSplineCurve: degree=%d, poles=%d (unknown exception)",
+                 degree, numPts);
         return nullptr;
     }
 }

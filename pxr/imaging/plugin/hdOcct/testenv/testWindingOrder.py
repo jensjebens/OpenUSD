@@ -305,6 +305,30 @@ class TestWindingOrder(unittest.TestCase):
         self.assertGreater(vol, 0.0,
             f"Cylinder signed volume = {vol:.2f} (negative = inward winding)")
 
+    def test_cone_winding_positive_volume(self):
+        """
+        Cone fixture: signed volume must be positive (outward winding).
+        Also verifies volume accuracy (<5% error vs analytical pi*r²*h/3).
+        """
+        cone = os.path.join(_SCRIPT_DIR, "fixtures", "testCone.usda")
+        if not os.path.exists(cone):
+            raise unittest.SkipTest("testCone.usda not found")
+
+        stage, meshes = self._tessellate_to_stage(
+            cone, prim_path="/World/Cone")
+        self.assertGreater(len(meshes), 0, "No meshes from cone")
+
+        vol = self._compute_signed_volume(meshes)
+        self.assertGreater(vol, 0.0,
+            f"Cone signed volume = {vol:.2f} (negative = inward winding)")
+        # Cone r=5, h=10: expected = pi*25*10/3 ≈ 261.8
+        import math
+        expected = math.pi * 25 * 10 / 3
+        rel_err = abs(vol - expected) / expected
+        self.assertLess(rel_err, 0.05,
+            f"Cone volume error {rel_err:.1%} > 5% (got {vol:.2f}, "
+            f"expected {expected:.2f})")
+
 
 if __name__ == "__main__":
     unittest.main()

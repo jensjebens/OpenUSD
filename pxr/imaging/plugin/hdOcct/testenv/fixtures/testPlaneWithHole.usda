@@ -51,7 +51,7 @@ def Xform "World"
         uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2, 2, 2, 3]
         uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [-10, -10, 10, 10, -10, -10, 10, 10, -10, -10, 10, 10, -10, -10, 10, 10, 0, 0, 0, 2.0944, 2.0944, 4.18879, 4.18879, 6.28319, 6.28319, 6.28319]
         uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(-10, -10, 0), (-10, 10, 0), (-10, -10, 0), (10, -10, 0), (10, -10, 0), (10, 10, 0), (-10, 10, 0), (10, 10, 0), (3, 0, 0), (3, 5.19615, 0), (-1.5, 2.59808, 0), (-6, 7.34788e-16, 0), (-1.5, -2.59808, 0), (3, -5.19615, 0), (3, -7.34788e-16, 0)]
-        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 0.5, 1, 0.5, 1, 0.5, 1]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1, 1, 1, 1, 1, 1, 0.5, 1, 0.5, 1, 0.5, 1]
 
         # NURBS UV trim curves (pcurves)
         uniform uint[] brep:curveUv:nurb:vertexCount = [2, 2, 2, 2, 7]
