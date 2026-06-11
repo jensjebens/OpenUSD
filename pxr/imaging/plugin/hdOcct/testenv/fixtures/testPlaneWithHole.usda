@@ -45,6 +45,7 @@ def Xform "World"
         uniform double[] brep:surface:nurb:uKnots = [-10, -10, 10, 10]
         uniform double[] brep:surface:nurb:vKnots = [-10, -10, 10, 10]
         uniform point3d[] brep:surface:nurb:controlVertices = [(-10, -10, 0), (-10, 10, 0), (10, -10, 0), (10, 10, 0)]
+        uniform double[] brep:surface:nurb:weights = [1, 1, 1, 1]
 
         # NURBS 3D edge curves
         uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2, 2, 2, 7]
