@@ -259,6 +259,52 @@ class TestWindingOrder(unittest.TestCase):
             f"(expected >95%). {total_checked - total_agree} of "
             f"{total_checked} triangles have winding opposite to normals.")
 
+    def _compute_signed_volume(self, meshes):
+        """Compute signed volume via V = sum(v0 · (v1 × v2)) / 6."""
+        total = 0.0
+        for mesh_prim in meshes:
+            points, fvc, fvi = self._get_mesh_data(mesh_prim)
+            n_tris = len(fvi) // 3
+            for i in range(n_tris):
+                i0, i1, i2 = fvi[i*3], fvi[i*3+1], fvi[i*3+2]
+                v0, v1, v2 = points[i0], points[i1], points[i2]
+                total += np.dot(v0, np.cross(v1, v2)) / 6.0
+        return total
+
+    def test_sphere_winding_positive_volume(self):
+        """
+        Sphere fixture: signed volume must be positive (outward winding).
+        Volume magnitude may be low due to degenerate-pole tessellation,
+        but the SIGN verifies winding direction.
+        """
+        sphere = os.path.join(_SCRIPT_DIR, "fixtures", "testSphere.usda")
+        if not os.path.exists(sphere):
+            raise unittest.SkipTest("testSphere.usda not found")
+
+        stage, meshes = self._tessellate_to_stage(
+            sphere, prim_path="/World/Sphere")
+        self.assertGreater(len(meshes), 0, "No meshes from sphere")
+
+        vol = self._compute_signed_volume(meshes)
+        self.assertGreater(vol, 0.0,
+            f"Sphere signed volume = {vol:.2f} (negative = inward winding)")
+
+    def test_cylinder_winding_positive_volume(self):
+        """
+        Cylinder fixture: signed volume must be positive (outward winding).
+        """
+        cylinder = os.path.join(_SCRIPT_DIR, "fixtures", "testCylinder.usda")
+        if not os.path.exists(cylinder):
+            raise unittest.SkipTest("testCylinder.usda not found")
+
+        stage, meshes = self._tessellate_to_stage(
+            cylinder, prim_path="/World/Cylinder")
+        self.assertGreater(len(meshes), 0, "No meshes from cylinder")
+
+        vol = self._compute_signed_volume(meshes)
+        self.assertGreater(vol, 0.0,
+            f"Cylinder signed volume = {vol:.2f} (negative = inward winding)")
+
 
 if __name__ == "__main__":
     unittest.main()

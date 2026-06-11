@@ -1,12 +1,12 @@
 #usda 1.0
 (
     defaultPrim = "World"
-    metersPerUnit = 0.01
-    upAxis = "Y"
+    metersPerUnit = 1
+    upAxis = "Z"
     doc = """Generated BrepArray test fixture.
-    Sphere radius=5. Tests: rational NURBS, doubly-curved, pole singularity.
-    Expected volume: 523.599
-    Expected face count: 1"""
+    Sphere radius=5 centered at origin. Single rational NURBS surface.
+    Standard representation: degree 2 in u (longitude, 9 poles) and v (latitude, 5 poles).
+    Expected volume: 4/3 * pi * 5^3 ≈ 523.6"""
 )
 
 def Xform "World"
@@ -21,46 +21,37 @@ def Xform "World"
         uniform uint[] shell:wireEdgeCount = [0]
         uniform uint[] face:loopCount = [1]
         uniform token[] face:surfaceType = ["BrepSurfaceNurbAPI"]
-        uniform token[] face:trimType = ["general"]
-        uniform double2[] face:range = [(0, 6.28319), (-1.5708, 1.5708)]
-        uniform uint[] loop:edgeuseCount = [4]
+        uniform token[] face:trimType = ["natural"]
+        uniform double2[] face:range = [(0, 6.2831853072), (0, 3.1415926536)]
+        uniform token[] faceuse:orientationType = ["opposite", "same"]
+        uniform uint[] loop:edgeuseCount = [0]
         uniform uint[] loop:vertexIndex = [0]
-        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 1]
-        uniform token[] edgeuse:orientationType = ["opposite", "same", "same", "opposite"]
-        uniform token[] faceuse:orientationType = ["same", "opposite"]
-
-        # Edge topology
-        uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
-        uniform double[] edge:range = [0, 6.28319, 4.71239, 7.85398, 0, 6.28319]
-        uniform int2[] edge:vertexIndices = [(0, 0), (1, 0), (1, 1)]
 
         # Vertex positions
-        uniform point3d[] brep:vertexPoint:point:position = [(3.06162e-16, -7.4988e-32, 5), (3.06162e-16, -7.4988e-32, -5)]
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, -5), (0, 0, 5)]
 
-        # NURBS surfaces
-        uniform uint[] brep:surface:nurb:uVertexCount = [6]
+        # NURBS surface: 9x5, degree 2x2, rational
+        uniform uint[] brep:surface:nurb:uVertexCount = [9]
         uniform uint[] brep:surface:nurb:vVertexCount = [5]
         uniform uint[] brep:surface:nurb:uOrder = [3]
         uniform uint[] brep:surface:nurb:vOrder = [3]
-        uniform double[] brep:surface:nurb:uKnots = [0, 0, 0, 2.0944, 2.0944, 4.18879, 4.18879, 6.28319, 6.28319, 6.28319]
-        uniform double[] brep:surface:nurb:vKnots = [-1.5708, -1.5708, -1.5708, 0, 0, 1.5708, 1.5708, 1.5708]
-        uniform point3d[] brep:surface:nurb:controlVertices = [(3.06162e-16, 0, -5), (5, 0, -5), (5, 0, 0), (5, 0, 5), (3.06162e-16, 0, 5), (3.06162e-16, 5.30288e-16, -5), (5, 8.66025, -5), (5, 8.66025, 0), (5, 8.66025, 5), (3.06162e-16, 5.30288e-16, 5), (-1.53081e-16, 2.65144e-16, -5), (-2.5, 4.33013, -5), (-2.5, 4.33013, 0), (-2.5, 4.33013, 5), (-1.53081e-16, 2.65144e-16, 5), (-6.12323e-16, 7.4988e-32, -5), (-10, 1.22465e-15, -5), (-10, 1.22465e-15, 0), (-10, 1.22465e-15, 5), (-6.12323e-16, 7.4988e-32, 5), (-1.53081e-16, -2.65144e-16, -5), (-2.5, -4.33013, -5), (-2.5, -4.33013, 0), (-2.5, -4.33013, 5), (-1.53081e-16, -2.65144e-16, 5), (3.06162e-16, -5.30288e-16, -5), (5, -8.66025, -5), (5, -8.66025, 0), (5, -8.66025, 5), (3.06162e-16, -5.30288e-16, 5)]
-        uniform double[] brep:surface:nurb:weights = [1, 0.707107, 1, 0.707107, 1, 0.5, 0.353553, 0.5, 0.353553, 0.5, 1, 0.707107, 1, 0.707107, 1, 0.5, 0.353553, 0.5, 0.353553, 0.5, 1, 0.707107, 1, 0.707107, 1, 0.5, 0.353553, 0.5, 0.353553, 0.5]
+        uniform double[] brep:surface:nurb:uKnots = [0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 4.7123889804, 4.7123889804, 6.2831853072, 6.2831853072, 6.2831853072]
+        uniform double[] brep:surface:nurb:vKnots = [0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 3.1415926536]
 
-        # NURBS 3D edge curves
-        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 5, 2]
-        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 3, 2]
-        uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [0, 1, 4.71239, 4.71239, 4.71239, 6.28319, 6.28319, 7.85398, 7.85398, 7.85398, 0, 1]
-        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(3.06162e-16, -7.4988e-32, 5), (3.06162e-16, -7.4988e-32, 5), (-9.18485e-16, 2.24964e-31, -5), (5, -1.22465e-15, -5), (5, -1.22465e-15, -1.22465e-15), (5, -1.22465e-15, 5), (1.53081e-15, -3.7494e-31, 5), (3.06162e-16, -7.4988e-32, -5), (3.06162e-16, -7.4988e-32, -5)]
-        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 0.707107, 1, 0.707107, 1]
+        # 45 control points (v-major: for each latitude row, 9 longitude points)
+        # Row 0: south pole (degenerate)
+        # Row 1: 45° south (z=-5, r=5)
+        # Row 2: equator (z=0, r=5)
+        # Row 3: 45° north (z=5, r=5)
+        # Row 4: north pole (degenerate)
+        uniform point3d[] brep:surface:nurb:controlVertices = [(0, 0, -5), (0, 0, -5), (0, 0, -5), (0, 0, -5), (0, 0, -5), (0, 0, -5), (0, 0, -5), (0, 0, -5), (0, 0, -5), (5, 0, -5), (5, 5, -5), (0, 5, -5), (-5, 5, -5), (-5, 0, -5), (-5, -5, -5), (0, -5, -5), (5, -5, -5), (5, 0, -5), (5, 0, 0), (5, 5, 0), (0, 5, 0), (-5, 5, 0), (-5, 0, 0), (-5, -5, 0), (0, -5, 0), (5, -5, 0), (5, 0, 0), (5, 0, 5), (5, 5, 5), (0, 5, 5), (-5, 5, 5), (-5, 0, 5), (-5, -5, 5), (0, -5, 5), (5, -5, 5), (5, 0, 5), (0, 0, 5), (0, 0, 5), (0, 0, 5), (0, 0, 5), (0, 0, 5), (0, 0, 5), (0, 0, 5), (0, 0, 5), (0, 0, 5)]
 
-        # NURBS UV trim curves (pcurves)
-        uniform uint[] brep:curveUv:nurb:vertexCount = [2, 2, 2, 2]
-        uniform uint[] brep:curveUv:nurb:order = [2, 2, 2, 2]
-        uniform double[] brep:curveUv:nurb:knots = [0, 0, 6.28319, 6.28319, 4.71239, 4.71239, 7.85398, 7.85398, 0, 0, 6.28319, 6.28319, 4.71239, 4.71239, 7.85398, 7.85398]
-        uniform point3d[] brep:curveUv:nurb:controlVertices = [(0, 1.5708, 0), (6.28319, 1.5708, 0), (6.28319, -1.5708, 0), (6.28319, 1.5708, 0), (0, -1.5708, 0), (6.28319, -1.5708, 0), (0, -1.5708, 0), (0, 1.5708, 0)]
+        # Weights: product of u_weight * v_weight
+        # u: [1, w, 1, w, 1, w, 1, w, 1] with w = sqrt(2)/2 ≈ 0.7071
+        # v: [1, w, 1, w, 1]
+        uniform double[] brep:surface:nurb:weights = [1, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 0.5, 0.7071067812, 0.5, 0.7071067812, 0.5, 0.7071067812, 0.5, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 0.5, 0.7071067812, 0.5, 0.7071067812, 0.5, 0.7071067812, 0.5, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 1, 0.7071067812, 1]
 
         # Tolerance
-        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform double[] brep:intersectTol3d = [0.000001]
     }
 }
