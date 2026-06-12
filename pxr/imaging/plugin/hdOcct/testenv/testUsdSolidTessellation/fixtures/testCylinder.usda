@@ -1,0 +1,60 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+    doc = """Generated BrepArray test fixture.
+    Cylinder radius=3, height=10, axis=Z. 3 faces: barrel + 2 end caps.
+    Expected volume: pi * 3^2 * 10 ≈ 282.74"""
+)
+
+def Xform "World"
+{
+    def BrepArray "Cylinder"
+    {
+        # Topology: 3 faces (barrel, bottom cap, top cap)
+        uniform uint[] brep:regionCount = [1]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["solidRegion"]
+        uniform uint[] shell:faceuseCount = [6]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform uint[] face:loopCount = [1, 1, 1]
+        uniform token[] face:surfaceType = ["BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI"]
+        uniform token[] face:trimType = ["natural", "natural", "natural"]
+        uniform double2[] face:range = [(0, 6.2831853072), (0, 10), (0, 6.2831853072), (0, 3), (0, 6.2831853072), (0, 3)]
+        # Barrel: outward normals = same as surface normal (radial outward)
+        # Bottom cap: surface normal is +Z but outward at z=0 is -Z → opposite
+        # Top cap: surface normal is +Z and outward at z=10 is +Z → same
+        uniform token[] faceuse:orientationType = ["same", "opposite", "opposite", "same", "same", "opposite"]
+        uniform uint[] loop:edgeuseCount = [0, 0, 0]
+        uniform uint[] loop:vertexIndex = [0, 0, 0]
+
+        # Vertex positions
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (0, 0, 10)]
+
+        # 3 NURBS surfaces
+        uniform uint[] brep:surface:nurb:uVertexCount = [9, 9, 9]
+        uniform uint[] brep:surface:nurb:vVertexCount = [2, 2, 2]
+        uniform uint[] brep:surface:nurb:uOrder = [3, 3, 3]
+        uniform uint[] brep:surface:nurb:vOrder = [2, 2, 2]
+
+        # u knots: circular (12 each × 3 surfaces = 36)
+        uniform double[] brep:surface:nurb:uKnots = [0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 4.7123889804, 4.7123889804, 6.2831853072, 6.2831853072, 6.2831853072, 0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 4.7123889804, 4.7123889804, 6.2831853072, 6.2831853072, 6.2831853072, 0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 4.7123889804, 4.7123889804, 6.2831853072, 6.2831853072, 6.2831853072]
+
+        # v knots: barrel [0,0,10,10], bottom cap [0,0,3,3], top cap [0,0,3,3]
+        uniform double[] brep:surface:nurb:vKnots = [0, 0, 10, 10, 0, 0, 3, 3, 0, 0, 3, 3]
+
+        # Control points: 18 + 18 + 18 = 54 total
+        # Surface 0 (barrel): bottom ring then top ring, r=3
+        # Surface 1 (bottom cap): center (0,0,0) then edge ring (r=3, z=0)
+        # Surface 2 (top cap): center (0,0,10) then edge ring (r=3, z=10)
+        uniform point3d[] brep:surface:nurb:controlVertices = [(3, 0, 0), (3, 0, 10), (3, 3, 0), (3, 3, 10), (0, 3, 0), (0, 3, 10), (-3, 3, 0), (-3, 3, 10), (-3, 0, 0), (-3, 0, 10), (-3, -3, 0), (-3, -3, 10), (0, -3, 0), (0, -3, 10), (3, -3, 0), (3, -3, 10), (3, 0, 0), (3, 0, 10), (0, 0, 0), (3, 0, 0), (0, 0, 0), (3, 3, 0), (0, 0, 0), (0, 3, 0), (0, 0, 0), (-3, 3, 0), (0, 0, 0), (-3, 0, 0), (0, 0, 0), (-3, -3, 0), (0, 0, 0), (0, -3, 0), (0, 0, 0), (3, -3, 0), (0, 0, 0), (3, 0, 0), (0, 0, 10), (3, 0, 10), (0, 0, 10), (3, 3, 10), (0, 0, 10), (0, 3, 10), (0, 0, 10), (-3, 3, 10), (0, 0, 10), (-3, 0, 10), (0, 0, 10), (-3, -3, 10), (0, 0, 10), (0, -3, 10), (0, 0, 10), (3, -3, 10), (0, 0, 10), (3, 0, 10)]
+
+        # Weights: u-major order — for each u position, (v=0, v=1) pair
+        # Circular in u: [1, w, 1, w, 1, w, 1, w, 1] where w = 1/sqrt(2)
+        uniform double[] brep:surface:nurb:weights = [1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1]
+
+        # Tolerance
+        uniform double[] brep:intersectTol3d = [0.000001]
+    }
+}
