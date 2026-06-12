@@ -303,6 +303,16 @@ if (PXR_BUILD_IMAGING)
                     "  All:     cmake -DOpenCASCADE_DIR=/path/to/occt/lib/cmake/opencascade")
             endif()
         endif()
+        # OCCT's CMake config (>=7.8/8.0) appends UNICODE/_UNICODE (and HAVE_*) to this
+        # directory's COMPILE_DEFINITIONS via OpenCASCADECompileDefinitionsAndFlags-*.cmake.
+        # Because this find_package runs at root scope, those definitions would leak into
+        # every USD target and break USD core on Windows (char-based Win32 API usage).
+        # Scrub them here; the hdOcct plugin sets what it needs target-locally.
+        get_directory_property(_pxr_occt_dir_defs COMPILE_DEFINITIONS)
+        if (_pxr_occt_dir_defs)
+            list(FILTER _pxr_occt_dir_defs EXCLUDE REGEX "UNICODE")
+            set_directory_properties(PROPERTIES COMPILE_DEFINITIONS "${_pxr_occt_dir_defs}")
+        endif()
     endif()
 endif()
 

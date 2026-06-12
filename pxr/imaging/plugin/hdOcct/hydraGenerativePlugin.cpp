@@ -286,9 +286,32 @@ UsdSolidTessellationProcedural::GetChildPrim(
             HdTokens->displayColor, displayColorPvDs);
     }
 
-    result.dataSource = HdRetainedContainerDataSource::New(
-        HdMeshSchemaTokens->mesh, meshDs,
-        HdPrimvarsSchemaTokens->primvars, primvarsDs);
+    // Generated meshes must carry the source BrepArray prim's transform;
+    // xform flattening runs before hdGp expansion, so children do not
+    // inherit it implicitly. Without this, every tessellated mesh renders
+    // at the world origin regardless of authored Xforms.
+    HdContainerDataSourceHandle xformDs;
+    if (inputScene) {
+        const HdSceneIndexPrim procPrim =
+            inputScene->GetPrim(_GetProceduralPrimPath());
+        if (procPrim.dataSource) {
+            if (HdXformSchema xformSchema =
+                    HdXformSchema::GetFromParent(procPrim.dataSource)) {
+                xformDs = xformSchema.GetContainer();
+            }
+        }
+    }
+
+    if (xformDs) {
+        result.dataSource = HdRetainedContainerDataSource::New(
+            HdMeshSchemaTokens->mesh, meshDs,
+            HdPrimvarsSchemaTokens->primvars, primvarsDs,
+            HdXformSchemaTokens->xform, xformDs);
+    } else {
+        result.dataSource = HdRetainedContainerDataSource::New(
+            HdMeshSchemaTokens->mesh, meshDs,
+            HdPrimvarsSchemaTokens->primvars, primvarsDs);
+    }
 
     return result;
 }

@@ -28,6 +28,9 @@
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
+// Used for rational B-spline surface weights; OCCT 7.x provided this
+// transitively, OCCT 8.0 does not — include it explicitly.
+#include <TColStd_Array2OfReal.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
@@ -514,6 +517,26 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     faces.reserve(numFaces);
     faceNeedsFlip.reserve(numFaces);
 
+    // Orient each face from the authored radial-edge data: the first faceuse
+    // of each face's pair is the outward (solid-exterior) side. "opposite"
+    // means outward points against the surface's natural normal, so mark the
+    // face REVERSED and let the tessellator flip winding/normals from
+    // face.Orientation(). (Convention verified against the cube fixture:
+    // its x=0 face has natural normal +X, outward -X, faceuse pair
+    // ["opposite", "same"].)
+    auto applyFaceuseOrientation = [&](TopoDS_Face face, size_t fi) {
+        const size_t fu = faceuseStart + 2 * fi;
+        // Set absolutely (not conditionally flip): face construction
+        // (ShapeFix_Face / MakeFace-with-wires) may itself leave the face
+        // REVERSED, and the authored data is the single source of truth.
+        const bool outwardOpposite =
+            fu < data.faceuseOrientationType.size() &&
+            data.faceuseOrientationType[fu] == "opposite";
+        face.Orientation(
+            outwardOpposite ? TopAbs_REVERSED : TopAbs_FORWARD);
+        return face;
+    };
+
     if (!hasTrimCurves) {
         // Surface-only path: build faces, use 3D edge curves for trimming
         for (size_t fi = 0; fi < numFaces; ++fi) {
@@ -636,13 +659,20 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 }
 
                 if (success && !trimmedFace.IsNull()) {
-                    // Ensure pcurves exist for BRepMesh to work
+                    // KNOWN DEFECT: faces built this way (3D-curve wires
+                    // projected onto a BSpline surface) mesh to a small
+                    // fraction of their true area (e.g. cubeWithHole's
+                    // punctured face: 12.46 of ~71.7) — the projected UV
+                    // wire is malformed. Explicit per-edge pcurve
+                    // projection (ShapeFix_Edge::FixAddPCurve) was tried
+                    // and does not help. Proper fix: implement the
+                    // schema's authored curveUv (pcurve) trimming path.
                     ShapeFix_Face fix(trimmedFace);
                     fix.FixAddNaturalBoundMode() = Standard_False;
                     fix.FixWireMode() = Standard_True;
                     fix.Perform();
                     trimmedFace = fix.Face();
-                    faces.push_back(trimmedFace);
+                    faces.push_back(applyFaceuseOrientation(trimmedFace, fi));
                     faceNeedsFlip.push_back(false);
                 }
                 continue;
@@ -650,12 +680,8 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
 
             BRepBuilderAPI_MakeFace faceMaker(surface, data.intersectTol3d);
             if (faceMaker.IsDone()) {
-                TopoDS_Face face = faceMaker.Face();
-                // Don't apply faceuse Reverse() — without the full closed
-                // shell (multi-loop end-caps), faceuse orientation is
-                // misleading for rendering. The surface natural normal is
-                // used as-is for display purposes.
-                faces.push_back(face);
+                faces.push_back(
+                    applyFaceuseOrientation(faceMaker.Face(), fi));
                 faceNeedsFlip.push_back(false);
             }
         }
@@ -791,7 +817,8 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             }
 
             if (faceMaker.IsDone()) {
-                faces.push_back(faceMaker.Face());
+                faces.push_back(
+                    applyFaceuseOrientation(faceMaker.Face(), fi));
             }
         }
     }
