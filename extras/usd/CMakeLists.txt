@@ -4,8 +4,3 @@ endif()
 if (PXR_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
-
-# BrepArray tessellation CLI tool (requires PXR_BUILD_OCCT_PLUGIN=ON)
-if (${PXR_BUILD_OCCT_PLUGIN})
-    add_subdirectory(usdSolidTessellator)
-endif()
