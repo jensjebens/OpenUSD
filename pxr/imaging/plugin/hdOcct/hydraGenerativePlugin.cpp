@@ -14,6 +14,7 @@
 #include "pxr/base/tf/type.h"
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/meshTopologySchema.h"
+#include "pxr/imaging/pxOsd/tokens.h"
 #include "pxr/imaging/hd/primvarSchema.h"
 #include "pxr/imaging/hd/primvarsSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
@@ -219,6 +220,12 @@ UsdSolidTessellationProcedural::GetChildPrim(
     HdContainerDataSourceHandle meshDs =
         HdMeshSchema::Builder()
             .SetTopology(topologyDs)
+            // Tessellated output is a literal triangle mesh; pin the scheme to
+            // "none" so Storm never Catmull-Clark-subdivides it at higher
+            // complexity (which would also discard the authored normals).
+            .SetSubdivisionScheme(
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    PxOsdOpenSubdivTokens->none))
             .Build();
 
     // Points primvar
