@@ -14,6 +14,9 @@
 #include "pxr/base/tf/type.h"
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/meshTopologySchema.h"
+#include "pxr/imaging/hd/basisCurvesSchema.h"
+#include "pxr/imaging/hd/basisCurvesTopologySchema.h"
+#include "pxr/imaging/hd/purposeSchema.h"
 #include "pxr/imaging/pxOsd/tokens.h"
 #include "pxr/imaging/hd/primvarSchema.h"
 #include "pxr/imaging/hd/primvarsSchema.h"
@@ -28,9 +31,11 @@ TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
     (usdSolidTessellatorData)
     (meshCount)
+    (edgeCount)
     (points)
     (faceVertexCounts)
     (faceVertexIndices)
+    (curveVertexCounts)
     (normals)
     (displayColor)
 );
@@ -63,6 +68,7 @@ UsdSolidTessellationProcedural::_Tessellate(
     const HdSceneIndexBaseRefPtr &inputScene)
 {
     _meshes.clear();
+    _edges.clear();
 
     const SdfPath primPath = _GetProceduralPrimPath();
     HdSceneIndexPrim prim = inputScene->GetPrim(primPath);
@@ -144,6 +150,33 @@ UsdSolidTessellationProcedural::_Tessellate(
             _meshes.push_back(std::move(mesh));
         }
     }
+
+    // Unpack B-rep edge polylines (edges_<i> containers) into linear-curve data.
+    int edgeCount = 0;
+    if (auto ecDs = HdTypedSampledDataSource<int>::Cast(
+            tessDs->Get(_tokens->edgeCount))) {
+        edgeCount = ecDs->GetTypedValue(0.0f);
+    }
+    for (int i = 0; i < edgeCount; ++i) {
+        TfToken edgeName(TfStringPrintf("edges_%d", i));
+        HdContainerDataSourceHandle edgeDs =
+            HdContainerDataSource::Cast(tessDs->Get(edgeName));
+        if (!edgeDs) {
+            continue;  // this Brep produced no drawable edges
+        }
+        _EdgeData edge;
+        if (auto pDs = HdTypedSampledDataSource<VtArray<GfVec3f>>::Cast(
+                edgeDs->Get(_tokens->points))) {
+            edge.points = pDs->GetTypedValue(0.0f);
+        }
+        if (auto cvcDs = HdTypedSampledDataSource<VtArray<int>>::Cast(
+                edgeDs->Get(_tokens->curveVertexCounts))) {
+            edge.curveVertexCounts = cvcDs->GetTypedValue(0.0f);
+        }
+        if (!edge.points.empty() && !edge.curveVertexCounts.empty()) {
+            _edges.push_back(std::move(edge));
+        }
+    }
 }
 
 HdGpGenerativeProcedural::ChildPrimTypeMap
@@ -166,6 +199,11 @@ UsdSolidTessellationProcedural::Update(
             TfToken(TfStringPrintf("tessellated_mesh_%zu", i)));
         result[childPath] = HdPrimTypeTokens->mesh;
     }
+    for (size_t i = 0; i < _edges.size(); ++i) {
+        SdfPath childPath = _GetProceduralPrimPath().AppendChild(
+            TfToken(TfStringPrintf("tessellated_edges_%zu", i)));
+        result[childPath] = HdPrimTypeTokens->basisCurves;
+    }
 
     // If previous results existed, dirty all children
     if (!previousResult.empty() && outputDirtiedPrims) {
@@ -185,11 +223,104 @@ UsdSolidTessellationProcedural::GetChildPrim(
 {
     std::lock_guard<std::mutex> lock(_mutex);
 
+    const std::string childName = childPrimPath.GetName();
+
+    // B-rep edge polylines -> a linear HdBasisCurves child, marked purpose=guide
+    // so usdview's "Display > Guides" toggles the edge overlay like a wireframe.
+    const std::string edgePrefix = "tessellated_edges_";
+    if (childName.compare(0, edgePrefix.size(), edgePrefix) == 0) {
+        HdSceneIndexPrim cresult;
+        cresult.primType = HdPrimTypeTokens->basisCurves;
+        size_t edgeIdx = 0;
+        try {
+            edgeIdx = std::stoul(childName.substr(edgePrefix.size()));
+        } catch (...) {
+            return cresult;
+        }
+        if (edgeIdx >= _edges.size()) {
+            return cresult;
+        }
+        const _EdgeData &edge = _edges[edgeIdx];
+
+        HdContainerDataSourceHandle curveTopo =
+            HdBasisCurvesTopologySchema::Builder()
+                .SetCurveVertexCounts(
+                    HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                        edge.curveVertexCounts))
+                .SetType(HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdTokens->linear))
+                .SetWrap(HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdTokens->nonperiodic))
+                .Build();
+        HdContainerDataSourceHandle curvesDs =
+            HdBasisCurvesSchema::Builder()
+                .SetTopology(curveTopo)
+                .Build();
+
+        HdContainerDataSourceHandle pointsPvDs =
+            HdRetainedContainerDataSource::New(
+                HdPrimvarSchemaTokens->primvarValue,
+                HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                    edge.points),
+                HdPrimvarSchemaTokens->interpolation,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->vertex),
+                HdPrimvarSchemaTokens->role,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->point));
+        VtArray<GfVec3f> edgeColor(1, GfVec3f(0.05f, 0.05f, 0.05f));
+        HdContainerDataSourceHandle colorPvDs =
+            HdRetainedContainerDataSource::New(
+                HdPrimvarSchemaTokens->primvarValue,
+                HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                    edgeColor),
+                HdPrimvarSchemaTokens->interpolation,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->constant),
+                HdPrimvarSchemaTokens->role,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->color));
+        HdContainerDataSourceHandle primvarsDs =
+            HdRetainedContainerDataSource::New(
+                HdTokens->points, pointsPvDs,
+                HdTokens->displayColor, colorPvDs);
+
+        HdContainerDataSourceHandle xformDs;
+        if (inputScene) {
+            const HdSceneIndexPrim procPrim =
+                inputScene->GetPrim(_GetProceduralPrimPath());
+            if (procPrim.dataSource) {
+                if (HdXformSchema xs =
+                        HdXformSchema::GetFromParent(procPrim.dataSource)) {
+                    xformDs = xs.GetContainer();
+                }
+            }
+        }
+        HdContainerDataSourceHandle purposeDs =
+            HdPurposeSchema::Builder()
+                .SetPurpose(HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdRenderTagTokens->guide))
+                .Build();
+
+        if (xformDs) {
+            cresult.dataSource = HdRetainedContainerDataSource::New(
+                HdBasisCurvesSchemaTokens->basisCurves, curvesDs,
+                HdPrimvarsSchemaTokens->primvars, primvarsDs,
+                HdXformSchemaTokens->xform, xformDs,
+                HdPurposeSchemaTokens->purpose, purposeDs);
+        } else {
+            cresult.dataSource = HdRetainedContainerDataSource::New(
+                HdBasisCurvesSchemaTokens->basisCurves, curvesDs,
+                HdPrimvarsSchemaTokens->primvars, primvarsDs,
+                HdPurposeSchemaTokens->purpose, purposeDs);
+        }
+        return cresult;
+    }
+
     HdSceneIndexPrim result;
     result.primType = HdPrimTypeTokens->mesh;
 
     // Parse mesh index from child name
-    const std::string childName = childPrimPath.GetName();
     const std::string prefix = "tessellated_mesh_";
     size_t meshIdx = 0;
     if (childName.substr(0, prefix.size()) != prefix) {
