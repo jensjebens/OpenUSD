@@ -12,6 +12,7 @@
 #include "pxr/pxr.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/primvarSchema.h"
@@ -273,8 +274,37 @@ UsdSolidBrepArrayAdapter::InvalidateImagingSubprim(
         return HdDataSourceLocatorSet();
     }
 
-    return UsdImagingDataSourcePrim::Invalidate(
-        prim, subprim, properties, invalidationType);
+    // Base prim invalidation handles xform / visibility / purpose so moving
+    // or hiding the prim stays live.
+    HdDataSourceLocatorSet result =
+        UsdImagingDataSourcePrim::Invalidate(
+            prim, subprim, properties, invalidationType);
+
+    // The tessellated mesh + edge data is built eagerly in
+    // GetImagingSubprimData and injected as a retained snapshot; the stage
+    // scene index does NOT rebuild that snapshot on a value-only change, it
+    // only dirties locators. So when any attribute that feeds the tessellation
+    // changes (B-rep geometry/topology or the tessellation params), we ask the
+    // index to fully repopulate this prim: GetImagingSubprimData then re-runs
+    // the OCCT build + mesh with the new values and the generative procedural
+    // re-cooks, refreshing both the mesh and the edge curves. (OCCT has no
+    // incremental rebuild, so a full repopulate is the right granularity.)
+    static const char* const kGeomPrefixes[] = {
+        "brep:", "region:", "shell:", "faceuse:", "face:", "loop:",
+        "edgeuse:", "edge:", "wireEdge:", "vertex:",
+        "primvars:tessellation:"
+    };
+    for (const TfToken& p : properties) {
+        const std::string& name = p.GetString();
+        for (const char* pre : kGeomPrefixes) {
+            if (TfStringStartsWith(name, pre)) {
+                result.insert(HdDataSourceLocator(
+                    UsdImagingTokens->stageSceneIndexRepopulate));
+                return result;
+            }
+        }
+    }
+    return result;
 }
 
 // ----------------------------------------------------------------------------
