@@ -16,10 +16,18 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Poly_Polygon3D.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopLoc_Location.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
+#include <Standard_Failure.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Dir.hxx>
 #include <BRepGProp.hxx>
@@ -229,6 +237,55 @@ UsdSolidTessellationResult _ExtractMesh(
         faceIndex++;
     }
 
+    // Discretize the B-rep's topological edges into polylines for the optional
+    // edge/line display. Each unique edge becomes one polyline; we prefer the
+    // 3D polygon BRepMesh already attached to the edge (coincident with the
+    // meshed faces), and fall back to sampling the 3D curve directly.
+    {
+        TopTools_IndexedMapOfShape edgeMap;
+        TopExp::MapShapes(shape, TopAbs_EDGE, edgeMap);
+        for (int ei = 1; ei <= edgeMap.Extent(); ++ei) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edgeMap(ei));
+            if (BRep_Tool::Degenerated(edge)) {
+                continue;  // seam/degenerate edges carry no 3D curve
+            }
+            std::vector<GfVec3d> pts;
+
+            TopLoc_Location eloc;
+            Handle(Poly_Polygon3D) poly = BRep_Tool::Polygon3D(edge, eloc);
+            if (!poly.IsNull()) {
+                const gp_Trsf& et = eloc.Transformation();
+                const TColgp_Array1OfPnt& nodes = poly->Nodes();
+                pts.reserve(nodes.Length());
+                for (int i = nodes.Lower(); i <= nodes.Upper(); ++i) {
+                    gp_Pnt p = nodes.Value(i).Transformed(et);
+                    pts.emplace_back(p.X(), p.Y(), p.Z());
+                }
+            } else {
+                try {
+                    BRepAdaptor_Curve curve(edge);
+                    GCPnts_QuasiUniformDeflection disc(curve, deflection);
+                    if (disc.IsDone()) {
+                        pts.reserve(disc.NbPoints());
+                        for (int i = 1; i <= disc.NbPoints(); ++i) {
+                            gp_Pnt p = disc.Value(i);
+                            pts.emplace_back(p.X(), p.Y(), p.Z());
+                        }
+                    }
+                } catch (const Standard_Failure&) {
+                    continue;  // skip edges that cannot be discretized
+                }
+            }
+
+            if (pts.size() >= 2) {
+                result.edgeCurveVertexCounts.push_back((int)pts.size());
+                for (const auto& p : pts) {
+                    result.edgePoints.push_back(p);
+                }
+            }
+        }
+    }
+
     result.success = true;
     return result;
 }
@@ -313,6 +370,13 @@ UsdSolidTessellationResult _MergeResults(
             merged.faceBrepIndices.push_back(bi);
         for (const auto& fi : r.faceSolidFaceIndices)
             merged.faceSolidFaceIndices.push_back(fi);
+
+        // Edge polylines are a flat point array partitioned by per-curve
+        // counts; no index remap needed, just concatenate both arrays.
+        for (const auto& c : r.edgeCurveVertexCounts)
+            merged.edgeCurveVertexCounts.push_back(c);
+        for (const auto& p : r.edgePoints)
+            merged.edgePoints.push_back(p);
 
         vertOffset += (int)r.points.size();
     }

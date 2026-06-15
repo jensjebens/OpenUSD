@@ -31,9 +31,11 @@ TF_DEFINE_PRIVATE_TOKENS(
     (usdSolidTessellation)
     (usdSolidTessellatorData)
     (meshCount)
+    (edgeCount)
     (points)
     (faceVertexCounts)
     (faceVertexIndices)
+    (curveVertexCounts)
     (normals)
 );
 
@@ -169,10 +171,39 @@ _BuildTessellationDataSource(const UsdPrim &prim)
         meshNames.push_back(
             TfToken(TfStringPrintf("mesh_%zu", i)));
         meshDataSources.push_back(meshDs);
+
+        // B-rep edge polylines (for the edge/line display): pack as an
+        // edges_<i> container holding points + curveVertexCounts, consumed by
+        // the procedural as a linear HdBasisCurves child.
+        if (!result.edgePoints.empty()) {
+            VtArray<GfVec3f> edgePts(result.edgePoints.size());
+            for (size_t j = 0; j < result.edgePoints.size(); ++j) {
+                const GfVec3d& p = result.edgePoints[j];
+                edgePts[j] = GfVec3f((float)p[0], (float)p[1], (float)p[2]);
+            }
+            HdContainerDataSourceHandle edgeDs =
+                HdRetainedContainerDataSource::New(
+                    _tokens->points,
+                    HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                        edgePts),
+                    _tokens->curveVertexCounts,
+                    HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                        result.edgeCurveVertexCounts));
+            meshNames.push_back(
+                TfToken(TfStringPrintf("edges_%zu", i)));
+            meshDataSources.push_back(edgeDs);
+        }
     }
 
     // Add mesh count
     meshNames.push_back(_tokens->meshCount);
+    meshDataSources.push_back(
+        HdRetainedTypedSampledDataSource<int>::New(
+            (int)goodResults.size()));
+
+    // Edge-group count (parallel to mesh count; edges_<i> may be absent when
+    // a Brep produced no drawable edges).
+    meshNames.push_back(_tokens->edgeCount);
     meshDataSources.push_back(
         HdRetainedTypedSampledDataSource<int>::New(
             (int)goodResults.size()));
