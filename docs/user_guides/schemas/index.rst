@@ -9,5 +9,6 @@ Schema Domains
    usdMedia/usdMedia_toc
    UsdProfiles/UsdProfiles_toc.rst
    usdRender/usdRender_toc
+   usdSolid/usdSolid_toc
    usdUI/usdUI_toc
    usdVol/usdVol_toc
