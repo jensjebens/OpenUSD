@@ -397,6 +397,23 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
     _GetAttr("brep:surface:cylinder:axis", data->surfaceCylinderAxis);
     _GetAttr("brep:surface:cylinder:refDirection", data->surfaceCylinderRefDir);
     _GetAttr("brep:surface:cylinder:radius", data->surfaceCylinderRadius);
+    _GetAttr("brep:surface:plane:origin", data->surfacePlaneOrigin);
+    _GetAttr("brep:surface:plane:axis", data->surfacePlaneAxis);
+    _GetAttr("brep:surface:plane:refDirection", data->surfacePlaneRefDir);
+    _GetAttr("brep:surface:cone:origin", data->surfaceConeOrigin);
+    _GetAttr("brep:surface:cone:axis", data->surfaceConeAxis);
+    _GetAttr("brep:surface:cone:refDirection", data->surfaceConeRefDir);
+    _GetAttr("brep:surface:cone:radius", data->surfaceConeRadius);
+    _GetAttr("brep:surface:cone:semiAngle", data->surfaceConeSemiAngle);
+    _GetAttr("brep:surface:sphere:center", data->surfaceSphereCenter);
+    _GetAttr("brep:surface:sphere:axis", data->surfaceSphereAxis);
+    _GetAttr("brep:surface:sphere:refDirection", data->surfaceSphereRefDir);
+    _GetAttr("brep:surface:sphere:radius", data->surfaceSphereRadius);
+    _GetAttr("brep:surface:torus:origin", data->surfaceTorusOrigin);
+    _GetAttr("brep:surface:torus:axis", data->surfaceTorusAxis);
+    _GetAttr("brep:surface:torus:refDirection", data->surfaceTorusRefDir);
+    _GetAttr("brep:surface:torus:majorRadius", data->surfaceTorusMajorRadius);
+    _GetAttr("brep:surface:torus:minorRadius", data->surfaceTorusMinorRadius);
 
     return !data->regionCount.empty();
 }
@@ -475,7 +492,13 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     // Faces before faceStart (earlier Breps) still advance the offsets.
     size_t surfCPOffset = 0, surfUKnotOffset = 0, surfVKnotOffset = 0,
            surfWeightOffset = 0;   // NURBS packing offsets
-    size_t nurbFace = 0, cylFace = 0;   // per-type element counters
+    size_t nurbFace = 0, cylFace = 0, planeFace = 0, coneFace = 0,
+           sphereFace = 0, torusFace = 0;   // per-type element counters
+    auto mkAx3 = [](const GfVec3d& o, const GfVec3d& ax, const GfVec3d& rd) {
+        return gp_Ax3(gp_Pnt(o[0], o[1], o[2]),
+                      gp_Dir(ax[0], ax[1], ax[2]),
+                      gp_Dir(rd[0], rd[1], rd[2]));
+    };
 
     for (size_t faceIdx = 0;
          faceIdx < faceStart + numFaces &&
@@ -496,6 +519,42 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     ax3, data.surfaceCylinderRadius[cylFace]);
             }
             ++cylFace;
+        } else if (stype.GetString() == "BrepSurfacePlaneAPI") {
+            if (planeFace < data.surfacePlaneOrigin.size()) {
+                surf = new Geom_Plane(mkAx3(data.surfacePlaneOrigin[planeFace],
+                    data.surfacePlaneAxis[planeFace],
+                    data.surfacePlaneRefDir[planeFace]));
+            }
+            ++planeFace;
+        } else if (stype.GetString() == "BrepSurfaceConeAPI") {
+            if (coneFace < data.surfaceConeRadius.size()) {
+                surf = new Geom_ConicalSurface(
+                    mkAx3(data.surfaceConeOrigin[coneFace],
+                          data.surfaceConeAxis[coneFace],
+                          data.surfaceConeRefDir[coneFace]),
+                    data.surfaceConeSemiAngle[coneFace],
+                    data.surfaceConeRadius[coneFace]);
+            }
+            ++coneFace;
+        } else if (stype.GetString() == "BrepSurfaceSphereAPI") {
+            if (sphereFace < data.surfaceSphereRadius.size()) {
+                surf = new Geom_SphericalSurface(
+                    mkAx3(data.surfaceSphereCenter[sphereFace],
+                          data.surfaceSphereAxis[sphereFace],
+                          data.surfaceSphereRefDir[sphereFace]),
+                    data.surfaceSphereRadius[sphereFace]);
+            }
+            ++sphereFace;
+        } else if (stype.GetString() == "BrepSurfaceTorusAPI") {
+            if (torusFace < data.surfaceTorusMajorRadius.size()) {
+                surf = new Geom_ToroidalSurface(
+                    mkAx3(data.surfaceTorusOrigin[torusFace],
+                          data.surfaceTorusAxis[torusFace],
+                          data.surfaceTorusRefDir[torusFace]),
+                    data.surfaceTorusMajorRadius[torusFace],
+                    data.surfaceTorusMinorRadius[torusFace]);
+            }
+            ++torusFace;
         } else {
             // BrepSurfaceNurbAPI (default)
             if (nurbFace < data.surfaceUVertexCount.size()) {

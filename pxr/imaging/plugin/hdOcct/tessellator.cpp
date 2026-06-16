@@ -17,6 +17,8 @@
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Poly_Polygon3D.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
+#include <TColStd_Array1OfInteger.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -320,38 +322,46 @@ UsdSolidTessellationResult _ExtractMesh(
                                     const TopoDS_Face& face,
                                     double offset,
                                     std::vector<GfVec3d>& pts) {
-            Standard_Real f2, l2;
-            Handle(Geom2d_Curve) pc =
-                BRep_Tool::CurveOnSurface(edge, face, f2, l2);
-            TopLoc_Location loc;
-            Handle(Geom_Surface) surf = BRep_Tool::Surface(face, loc);
-            if (pc.IsNull() || surf.IsNull()) { discretize(edge, pts); return; }
+            // Take the edge's vertices straight from the face's surface
+            // triangulation (PolygonOnTriangulation), so the edge polyline is
+            // sampled at exactly the same nodes the fillet surface mesh uses;
+            // then push each node a hair along its outward surface normal so the
+            // line sits just proud of the facets instead of z-fighting them.
             try {
-                BRepAdaptor_Curve curve(edge);
-                GCPnts_QuasiUniformDeflection disc(curve, deflection);
-                if (!disc.IsDone() || disc.NbPoints() < 2) {
+                TopLoc_Location triLoc;
+                Handle(Poly_Triangulation) tri =
+                    BRep_Tool::Triangulation(face, triLoc);
+                if (tri.IsNull() || !tri->HasUVNodes()) {
                     discretize(edge, pts);
                     return;
                 }
-                const gp_Trsf& lt = loc.Transformation();
+                Handle(Poly_PolygonOnTriangulation) poly =
+                    BRep_Tool::PolygonOnTriangulation(edge, tri, triLoc);
+                if (poly.IsNull()) { discretize(edge, pts); return; }
+                // World-space surface (location applied) -> D1 gives world
+                // derivatives, so the normal needs no further transform; the
+                // triangulation nodes are local and do need triLoc applied.
+                Handle(Geom_Surface) surf = BRep_Tool::Surface(face);
+                const gp_Trsf& tt = triLoc.Transformation();
                 const bool rev = (face.Orientation() == TopAbs_REVERSED);
-                pts.reserve(disc.NbPoints());
-                for (int i = 1; i <= disc.NbPoints(); ++i) {
-                    Standard_Real t = disc.Parameter(i);
-                    gp_Pnt p3 = disc.Value(i);
-                    gp_Pnt2d uv = pc->Value(t);
-                    gp_Pnt sp; gp_Vec du, dv;
-                    surf->D1(uv.X(), uv.Y(), sp, du, dv);
-                    gp_Vec n = du.Crossed(dv);
-                    if (n.Magnitude() < 1e-12) {
-                        pts.emplace_back(p3.X(), p3.Y(), p3.Z());
-                        continue;
+                const TColStd_Array1OfInteger& nodes = poly->Nodes();
+                pts.reserve(nodes.Length());
+                for (int i = nodes.Lower(); i <= nodes.Upper(); ++i) {
+                    const int n = nodes.Value(i);
+                    gp_Pnt p = tri->Node(n).Transformed(tt);
+                    gp_Vec nrm(0, 0, 0);
+                    if (!surf.IsNull()) {
+                        gp_Pnt2d uv = tri->UVNode(n);
+                        gp_Pnt sp; gp_Vec du, dv;
+                        surf->D1(uv.X(), uv.Y(), sp, du, dv);
+                        nrm = du.Crossed(dv);
                     }
-                    n.Normalize();
-                    if (rev) n.Reverse();
-                    if (!loc.IsIdentity()) n.Transform(lt);
-                    gp_Pnt po = p3.Translated(n.Multiplied(offset));
-                    pts.emplace_back(po.X(), po.Y(), po.Z());
+                    if (nrm.Magnitude() > 1e-12) {
+                        nrm.Normalize();
+                        if (rev) nrm.Reverse();
+                        p.Translate(nrm.Multiplied(offset));
+                    }
+                    pts.emplace_back(p.X(), p.Y(), p.Z());
                 }
             } catch (const Standard_Failure&) {
                 pts.clear();
@@ -419,9 +429,10 @@ UsdSolidTessellationResult _ExtractMesh(
 
         // Tangent if the two owning faces meet at a near-zero dihedral.
         const double tangentTol = 0.15;  // radians (~8.6 deg)
-        // Lift the emitted edges this far along the outward normal. Scaled to
-        // the tessellation deflection so it always clears the facet chord error.
-        const double edgeOffset = 1.5 * deflection;
+        // Lift the emitted edges this far along the outward normal. The edge
+        // nodes are now coincident with the mesh facets, so only a small nudge
+        // (a fraction of the deflection) is needed to win the depth test.
+        const double edgeOffset = 0.3 * deflection;
         for (const auto& kv : groups) {
             const std::vector<size_t>& ids = kv.second;
             const EdgeRec& a = recs[ids[0]];
