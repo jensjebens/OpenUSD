@@ -58,6 +58,13 @@ PRIM_PATHS = {
     'testPlaneWithHole.usda': '/World/PlaneWithHole',
     'testSphere.usda': '/World/Sphere',
     'testTwoBoxes.usda': '/World/TwoBoxes',
+    'testAnalyticPlane.usda': '/World/AnPlane',
+    'testAnalyticCylinder.usda': '/World/AnalyticCyl',
+    'testAnalyticCone.usda': '/World/AnCone',
+    'testAnalyticSphere.usda': '/World/AnSphere',
+    'testAnalyticTorus.usda': '/World/AnTorus',
+    'testAnalyticCylinderEdges.usda': '/World/CylEdge',
+    'testAnalyticConeEdges.usda': '/World/ConeEdge',
 }
 
 # Closed solids: signed volume must be positive (outward winding).
@@ -71,6 +78,26 @@ CLOSED_SOLIDS = [
     'testSphere.usda',
     'testTwoBoxes.usda',
 ]
+
+# Analytic-surface fixtures -> (expected meshed area, absolute tolerance).
+#
+# These exercise the analytic surface readers: each face is built from its
+# schema parameters (origin/axis/refDirection + radius/semiAngle/...) rather
+# than NURBS control points. The five surface types use the authored curveUv
+# (pcurve) trimming path; the *Edges fixtures additionally exercise the
+# analytic 3D-edge path (analytic surface trimmed by analytic circle/line
+# curves with no authored curveUv). Areas are geometric and independent of
+# the OCCT meshing algorithm; curved surfaces mesh slightly under their true
+# area (chord-height deflection), so the tolerance permits a small undershoot.
+ANALYTIC_AREA_FIXTURES = {
+    'testAnalyticPlane.usda':         (12.0, 0.5),
+    'testAnalyticCylinder.usda':      (2.0 * math.pi * 3.0 * 5.0, 2.0),
+    'testAnalyticCone.usda':          (25.28, 1.0),
+    'testAnalyticSphere.usda':        (59.98, 2.0),
+    'testAnalyticTorus.usda':         (203.22, 6.0),
+    'testAnalyticCylinderEdges.usda': (70.686, 2.5),
+    'testAnalyticConeEdges.usda':     (25.28, 1.5),
+}
 
 
 def _get_fixtures_dir():
@@ -363,6 +390,49 @@ class TestTessellationErrorHandling(unittest.TestCase):
         if os.path.exists(output_path):
             os.unlink(output_path)
         self.assertNotEqual(rc, 0)
+
+
+class TestAnalyticSurfaceArea(unittest.TestCase):
+    """Analytic surfaces tessellate to their exact geometric area.
+
+    Each analytic surface type (plane, cylinder, cone, sphere, torus) is
+    constructed from its schema parameters rather than from NURBS control
+    points, and trimmed via the authored curveUv (pcurve) path. The *Edges
+    fixtures additionally exercise the analytic 3D-edge path: an analytic
+    surface trimmed by analytic circle/line curves with no authored curveUv,
+    where each edge's pcurve is projected onto the surface. Areas are
+    geometry-based and independent of the OCCT meshing algorithm.
+    """
+
+    def _check_area(self, fixture_name):
+        expected, tol = ANALYTIC_AREA_FIXTURES[fixture_name]
+        stage = _tessellate_fixture(fixture_name)
+        area = _total_surface_area(stage)
+        self.assertGreater(area, 0.0, f"{fixture_name}: empty mesh")
+        self.assertAlmostEqual(
+            area, expected, delta=tol,
+            msg=f"{fixture_name}: area {area:.3f} != {expected:.3f}")
+
+    def test_AnalyticPlane(self):
+        self._check_area('testAnalyticPlane.usda')
+
+    def test_AnalyticCylinder(self):
+        self._check_area('testAnalyticCylinder.usda')
+
+    def test_AnalyticCone(self):
+        self._check_area('testAnalyticCone.usda')
+
+    def test_AnalyticSphere(self):
+        self._check_area('testAnalyticSphere.usda')
+
+    def test_AnalyticTorus(self):
+        self._check_area('testAnalyticTorus.usda')
+
+    def test_AnalyticCylinderEdges(self):
+        self._check_area('testAnalyticCylinderEdges.usda')
+
+    def test_AnalyticConeEdges(self):
+        self._check_area('testAnalyticConeEdges.usda')
 
 
 if __name__ == '__main__':

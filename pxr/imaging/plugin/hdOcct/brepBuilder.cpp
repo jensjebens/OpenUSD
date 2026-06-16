@@ -23,8 +23,21 @@
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_SphericalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
+#include <Geom_Line.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_Ellipse.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
+#include <BRepLib.hxx>
+#include <GeomProjLib.hxx>
+#include <Geom2d_Curve.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <Geom_ElementarySurface.hxx>
+#include <Standard_Failure.hxx>
+#include <TopLoc_Location.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <gp_Pnt.hxx>
 #include <ShapeFix_Shape.hxx>
@@ -415,6 +428,19 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
     _GetAttr("brep:surface:torus:majorRadius", data->surfaceTorusMajorRadius);
     _GetAttr("brep:surface:torus:minorRadius", data->surfaceTorusMinorRadius);
 
+    // Analytic 3D curves for edges (line/circle/ellipse)
+    _GetAttr("brep:edge3dLine:curve3d:line:origin", data->edgeLineOrigin);
+    _GetAttr("brep:edge3dLine:curve3d:line:direction", data->edgeLineDirection);
+    _GetAttr("brep:edge3dCircle:curve3d:circle:center", data->edgeCircleCenter);
+    _GetAttr("brep:edge3dCircle:curve3d:circle:axis", data->edgeCircleAxis);
+    _GetAttr("brep:edge3dCircle:curve3d:circle:refDirection", data->edgeCircleRefDir);
+    _GetAttr("brep:edge3dCircle:curve3d:circle:radius", data->edgeCircleRadius);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:center", data->edgeEllipseCenter);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:axis", data->edgeEllipseAxis);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:refDirection", data->edgeEllipseRefDir);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:xRadius", data->edgeEllipseXRadius);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:yRadius", data->edgeEllipseYRadius);
+
     return !data->regionCount.empty();
 }
 
@@ -618,150 +644,244 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     };
 
     if (!hasTrimCurves) {
-        // Surface-only path: build faces, use 3D edge curves for trimming
+        // Surface-only path: trim each face with its 3D edge curves.
+        // Build the 3D curve for every edge, dispatching on edge:curveType
+        // (NURBS / line / circle / ellipse), each packed per curve type.
+        // Analytic surfaces project robustly here (the OCCT STEP-import
+        // pattern), unlike the BSpline case where 3D-wire trimming under-meshes.
+        auto mkAx2 = [](const GfVec3d& c, const GfVec3d& n, const GfVec3d& vx) {
+            return gp_Ax2(gp_Pnt(c[0], c[1], c[2]),
+                          gp_Dir(n[0], n[1], n[2]),
+                          gp_Dir(vx[0], vx[1], vx[2]));
+        };
+        size_t numEdgesTotal = data.edgeCurveType.size();
+        std::vector<Handle(Geom_Curve)> edge3dCurves(numEdgesTotal);
+        std::vector<bool> edgeIsAnalytic(numEdgesTotal, false);
+        {
+            size_t eCP = 0, eKnot = 0, eW = 0;   // NURBS packing offsets
+            size_t nurbE = 0, lineE = 0, circE = 0, ellE = 0;
+            for (size_t ei = 0; ei < numEdgesTotal; ++ei) {
+                const std::string ct = data.edgeCurveType[ei].GetString();
+                try {
+                if (ct == "BrepCurve3dLineAPI") {
+                    edgeIsAnalytic[ei] = true;
+                    if (lineE < data.edgeLineOrigin.size() &&
+                        lineE < data.edgeLineDirection.size()) {
+                        const GfVec3d& o = data.edgeLineOrigin[lineE];
+                        const GfVec3d& d = data.edgeLineDirection[lineE];
+                        edge3dCurves[ei] = new Geom_Line(
+                            gp_Pnt(o[0], o[1], o[2]), gp_Dir(d[0], d[1], d[2]));
+                    }
+                    ++lineE;
+                } else if (ct == "BrepCurve3dCircleAPI") {
+                    edgeIsAnalytic[ei] = true;
+                    if (circE < data.edgeCircleRadius.size()) {
+                        edge3dCurves[ei] = new Geom_Circle(
+                            mkAx2(data.edgeCircleCenter[circE],
+                                  data.edgeCircleAxis[circE],
+                                  data.edgeCircleRefDir[circE]),
+                            data.edgeCircleRadius[circE]);
+                    }
+                    ++circE;
+                } else if (ct == "BrepCurve3dEllipseAPI") {
+                    edgeIsAnalytic[ei] = true;
+                    if (ellE < data.edgeEllipseXRadius.size()) {
+                        double xr = data.edgeEllipseXRadius[ellE];
+                        double yr = data.edgeEllipseYRadius[ellE];
+                        gp_Ax2 ax = mkAx2(data.edgeEllipseCenter[ellE],
+                                          data.edgeEllipseAxis[ellE],
+                                          data.edgeEllipseRefDir[ellE]);
+                        // OCCT requires major >= minor; rotate frame if not.
+                        if (xr >= yr) {
+                            edge3dCurves[ei] = new Geom_Ellipse(ax, xr, yr);
+                        } else {
+                            ax.Rotate(ax.Axis(), 1.5707963267948966);
+                            edge3dCurves[ei] = new Geom_Ellipse(ax, yr, xr);
+                        }
+                    }
+                    ++ellE;
+                } else {
+                    // BrepCurve3dNurbAPI (default)
+                    if (nurbE < data.edgeCurveVertexCount.size()) {
+                        int ncp = data.edgeCurveVertexCount[nurbE];
+                        int ord = data.edgeCurveOrder[nurbE];
+                        int nk = ncp + ord;
+                        const GfVec3d* cps =
+                            data.edgeCurveControlVertices.cdata() + eCP;
+                        const double* kn = data.edgeCurveKnots.cdata() + eKnot;
+                        const double* w = (!data.edgeCurveWeights.empty())
+                            ? data.edgeCurveWeights.cdata() + eW : nullptr;
+                        int nw = (!data.edgeCurveWeights.empty()) ? ncp : 0;
+                        edge3dCurves[ei] = _MakeBSplineCurve(
+                            cps, ncp, ord, kn, nk, w, nw);
+                        eCP += ncp; eKnot += nk; eW += ncp;
+                    }
+                    ++nurbE;
+                }
+                } catch (const Standard_Failure&) {
+                    // Malformed edge curve: leave it null; the face build skips.
+                }
+            }
+        }
+
         for (size_t fi = 0; fi < numFaces; ++fi) {
             if (fi >= surfaces.size()) break;
             const auto& surface = surfaces[fi];
             if (surface.IsNull()) continue;
 
-            // Check if this face has multiple loops (needs trimming)
+            const bool analyticSurf =
+                surface->IsKind(STANDARD_TYPE(Geom_ElementarySurface));
+
             size_t faceIdx = faceStart + fi;
-            if (faceIdx < data.faceLoopCount.size() &&
-                data.faceLoopCount[faceIdx] > 1) {
-                // Multi-loop face: build trimmed face using 3D edge curves.
-                if (data.edgeCurveControlVertices.empty() ||
-                    data.edgeCurveVertexCount.empty()) {
-                    continue;  // No 3D edge data — can't trim
-                }
+            size_t numLoops = (faceIdx < data.faceLoopCount.size())
+                ? data.faceLoopCount[faceIdx] : 0;
 
-                // Compute loop start for this face
-                size_t loopStartIdx = 0;
-                for (size_t f = 0; f < faceIdx; ++f) {
-                    if (f < data.faceLoopCount.size())
-                        loopStartIdx += data.faceLoopCount[f];
-                }
+            // Loop + edgeuse start indices for this face.
+            size_t loopStartIdx = 0;
+            for (size_t f = 0; f < faceIdx; ++f)
+                if (f < data.faceLoopCount.size())
+                    loopStartIdx += data.faceLoopCount[f];
+            size_t euStartIdx = 0;
+            for (size_t l = 0; l < loopStartIdx; ++l)
+                if (l < data.loopEdgeuseCount.size())
+                    euStartIdx += data.loopEdgeuseCount[l];
 
-                // Compute edgeuse start for this face's loops
-                size_t euStartIdx = 0;
-                for (size_t l = 0; l < loopStartIdx; ++l) {
-                    if (l < data.loopEdgeuseCount.size())
-                        euStartIdx += data.loopEdgeuseCount[l];
-                }
+            // Build a trimmed face from the loops' 3D edge wires.
+            //
+            // Analytic (elementary) surfaces use the full path for any loop
+            // count: edges bounded by edge:range, exact pcurve projection, and a
+            // validity check. NURBS surfaces keep legacy behaviour — only
+            // multi-loop faces are wire-trimmed (without pcurve projection), and
+            // single-loop faces fall through to natural bounds — because the
+            // authored curveUv path is the correct route for trimmed NURBS.
+            const bool attemptTrim = analyticSurf || numLoops > 1;
 
-                size_t numLoops = data.faceLoopCount[faceIdx];
-                bool success = true;
+            TopoDS_Face finalFace;
+            bool haveFace = false;
+
+            if (attemptTrim) {
+              try {
+                bool built = false, ok = true;
                 TopoDS_Face trimmedFace;
-
                 size_t currentEU = euStartIdx;
-                for (size_t li = 0; li < numLoops && success; ++li) {
+                for (size_t li = 0; li < numLoops && ok; ++li) {
                     size_t globalLoop = loopStartIdx + li;
                     if (globalLoop >= data.loopEdgeuseCount.size()) {
-                        success = false; break;
+                        ok = false; break;
                     }
                     size_t numEU = data.loopEdgeuseCount[globalLoop];
-                    if (numEU == 0) { currentEU += numEU; continue; }
+                    if (numEU == 0) { ok = false; break; }
 
-                    // Build wire from edgeuses in this loop
                     BRepBuilderAPI_MakeWire wireMaker;
                     for (size_t eu = 0; eu < numEU; ++eu) {
                         size_t euIdx = currentEU + eu;
                         if (euIdx >= data.edgeuseEdgeIndex.size()) {
-                            success = false; break;
+                            ok = false; break;
                         }
                         size_t edgeIdx = data.edgeuseEdgeIndex[euIdx];
-                        if (edgeIdx >= data.edgeCurveVertexCount.size()) {
-                            success = false; break;
+                        if (edgeIdx >= edge3dCurves.size() ||
+                            edge3dCurves[edgeIdx].IsNull()) {
+                            ok = false; break;
                         }
-
-                        // Compute offset into edge curve arrays
-                        size_t ecpOffset = 0, eknotOffset = 0, ewOffset = 0;
-                        for (size_t e = 0; e < edgeIdx; ++e) {
-                            ecpOffset += data.edgeCurveVertexCount[e];
-                            eknotOffset += data.edgeCurveVertexCount[e] +
-                                           data.edgeCurveOrder[e];
-                            ewOffset += data.edgeCurveVertexCount[e];
+                        // Analytic curves are infinite/periodic — bound them by
+                        // the authored edge:range parameter interval.
+                        TopoDS_Edge edge;
+                        if (edgeIsAnalytic[edgeIdx] &&
+                            2 * edgeIdx + 1 < data.edgeRange.size()) {
+                            BRepBuilderAPI_MakeEdge em(edge3dCurves[edgeIdx],
+                                data.edgeRange[2 * edgeIdx],
+                                data.edgeRange[2 * edgeIdx + 1]);
+                            if (!em.IsDone()) { ok = false; break; }
+                            edge = em.Edge();
+                        } else {
+                            BRepBuilderAPI_MakeEdge em(edge3dCurves[edgeIdx]);
+                            if (!em.IsDone()) { ok = false; break; }
+                            edge = em.Edge();
                         }
-
-                        int numCPs = data.edgeCurveVertexCount[edgeIdx];
-                        int edgeOrder = data.edgeCurveOrder[edgeIdx];
-                        int numKnots = numCPs + edgeOrder;
-
-                        const GfVec3d* cps =
-                            data.edgeCurveControlVertices.cdata() + ecpOffset;
-                        const double* knots =
-                            data.edgeCurveKnots.cdata() + eknotOffset;
-                        const double* weights =
-                            (!data.edgeCurveWeights.empty())
-                            ? data.edgeCurveWeights.cdata() + ewOffset
-                            : nullptr;
-                        int numW = (!data.edgeCurveWeights.empty())
-                                   ? numCPs : 0;
-
-                        auto curve = _MakeBSplineCurve(
-                            cps, numCPs, edgeOrder, knots, numKnots,
-                            weights, numW);
-                        if (curve.IsNull()) { success = false; break; }
-
-                        // Check if edgeuse orientation is "opposite" → reverse
-                        bool euReversed = false;
-                        if (euIdx < data.edgeuseOrientationType.size()) {
-                            euReversed = (data.edgeuseOrientationType[euIdx]
-                                          == _tokens->opposite);
+                        // Attach an exact pcurve (3D->2D projection) so curved
+                        // analytic faces mesh. NURBS keeps legacy behaviour.
+                        if (analyticSurf) {
+                            Standard_Real f, l;
+                            Handle(Geom_Curve) c3 =
+                                BRep_Tool::Curve(edge, f, l);
+                            if (!c3.IsNull()) {
+                                Handle(Geom2d_Curve) pc =
+                                    GeomProjLib::Curve2d(c3, f, l, surface);
+                                if (!pc.IsNull()) {
+                                    BRep_Builder bb;
+                                    bb.UpdateEdge(edge, pc, surface,
+                                        TopLoc_Location(),
+                                        data.intersectTol3d);
+                                }
+                            }
                         }
-
-                        // Build edge from curve
-                        BRepBuilderAPI_MakeEdge edgeMaker(curve);
-                        if (!edgeMaker.IsDone()) { success = false; break; }
-                        TopoDS_Edge edge = edgeMaker.Edge();
-                        if (euReversed) edge.Reverse();
+                        if (euIdx < data.edgeuseOrientationType.size() &&
+                            data.edgeuseOrientationType[euIdx] ==
+                                _tokens->opposite)
+                            edge.Reverse();
                         wireMaker.Add(edge);
                     }
                     currentEU += numEU;
-
-                    if (!success || !wireMaker.IsDone()) {
-                        success = false; break;
-                    }
+                    if (!ok || !wireMaker.IsDone()) { ok = false; break; }
                     TopoDS_Wire wire = wireMaker.Wire();
 
                     if (li == 0) {
-                        // First loop = outer boundary
                         BRepBuilderAPI_MakeFace faceMaker(surface, wire,
-                                                         Standard_True);
-                        if (!faceMaker.IsDone()) { success = false; break; }
+                                                          Standard_True);
+                        if (!faceMaker.IsDone()) { ok = false; break; }
                         trimmedFace = faceMaker.Face();
+                        built = true;
                     } else {
-                        // Inner loops = holes
-                        wire.Reverse();  // Inner wires must be reversed
+                        wire.Reverse();  // inner loops = holes
                         BRepBuilderAPI_MakeFace faceMaker(trimmedFace, wire);
-                        if (!faceMaker.IsDone()) { success = false; break; }
+                        if (!faceMaker.IsDone()) { ok = false; break; }
                         trimmedFace = faceMaker.Face();
                     }
                 }
 
-                if (success && !trimmedFace.IsNull()) {
-                    // KNOWN DEFECT: faces built this way (3D-curve wires
-                    // projected onto a BSpline surface) mesh to a small
-                    // fraction of their true area (e.g. cubeWithHole's
-                    // punctured face: 12.46 of ~71.7) — the projected UV
-                    // wire is malformed. Explicit per-edge pcurve
-                    // projection (ShapeFix_Edge::FixAddPCurve) was tried
-                    // and does not help. Proper fix: implement the
-                    // schema's authored curveUv (pcurve) trimming path.
+                if (built && ok && !trimmedFace.IsNull()) {
+                    // Pole-bearing surfaces (sphere/torus) need the natural seam
+                    // + degenerate pole edges added so a cap/great-circle wire
+                    // closes.
+                    bool poleSurface =
+                        surface->IsKind(STANDARD_TYPE(Geom_SphericalSurface)) ||
+                        surface->IsKind(STANDARD_TYPE(Geom_ToroidalSurface));
                     ShapeFix_Face fix(trimmedFace);
-                    fix.FixAddNaturalBoundMode() = Standard_False;
+                    fix.FixAddNaturalBoundMode() =
+                        (analyticSurf && poleSurface) ? Standard_True
+                                                      : Standard_False;
                     fix.FixWireMode() = Standard_True;
                     fix.Perform();
                     trimmedFace = fix.Face();
-                    faces.push_back(applyFaceuseOrientation(trimmedFace, fi));
-                    faceNeedsFlip.push_back(false);
+                    BRepLib::SameParameter(trimmedFace, data.intersectTol3d);
+                    // Analytic faces are validity-checked so invalid singular
+                    // caps are skipped cleanly; NURBS keeps legacy behaviour.
+                    if (!analyticSurf ||
+                        BRepCheck_Analyzer(trimmedFace).IsValid()) {
+                        finalFace = trimmedFace;
+                        haveFace = true;
+                    }
                 }
-                continue;
+              } catch (const Standard_Failure&) {
+                  haveFace = false;   // never let an OCCT throw crash tessellation
+              }
             }
 
-            BRepBuilderAPI_MakeFace faceMaker(surface, data.intersectTol3d);
-            if (faceMaker.IsDone()) {
-                faces.push_back(
-                    applyFaceuseOrientation(faceMaker.Face(), fi));
+            // Untrimmed fallback: single-loop NURBS faces (legacy) and faces
+            // with no boundary loops fall back to natural surface bounds. Faces
+            // that had edges but failed to trim are skipped (no garbage geometry).
+            if (!haveFace && (!attemptTrim || numLoops == 0)) {
+                try {
+                    BRepBuilderAPI_MakeFace faceMaker(
+                        surface, data.intersectTol3d);
+                    if (faceMaker.IsDone()) {
+                        finalFace = faceMaker.Face();
+                        haveFace = true;
+                    }
+                } catch (const Standard_Failure&) {}
+            }
+            if (haveFace) {
+                faces.push_back(applyFaceuseOrientation(finalFace, fi));
                 faceNeedsFlip.push_back(false);
             }
         }

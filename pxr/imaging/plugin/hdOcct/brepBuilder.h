@@ -154,6 +154,19 @@ private:
         VtArray<GfVec3d> surfaceTorusRefDir;
         VtArray<double>  surfaceTorusMajorRadius;
         VtArray<double>  surfaceTorusMinorRadius;
+
+        // Analytic 3D curves for edges (line/circle/ellipse), packed per type.
+        VtArray<GfVec3d> edgeLineOrigin;
+        VtArray<GfVec3d> edgeLineDirection;
+        VtArray<GfVec3d> edgeCircleCenter;
+        VtArray<GfVec3d> edgeCircleAxis;
+        VtArray<GfVec3d> edgeCircleRefDir;
+        VtArray<double>  edgeCircleRadius;
+        VtArray<GfVec3d> edgeEllipseCenter;
+        VtArray<GfVec3d> edgeEllipseAxis;
+        VtArray<GfVec3d> edgeEllipseRefDir;
+        VtArray<double>  edgeEllipseXRadius;
+        VtArray<double>  edgeEllipseYRadius;
     };
 
     bool _ReadBrepData(const UsdPrim& prim, _BrepData* data) const;
