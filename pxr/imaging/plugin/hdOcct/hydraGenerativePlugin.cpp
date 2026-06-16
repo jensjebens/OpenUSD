@@ -32,6 +32,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     (usdSolidTessellatorData)
     (meshCount)
     (edgeCount)
+    (tangentEdgeCount)
     (points)
     (faceVertexCounts)
     (faceVertexIndices)
@@ -69,6 +70,7 @@ UsdSolidTessellationProcedural::_Tessellate(
 {
     _meshes.clear();
     _edges.clear();
+    _tangentEdges.clear();
 
     const SdfPath primPath = _GetProceduralPrimPath();
     HdSceneIndexPrim prim = inputScene->GetPrim(primPath);
@@ -177,6 +179,33 @@ UsdSolidTessellationProcedural::_Tessellate(
             _edges.push_back(std::move(edge));
         }
     }
+
+    // Unpack tangent (smooth) edge polylines (tangent_edges_<i> containers).
+    int tangentEdgeCount = 0;
+    if (auto tcDs = HdTypedSampledDataSource<int>::Cast(
+            tessDs->Get(_tokens->tangentEdgeCount))) {
+        tangentEdgeCount = tcDs->GetTypedValue(0.0f);
+    }
+    for (int i = 0; i < tangentEdgeCount; ++i) {
+        TfToken name(TfStringPrintf("tangent_edges_%d", i));
+        HdContainerDataSourceHandle tDs =
+            HdContainerDataSource::Cast(tessDs->Get(name));
+        if (!tDs) {
+            continue;
+        }
+        _EdgeData edge;
+        if (auto pDs = HdTypedSampledDataSource<VtArray<GfVec3f>>::Cast(
+                tDs->Get(_tokens->points))) {
+            edge.points = pDs->GetTypedValue(0.0f);
+        }
+        if (auto cvcDs = HdTypedSampledDataSource<VtArray<int>>::Cast(
+                tDs->Get(_tokens->curveVertexCounts))) {
+            edge.curveVertexCounts = cvcDs->GetTypedValue(0.0f);
+        }
+        if (!edge.points.empty() && !edge.curveVertexCounts.empty()) {
+            _tangentEdges.push_back(std::move(edge));
+        }
+    }
 }
 
 HdGpGenerativeProcedural::ChildPrimTypeMap
@@ -204,6 +233,11 @@ UsdSolidTessellationProcedural::Update(
             TfToken(TfStringPrintf("tessellated_edges_%zu", i)));
         result[childPath] = HdPrimTypeTokens->basisCurves;
     }
+    for (size_t i = 0; i < _tangentEdges.size(); ++i) {
+        SdfPath childPath = _GetProceduralPrimPath().AppendChild(
+            TfToken(TfStringPrintf("tessellated_tangent_edges_%zu", i)));
+        result[childPath] = HdPrimTypeTokens->basisCurves;
+    }
 
     // If previous results existed, dirty all children
     if (!previousResult.empty() && outputDirtiedPrims) {
@@ -227,20 +261,30 @@ UsdSolidTessellationProcedural::GetChildPrim(
 
     // B-rep edge polylines -> a linear HdBasisCurves child, marked purpose=guide
     // so usdview's "Display > Guides" toggles the edge overlay like a wireframe.
+    // Sharp/feature edges (dark) and tangent/smooth edges (lighter) are emitted
+    // as separate child sets so tangent edges can be toggled independently.
+    const std::string tanPrefix = "tessellated_tangent_edges_";
     const std::string edgePrefix = "tessellated_edges_";
-    if (childName.compare(0, edgePrefix.size(), edgePrefix) == 0) {
+    const bool isTangent =
+        childName.compare(0, tanPrefix.size(), tanPrefix) == 0;
+    const bool isSharp = !isTangent &&
+        childName.compare(0, edgePrefix.size(), edgePrefix) == 0;
+    if (isSharp || isTangent) {
         HdSceneIndexPrim cresult;
         cresult.primType = HdPrimTypeTokens->basisCurves;
+        const std::vector<_EdgeData> &edgeSet =
+            isTangent ? _tangentEdges : _edges;
+        const std::string &pfx = isTangent ? tanPrefix : edgePrefix;
         size_t edgeIdx = 0;
         try {
-            edgeIdx = std::stoul(childName.substr(edgePrefix.size()));
+            edgeIdx = std::stoul(childName.substr(pfx.size()));
         } catch (...) {
             return cresult;
         }
-        if (edgeIdx >= _edges.size()) {
+        if (edgeIdx >= edgeSet.size()) {
             return cresult;
         }
-        const _EdgeData &edge = _edges[edgeIdx];
+        const _EdgeData &edge = edgeSet[edgeIdx];
 
         HdContainerDataSourceHandle curveTopo =
             HdBasisCurvesTopologySchema::Builder()
@@ -268,7 +312,8 @@ UsdSolidTessellationProcedural::GetChildPrim(
                 HdPrimvarSchemaTokens->role,
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->point));
-        VtArray<GfVec3f> edgeColor(1, GfVec3f(0.05f, 0.05f, 0.05f));
+        VtArray<GfVec3f> edgeColor(1, isTangent
+            ? GfVec3f(0.5f, 0.5f, 0.55f) : GfVec3f(0.05f, 0.05f, 0.05f));
         HdContainerDataSourceHandle colorPvDs =
             HdRetainedContainerDataSource::New(
                 HdPrimvarSchemaTokens->primvarValue,
