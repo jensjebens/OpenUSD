@@ -312,8 +312,10 @@ UsdSolidTessellationProcedural::GetChildPrim(
                 HdPrimvarSchemaTokens->role,
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->point));
+        // Both edge sets are cyan, separated by ~20 deg of hue: sharp =
+        // blue-cyan (~190 deg), tangent = green-cyan (~170 deg).
         VtArray<GfVec3f> edgeColor(1, isTangent
-            ? GfVec3f(0.0f, 0.95f, 1.0f) : GfVec3f(0.05f, 0.05f, 0.05f));
+            ? GfVec3f(0.0f, 1.0f, 0.83f) : GfVec3f(0.0f, 0.83f, 1.0f));
         HdContainerDataSourceHandle colorPvDs =
             HdRetainedContainerDataSource::New(
                 HdPrimvarSchemaTokens->primvarValue,
@@ -325,10 +327,25 @@ UsdSolidTessellationProcedural::GetChildPrim(
                 HdPrimvarSchemaTokens->role,
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->color));
+        // Explicit constant line width (world units). Without an authored
+        // widths primvar Storm draws curves at a thin 1px default; this makes
+        // the edge overlay noticeably thicker / easier to read.
+        VtArray<float> edgeWidth(1, 0.1f);
+        HdContainerDataSourceHandle widthPvDs =
+            HdRetainedContainerDataSource::New(
+                HdPrimvarSchemaTokens->primvarValue,
+                HdRetainedTypedSampledDataSource<VtArray<float>>::New(
+                    edgeWidth),
+                HdPrimvarSchemaTokens->interpolation,
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    HdPrimvarSchemaTokens->constant),
+                HdPrimvarSchemaTokens->role,
+                HdRetainedTypedSampledDataSource<TfToken>::New(TfToken()));
         HdContainerDataSourceHandle primvarsDs =
             HdRetainedContainerDataSource::New(
                 HdTokens->points, pointsPvDs,
-                HdTokens->displayColor, colorPvDs);
+                HdTokens->displayColor, colorPvDs,
+                HdTokens->widths, widthPvDs);
 
         HdContainerDataSourceHandle xformDs;
         if (inputScene) {
