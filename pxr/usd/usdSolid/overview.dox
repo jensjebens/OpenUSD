@@ -15,10 +15,11 @@ Weiler's Radial Edge data model, so it can represent manifold solids,
 non-manifold solids, sheet bodies, and wireframes in a kernel-neutral form.
 
 Unlike UsdGeomMesh, which is a fixed-resolution approximation, a UsdSolid stores
-the exact source surfaces and curves (currently NURBS, in double precision) and
-can be re-tessellated to any fidelity on demand. This makes it suitable as a CAD
-reference and transport representation that maps cleanly onto PRC (ISO 14739-1),
-STEP (ISO 10303), and Parasolid topology.
+the exact source surfaces and curves -- analytic primitives (planes, cylinders,
+cones, spheres, tori; lines, circles, ellipses) alongside free-form NURBS, in
+double precision -- and can be re-tessellated to any fidelity on demand. This
+makes it suitable as a CAD reference and transport representation that maps
+cleanly onto PRC (ISO 14739-1), STEP (ISO 10303), and Parasolid topology.
 
 \note UsdSolid is an active OpenUSD proposal (AOUSD PR #109) and is not yet a
 ratified Core schema. Attribute names, packing conventions, and rules may change
