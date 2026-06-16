@@ -313,7 +313,7 @@ UsdSolidTessellationProcedural::GetChildPrim(
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->point));
         VtArray<GfVec3f> edgeColor(1, isTangent
-            ? GfVec3f(0.5f, 0.5f, 0.55f) : GfVec3f(0.05f, 0.05f, 0.05f));
+            ? GfVec3f(0.0f, 0.95f, 1.0f) : GfVec3f(0.05f, 0.05f, 0.05f));
         HdContainerDataSourceHandle colorPvDs =
             HdRetainedContainerDataSource::New(
                 HdPrimvarSchemaTokens->primvarValue,
