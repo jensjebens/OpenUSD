@@ -310,15 +310,67 @@ UsdSolidTessellationResult _ExtractMesh(
             return gp_Dir(n);
         };
 
+        // Discretize \p edge but push each vertex \p offset along the outward
+        // surface normal of \p face, so the emitted polyline floats just proud
+        // of the tessellated surface instead of z-fighting with / hiding behind
+        // it. Per-vertex (not constant) so curved edges (e.g. a hole rim) lift
+        // radially rather than translating. Falls back to the plain 3D
+        // discretization if the face has no pcurve / surface.
+        auto discretizeOffset = [&](const TopoDS_Edge& edge,
+                                    const TopoDS_Face& face,
+                                    double offset,
+                                    std::vector<GfVec3d>& pts) {
+            Standard_Real f2, l2;
+            Handle(Geom2d_Curve) pc =
+                BRep_Tool::CurveOnSurface(edge, face, f2, l2);
+            TopLoc_Location loc;
+            Handle(Geom_Surface) surf = BRep_Tool::Surface(face, loc);
+            if (pc.IsNull() || surf.IsNull()) { discretize(edge, pts); return; }
+            try {
+                BRepAdaptor_Curve curve(edge);
+                GCPnts_QuasiUniformDeflection disc(curve, deflection);
+                if (!disc.IsDone() || disc.NbPoints() < 2) {
+                    discretize(edge, pts);
+                    return;
+                }
+                const gp_Trsf& lt = loc.Transformation();
+                const bool rev = (face.Orientation() == TopAbs_REVERSED);
+                pts.reserve(disc.NbPoints());
+                for (int i = 1; i <= disc.NbPoints(); ++i) {
+                    Standard_Real t = disc.Parameter(i);
+                    gp_Pnt p3 = disc.Value(i);
+                    gp_Pnt2d uv = pc->Value(t);
+                    gp_Pnt sp; gp_Vec du, dv;
+                    surf->D1(uv.X(), uv.Y(), sp, du, dv);
+                    gp_Vec n = du.Crossed(dv);
+                    if (n.Magnitude() < 1e-12) {
+                        pts.emplace_back(p3.X(), p3.Y(), p3.Z());
+                        continue;
+                    }
+                    n.Normalize();
+                    if (rev) n.Reverse();
+                    if (!loc.IsIdentity()) n.Transform(lt);
+                    gp_Pnt po = p3.Translated(n.Multiplied(offset));
+                    pts.emplace_back(po.X(), po.Y(), po.Z());
+                }
+            } catch (const Standard_Failure&) {
+                pts.clear();
+                discretize(edge, pts);
+            }
+        };
+
         // edge -> its owning face (1:1 in the fan topology).
         TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
         TopExp::MapShapesAndAncestors(
             shape, TopAbs_EDGE, TopAbs_FACE, edgeFaceMap);
 
         struct EdgeRec {
-            std::vector<GfVec3d> pts;
+            std::vector<GfVec3d> pts;   // un-offset, used for coincidence keying
             gp_Dir normal;
             bool hasNormal = false;
+            TopoDS_Edge edge;
+            TopoDS_Face face;
+            bool hasFace = false;
         };
         std::vector<EdgeRec> recs;
         std::map<std::string, std::vector<size_t>> groups;  // geom-key -> recs
@@ -350,11 +402,14 @@ UsdSolidTessellationResult _ExtractMesh(
             EdgeRec rec;
             discretize(edge, rec.pts);
             if (rec.pts.size() < 2) continue;
+            rec.edge = edge;
             if (edgeFaceMap.Contains(edge)) {
                 const TopTools_ListOfShape& faces = edgeFaceMap.FindFromKey(edge);
                 if (!faces.IsEmpty()) {
+                    rec.face = TopoDS::Face(faces.First());
+                    rec.hasFace = true;
                     rec.normal = faceNormalAtEdgeMid(
-                        edge, TopoDS::Face(faces.First()), rec.hasNormal);
+                        edge, rec.face, rec.hasNormal);
                 }
             }
             size_t idx = recs.size();
@@ -364,6 +419,9 @@ UsdSolidTessellationResult _ExtractMesh(
 
         // Tangent if the two owning faces meet at a near-zero dihedral.
         const double tangentTol = 0.15;  // radians (~8.6 deg)
+        // Lift the emitted edges this far along the outward normal. Scaled to
+        // the tessellation deflection so it always clears the facet chord error.
+        const double edgeOffset = 1.5 * deflection;
         for (const auto& kv : groups) {
             const std::vector<size_t>& ids = kv.second;
             const EdgeRec& a = recs[ids[0]];
@@ -379,8 +437,13 @@ UsdSolidTessellationResult _ExtractMesh(
                 : result.edgeCurveVertexCounts;
             VtArray<GfVec3d>& points = tangent
                 ? result.tangentEdgePoints : result.edgePoints;
-            counts.push_back((int)a.pts.size());
-            for (const auto& p : a.pts) points.push_back(p);
+            std::vector<GfVec3d> outPts;
+            if (a.hasFace) {
+                discretizeOffset(a.edge, a.face, edgeOffset, outPts);
+            }
+            if (outPts.size() < 2) outPts = a.pts;  // fall back to un-offset
+            counts.push_back((int)outPts.size());
+            for (const auto& p : outPts) points.push_back(p);
         }
     }
 

@@ -312,10 +312,8 @@ UsdSolidTessellationProcedural::GetChildPrim(
                 HdPrimvarSchemaTokens->role,
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->point));
-        // Both edge sets are cyan, separated by ~20 deg of hue: sharp =
-        // blue-cyan (~190 deg), tangent = green-cyan (~170 deg).
-        VtArray<GfVec3f> edgeColor(1, isTangent
-            ? GfVec3f(0.0f, 1.0f, 0.83f) : GfVec3f(0.0f, 0.83f, 1.0f));
+        // Dark grey for all edges (sharp and tangent alike).
+        VtArray<GfVec3f> edgeColor(1, GfVec3f(0.15f, 0.15f, 0.15f));
         HdContainerDataSourceHandle colorPvDs =
             HdRetainedContainerDataSource::New(
                 HdPrimvarSchemaTokens->primvarValue,

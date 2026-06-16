@@ -130,6 +130,30 @@ private:
         VtArray<double> surfaceUKnots;
         VtArray<double> surfaceVKnots;
         VtArray<double> surfaceWeights;
+
+        // Analytic surfaces (BrepSurfaceCylinderAPI; more types to follow).
+        // Each array is packed in order used by faces of that surface type.
+        VtArray<GfVec3d> surfaceCylinderOrigin;
+        VtArray<GfVec3d> surfaceCylinderAxis;
+        VtArray<GfVec3d> surfaceCylinderRefDir;
+        VtArray<double>  surfaceCylinderRadius;
+        VtArray<GfVec3d> surfacePlaneOrigin;
+        VtArray<GfVec3d> surfacePlaneAxis;
+        VtArray<GfVec3d> surfacePlaneRefDir;
+        VtArray<GfVec3d> surfaceConeOrigin;
+        VtArray<GfVec3d> surfaceConeAxis;
+        VtArray<GfVec3d> surfaceConeRefDir;
+        VtArray<double>  surfaceConeRadius;
+        VtArray<double>  surfaceConeSemiAngle;
+        VtArray<GfVec3d> surfaceSphereCenter;
+        VtArray<GfVec3d> surfaceSphereAxis;
+        VtArray<GfVec3d> surfaceSphereRefDir;
+        VtArray<double>  surfaceSphereRadius;
+        VtArray<GfVec3d> surfaceTorusOrigin;
+        VtArray<GfVec3d> surfaceTorusAxis;
+        VtArray<GfVec3d> surfaceTorusRefDir;
+        VtArray<double>  surfaceTorusMajorRadius;
+        VtArray<double>  surfaceTorusMinorRadius;
     };
 
     bool _ReadBrepData(const UsdPrim& prim, _BrepData* data) const;

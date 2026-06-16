@@ -18,6 +18,13 @@
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Geom_SphericalSurface.hxx>
+#include <Geom_ToroidalSurface.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Dir.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <gp_Pnt.hxx>
 #include <ShapeFix_Shape.hxx>
@@ -385,6 +392,12 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
     _GetAttr("brep:surface:nurb:weights",
              data->surfaceWeights);
 
+    // Analytic cylinder surfaces (BrepSurfaceCylinderAPI)
+    _GetAttr("brep:surface:cylinder:origin", data->surfaceCylinderOrigin);
+    _GetAttr("brep:surface:cylinder:axis", data->surfaceCylinderAxis);
+    _GetAttr("brep:surface:cylinder:refDirection", data->surfaceCylinderRefDir);
+    _GetAttr("brep:surface:cylinder:radius", data->surfaceCylinderRadius);
+
     return !data->regionCount.empty();
 }
 
@@ -453,53 +466,60 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     }
 
     // Build OCCT surfaces for each face
-    std::vector<Handle(Geom_BSplineSurface)> surfaces;
+    std::vector<Handle(Geom_Surface)> surfaces;
     surfaces.reserve(numFaces);
 
-    size_t surfCPOffset = 0;
-    size_t surfUKnotOffset = 0;
-    size_t surfVKnotOffset = 0;
-    size_t surfWeightOffset = 0;
+    // Surface arrays are packed per surface TYPE (NURBS faces in the nurb
+    // arrays, cylinder faces in the cylinder arrays, ...). Walk faces in order,
+    // dispatch on face:surfaceType, and advance the matching per-type offsets.
+    // Faces before faceStart (earlier Breps) still advance the offsets.
+    size_t surfCPOffset = 0, surfUKnotOffset = 0, surfVKnotOffset = 0,
+           surfWeightOffset = 0;   // NURBS packing offsets
+    size_t nurbFace = 0, cylFace = 0;   // per-type element counters
 
-    // Skip surfaces before faceStart
-    for (size_t i = 0; i < faceStart && i < data.surfaceUVertexCount.size(); ++i) {
-        int uCnt = data.surfaceUVertexCount[i];
-        int vCnt = data.surfaceVVertexCount[i];
-        surfCPOffset += uCnt * vCnt;
-        surfUKnotOffset += uCnt + data.surfaceUOrder[i];
-        surfVKnotOffset += vCnt + data.surfaceVOrder[i];
-        surfWeightOffset += uCnt * vCnt;
-    }
+    for (size_t faceIdx = 0;
+         faceIdx < faceStart + numFaces &&
+         faceIdx < data.faceSurfaceType.size(); ++faceIdx) {
+        const TfToken& stype = data.faceSurfaceType[faceIdx];
+        Handle(Geom_Surface) surf;
 
-    for (size_t fi = 0; fi < numFaces; ++fi) {
-        size_t faceIdx = faceStart + fi;
-        if (faceIdx >= data.surfaceUVertexCount.size()) break;
+        if (stype.GetString() == "BrepSurfaceCylinderAPI") {
+            if (cylFace < data.surfaceCylinderRadius.size() &&
+                cylFace < data.surfaceCylinderOrigin.size()) {
+                const GfVec3d& o  = data.surfaceCylinderOrigin[cylFace];
+                const GfVec3d& ax = data.surfaceCylinderAxis[cylFace];
+                const GfVec3d& rd = data.surfaceCylinderRefDir[cylFace];
+                gp_Ax3 ax3(gp_Pnt(o[0], o[1], o[2]),
+                           gp_Dir(ax[0], ax[1], ax[2]),
+                           gp_Dir(rd[0], rd[1], rd[2]));
+                surf = new Geom_CylindricalSurface(
+                    ax3, data.surfaceCylinderRadius[cylFace]);
+            }
+            ++cylFace;
+        } else {
+            // BrepSurfaceNurbAPI (default)
+            if (nurbFace < data.surfaceUVertexCount.size()) {
+                int uCnt = data.surfaceUVertexCount[nurbFace];
+                int vCnt = data.surfaceVVertexCount[nurbFace];
+                int uOrd = data.surfaceUOrder[nurbFace];
+                int vOrd = data.surfaceVOrder[nurbFace];
+                int numUKnots = uCnt + uOrd, numVKnots = vCnt + vOrd;
+                int numCPs = uCnt * vCnt;
+                const GfVec3d* cps = data.surfaceControlVertices.cdata() + surfCPOffset;
+                const double* uKnots = data.surfaceUKnots.cdata() + surfUKnotOffset;
+                const double* vKnots = data.surfaceVKnots.cdata() + surfVKnotOffset;
+                const double* weights = (!data.surfaceWeights.empty())
+                    ? data.surfaceWeights.cdata() + surfWeightOffset : nullptr;
+                int numW = (!data.surfaceWeights.empty()) ? numCPs : 0;
+                surf = _MakeBSplineSurface(cps, uCnt, vCnt, uOrd, vOrd,
+                    uKnots, numUKnots, vKnots, numVKnots, weights, numW);
+                surfCPOffset += numCPs; surfUKnotOffset += numUKnots;
+                surfVKnotOffset += numVKnots; surfWeightOffset += numCPs;
+            }
+            ++nurbFace;
+        }
 
-        int uCnt = data.surfaceUVertexCount[faceIdx];
-        int vCnt = data.surfaceVVertexCount[faceIdx];
-        int uOrd = data.surfaceUOrder[faceIdx];
-        int vOrd = data.surfaceVOrder[faceIdx];
-        int numUKnots = uCnt + uOrd;
-        int numVKnots = vCnt + vOrd;
-        int numCPs = uCnt * vCnt;
-
-        const GfVec3d* cps = data.surfaceControlVertices.cdata() + surfCPOffset;
-        const double* uKnots = data.surfaceUKnots.cdata() + surfUKnotOffset;
-        const double* vKnots = data.surfaceVKnots.cdata() + surfVKnotOffset;
-        const double* weights = (!data.surfaceWeights.empty())
-            ? data.surfaceWeights.cdata() + surfWeightOffset : nullptr;
-        int numW = (!data.surfaceWeights.empty()) ? numCPs : 0;
-
-        auto surface = _MakeBSplineSurface(
-            cps, uCnt, vCnt, uOrd, vOrd,
-            uKnots, numUKnots, vKnots, numVKnots,
-            weights, numW);
-        surfaces.push_back(surface);
-
-        surfCPOffset += numCPs;
-        surfUKnotOffset += numUKnots;
-        surfVKnotOffset += numVKnots;
-        surfWeightOffset += numCPs;
+        if (faceIdx >= faceStart) surfaces.push_back(surf);
     }
 
     // Build faces as untrimmed NURBS surfaces.
@@ -774,9 +794,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
 
             int numLoops = data.faceLoopCount[faceIdx];
 
-            Handle(Geom_BSplineSurface) surface =
+            Handle(Geom_Surface) surface =
                 (fi < surfaces.size()) ? surfaces[fi]
-                                       : Handle(Geom_BSplineSurface)();
+                                       : Handle(Geom_Surface)();
 
             if (surface.IsNull()) {
                 for (int li = 0; li < numLoops; ++li) {
