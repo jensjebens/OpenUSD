@@ -32,6 +32,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     (usdSolidTessellatorData)
     (meshCount)
     (edgeCount)
+    (tangentEdgeCount)
     (points)
     (faceVertexCounts)
     (faceVertexIndices)
@@ -193,6 +194,27 @@ _BuildTessellationDataSource(const UsdPrim &prim)
                 TfToken(TfStringPrintf("edges_%zu", i)));
             meshDataSources.push_back(edgeDs);
         }
+
+        // Tangent (smooth) edges -> a parallel tangent_edges_<i> container,
+        // emitted as a separate, independently toggleable curve child.
+        if (!result.tangentEdgePoints.empty()) {
+            VtArray<GfVec3f> tpts(result.tangentEdgePoints.size());
+            for (size_t j = 0; j < result.tangentEdgePoints.size(); ++j) {
+                const GfVec3d& p = result.tangentEdgePoints[j];
+                tpts[j] = GfVec3f((float)p[0], (float)p[1], (float)p[2]);
+            }
+            HdContainerDataSourceHandle tDs =
+                HdRetainedContainerDataSource::New(
+                    _tokens->points,
+                    HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                        tpts),
+                    _tokens->curveVertexCounts,
+                    HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                        result.tangentEdgeCurveVertexCounts));
+            meshNames.push_back(
+                TfToken(TfStringPrintf("tangent_edges_%zu", i)));
+            meshDataSources.push_back(tDs);
+        }
     }
 
     // Add mesh count
@@ -204,6 +226,12 @@ _BuildTessellationDataSource(const UsdPrim &prim)
     // Edge-group count (parallel to mesh count; edges_<i> may be absent when
     // a Brep produced no drawable edges).
     meshNames.push_back(_tokens->edgeCount);
+    meshDataSources.push_back(
+        HdRetainedTypedSampledDataSource<int>::New(
+            (int)goodResults.size()));
+
+    // Tangent-edge-group count (parallel; tangent_edges_<i> may be absent).
+    meshNames.push_back(_tokens->tangentEdgeCount);
     meshDataSources.push_back(
         HdRetainedTypedSampledDataSource<int>::New(
             (int)goodResults.size()));
