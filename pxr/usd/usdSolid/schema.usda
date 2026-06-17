@@ -815,6 +815,15 @@ class "BrepSurfaceConeAPI" (
     The surface normal points outward (away from the axis).
     The face:range attribute provides the UV trim domain bounds in radians (u) and linear units (v).
 
+    Convention note (v-parameter): this v is the AXIAL height (radius grows as
+    tan(semiAngle), axial term + v * axis), matching the STEP/PRC convention. It
+    DIFFERS from OpenCascade's Geom_ConicalSurface, whose V is the SLANT distance
+    along the generatrix (radius grows as sin(semiAngle), axial as cos(semiAngle)).
+    A consumer that maps this surface onto OCCT must rescale V_occt = v / cos(semiAngle);
+    the same applies to face:range v. Authored brep:curveUv pcurves, by contrast, are
+    expressed in the consuming surface's native parameterization (i.e. OCCT slant for an
+    OCCT-based tessellator), not this axial v.
+
     Both PRC and SMLib define the cone with an axis placement, base radius, and semi-angle.
     PRC uses radians for the angular parameter; SMLib (SmCone) uses degrees internally
     but this schema normalizes to radians.
