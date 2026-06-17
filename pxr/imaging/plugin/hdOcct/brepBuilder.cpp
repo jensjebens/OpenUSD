@@ -336,6 +336,7 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
     _GetAttr("edgeuse:edgeIndex", data->edgeuseEdgeIndex);
     _GetAttr("edgeuse:orientationType", data->edgeuseOrientationType);
     _GetAttr("faceuse:orientationType", data->faceuseOrientationType);
+    _GetAttr("faceuse:faceIndex", data->faceuseFaceIndex);
     _GetAttr("edgeuse:nextRadialEUIndex", data->edgeuseNextRadialEUIndex);
 
     // Edge
@@ -623,23 +624,74 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     faces.reserve(numFaces);
     faceNeedsFlip.reserve(numFaces);
 
-    // Orient each face from the authored radial-edge data: the first faceuse
-    // of each face's pair is the outward (solid-exterior) side. "opposite"
-    // means outward points against the surface's natural normal, so mark the
-    // face REVERSED and let the tessellator flip winding/normals from
-    // face.Orientation(). (Convention verified against the cube fixture:
-    // its x=0 face has natural normal +X, outward -X, faceuse pair
-    // ["opposite", "same"].)
+    // Orient each face from the authored radial-edge data. "opposite" means the
+    // solid-exterior (outward) normal points against the surface's natural
+    // normal, so mark the face REVERSED and let the tessellator derive
+    // winding/normals from face.Orientation(). Set absolutely (not a
+    // conditional flip): face construction (ShapeFix_Face / MakeFace-with-wires)
+    // may itself leave the face REVERSED, and the authored data is the single
+    // source of truth.
+    //
+    // Two faceuse layouts occur in the wild:
+    //  (A) A single solidRegion shell with each face's two faceuses stored
+    //      consecutively (interleaved) and no faceuse:faceIndex. The first
+    //      faceuse of the pair (index 2*fi) is the outward reference. (Verified
+    //      against the cube fixture: x=0 face natural normal +X, outward -X,
+    //      faceuse pair ["opposite","same"].) This is the hand-authored layout.
+    //  (B) Separate voidRegion + solidRegion shells with faceuses grouped by
+    //      shell plus an explicit faceuse:faceIndex map (CAD producers, e.g.
+    //      hoops-converter). Here 2*fi straddles both shells and mis-orients
+    //      half the faces, collapsing closed solids to ~0 signed volume. Use
+    //      the faceuse bounding the VOID region's shell (the solid's exterior
+    //      side) as the outward reference, so the same opposite->REVERSED rule
+    //      as (A) applies and normals point outward.
+    std::vector<int> faceOutwardOpposite(numFaces, -1);   // -1 = unknown
+    {
+        bool hasVoid = false, hasSolid = false;
+        for (size_t ri = regionStart; ri < regionStart + numRegions &&
+                                      ri < data.regionType.size(); ++ri) {
+            if (data.regionType[ri] == _tokens->voidRegion)  hasVoid = true;
+            if (data.regionType[ri] == _tokens->solidRegion) hasSolid = true;
+        }
+        if (hasVoid && hasSolid && !data.faceuseFaceIndex.empty()) {
+            // Layout (B): walk this Brep's shells and record the outward
+            // orientation for each face from the faceuse bounding the voidRegion
+            // shell (the solid's exterior side).
+            size_t fu = faceuseStart, shellIdx = shellStart;
+            for (size_t ri = regionStart; ri < regionStart + numRegions; ++ri) {
+                const bool isVoid = ri < data.regionType.size() &&
+                                    data.regionType[ri] == _tokens->voidRegion;
+                const size_t nShells = ri < data.regionShellCount.size()
+                                       ? data.regionShellCount[ri] : 0;
+                for (size_t s = 0; s < nShells; ++s, ++shellIdx) {
+                    const size_t nfu = shellIdx < data.shellFaceuseCount.size()
+                                       ? data.shellFaceuseCount[shellIdx] : 0;
+                    for (size_t j = 0; j < nfu; ++j, ++fu) {
+                        if (!isVoid || fu >= data.faceuseFaceIndex.size())
+                            continue;
+                        const size_t fl =
+                            (size_t)data.faceuseFaceIndex[fu] - faceStart;
+                        if (fl < numFaces)
+                            faceOutwardOpposite[fl] =
+                                (fu < data.faceuseOrientationType.size() &&
+                                 data.faceuseOrientationType[fu] ==
+                                     _tokens->opposite) ? 1 : 0;
+                    }
+                }
+            }
+        }
+    }
     auto applyFaceuseOrientation = [&](TopoDS_Face face, size_t fi) {
-        const size_t fu = faceuseStart + 2 * fi;
-        // Set absolutely (not conditionally flip): face construction
-        // (ShapeFix_Face / MakeFace-with-wires) may itself leave the face
-        // REVERSED, and the authored data is the single source of truth.
-        const bool outwardOpposite =
-            fu < data.faceuseOrientationType.size() &&
-            data.faceuseOrientationType[fu] == "opposite";
-        face.Orientation(
-            outwardOpposite ? TopAbs_REVERSED : TopAbs_FORWARD);
+        bool outwardOpposite;
+        if (fi < faceOutwardOpposite.size() && faceOutwardOpposite[fi] >= 0) {
+            outwardOpposite = (faceOutwardOpposite[fi] == 1);    // layout (B)
+        } else {
+            const size_t fu = faceuseStart + 2 * fi;             // layout (A)
+            outwardOpposite =
+                fu < data.faceuseOrientationType.size() &&
+                data.faceuseOrientationType[fu] == _tokens->opposite;
+        }
+        face.Orientation(outwardOpposite ? TopAbs_REVERSED : TopAbs_FORWARD);
         return face;
     };
 

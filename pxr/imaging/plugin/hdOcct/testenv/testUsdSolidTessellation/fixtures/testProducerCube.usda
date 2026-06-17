@@ -1,0 +1,70 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    doc = """Producer-style BrepArray test fixture (radial-edge "layout B").
+    The same 10x10x10 box as testCube, but encoded the way CAD producers
+    (e.g. hoops-converter) emit solids: a voidRegion + solidRegion pair whose
+    faceuses are grouped by shell with an explicit faceuse:faceIndex map, and
+    NO curveUv (faces are bounded by 3D edges; single-loop faces tessellate
+    untrimmed). Regression for the face-orientation bug where reading the
+    outward orientation at faceuse index 2*fi straddles the two shells and
+    mis-orients half the faces, collapsing a closed solid to ~0 signed volume.
+    Expected volume: 1000 (POSITIVE => outward normals)
+    Expected face count: 6"""
+)
+
+def Xform "World"
+{
+    def BrepArray "Cube"
+    {
+        # Topology -- producer layout: voidRegion + solidRegion, faceuses grouped by shell
+        uniform uint[] brep:regionCount = [2]
+        uniform uint[] region:shellCount = [1, 1]
+        uniform token[] region:type = ["voidRegion", "solidRegion"]
+        uniform uint[] shell:faceuseCount = [6, 6]
+        uniform uint[] shell:wireEdgeCount = [0, 0]
+        uniform uint[] face:loopCount = [1, 1, 1, 1, 1, 1]
+        uniform token[] face:surfaceType = ["BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI"]
+        uniform token[] face:trimType = ["general", "general", "general", "general", "general", "general"]
+        uniform double2[] face:range = [(0, 10), (-10, 0), (0, 10), (-10, 0), (0, 10), (0, 10), (0, 10), (0, 10), (0, 10), (0, 10), (0, 10), (0, 10)]
+        uniform uint[] loop:edgeuseCount = [4, 4, 4, 4, 4, 4]
+        uniform uint[] loop:vertexIndex = [1, 4, 1, 7, 1, 2]
+        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3, 4, 5, 6, 7, 8, 4, 9, 0, 10, 6, 11, 2, 3, 10, 7, 8, 1, 11, 5, 9]
+        uniform token[] edgeuse:orientationType = ["same", "same", "opposite", "opposite", "opposite", "opposite", "same", "same", "same", "same", "opposite", "opposite", "opposite", "opposite", "same", "same", "same", "same", "opposite", "opposite", "opposite", "opposite", "same", "same"]
+        # Faceuses grouped by shell: 6 voidRegion faceuses, then 6 solidRegion faceuses.
+        # faceuse:faceIndex maps each faceuse to its face. The voidRegion faceuse
+        # (solid-exterior side) gives each face's outward orientation.
+        uniform token[] faceuse:orientationType = ["opposite", "same", "opposite", "same", "opposite", "same", "same", "opposite", "same", "opposite", "same", "opposite"]
+        uniform uint[] faceuse:faceIndex = [0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5]
+
+        # Edge topology
+        uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
+        uniform double[] edge:range = [0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10]
+        uniform int2[] edge:vertexIndices = [(1, 0), (0, 2), (2, 3), (3, 1), (4, 5), (6, 4), (7, 6), (5, 7), (1, 5), (4, 0), (7, 3), (2, 6)]
+
+        # Vertex positions
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 10), (0, 0, 0), (0, 10, 10), (0, 10, 0), (10, 0, 10), (10, 0, 0), (10, 10, 10), (10, 10, 0)]
+
+        # NURBS surfaces
+        uniform uint[] brep:surface:nurb:uVertexCount = [2, 2, 2, 2, 2, 2]
+        uniform uint[] brep:surface:nurb:vVertexCount = [2, 2, 2, 2, 2, 2]
+        uniform uint[] brep:surface:nurb:uOrder = [2, 2, 2, 2, 2, 2]
+        uniform uint[] brep:surface:nurb:vOrder = [2, 2, 2, 2, 2, 2]
+        uniform double[] brep:surface:nurb:uKnots = [0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10]
+        uniform double[] brep:surface:nurb:vKnots = [-10, -10, 0, 0, -10, -10, 0, 0, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10]
+        uniform point3d[] brep:surface:nurb:controlVertices = [(0, 10, 0), (0, 0, 0), (0, 10, 10), (0, 0, 10), (10, 10, 0), (10, 0, 0), (10, 10, 10), (10, 0, 10), (0, 0, 0), (10, 0, 0), (0, 0, 10), (10, 0, 10), (0, 10, 0), (10, 10, 0), (0, 10, 10), (10, 10, 10), (0, 0, 0), (0, 10, 0), (10, 0, 0), (10, 10, 0), (0, 0, 10), (0, 10, 10), (10, 0, 10), (10, 10, 10)]
+        uniform double[] brep:surface:nurb:weights = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+        # NURBS 3D edge curves
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10]
+        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(0, 0, 0), (0, 0, 10), (0, 0, 10), (0, 10, 10), (0, 10, 0), (0, 10, 10), (0, 0, 0), (0, 10, 0), (10, 0, 0), (10, 0, 10), (10, 0, 10), (10, 10, 10), (10, 10, 0), (10, 10, 10), (10, 0, 0), (10, 10, 0), (0, 0, 0), (10, 0, 0), (0, 0, 10), (10, 0, 10), (0, 10, 0), (10, 10, 0), (0, 10, 10), (10, 10, 10)]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+        # Tolerance
+        uniform double[] brep:intersectTol3d = [1e-6]
+    }
+}

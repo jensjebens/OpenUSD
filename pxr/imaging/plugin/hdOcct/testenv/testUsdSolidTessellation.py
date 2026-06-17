@@ -44,6 +44,7 @@ EXPECTED_VERT_COUNTS = {
     'testPlaneWithHole.usda': 33,
     'testSphere.usda': 653,
     'testTwoBoxes.usda': 48,
+    'testProducerCube.usda': 24,
 }
 
 PRIM_PATHS = {
@@ -66,6 +67,7 @@ PRIM_PATHS = {
     'testAnalyticCylinderEdges.usda': '/World/CylEdge',
     'testAnalyticConeEdges.usda': '/World/ConeEdge',
     'testFullSphere.usda': '/World/FullSphere',
+    'testProducerCube.usda': '/World/Cube',
 }
 
 # Closed solids: signed volume must be positive (outward winding).
@@ -78,6 +80,7 @@ CLOSED_SOLIDS = [
     'testFilletedCubeWithHole.usda',
     'testSphere.usda',
     'testTwoBoxes.usda',
+    'testProducerCube.usda',
 ]
 
 # Analytic-surface fixtures -> (expected meshed area, absolute tolerance).
@@ -221,13 +224,19 @@ class TestTessellationVertexCounts(unittest.TestCase):
     def test_TwoBoxes(self):
         self._check_fixture('testTwoBoxes.usda')
 
+    def test_ProducerCube(self):
+        self._check_fixture('testProducerCube.usda')
+
 
 class TestTessellationWindingOrder(unittest.TestCase):
     """Signed volume is positive for closed solids.
 
-    Winding and normals are driven by the authored
-    faceuse:orientationType (first faceuse of each face's pair = the
-    outward side), so outward orientation is exact, not heuristic.
+    Winding and normals are driven by the authored faceuse:orientationType.
+    For the hand-authored fixtures (single solidRegion shell, interleaved
+    faceuses) the first faceuse of each face's pair is the outward side; for
+    producer fixtures (voidRegion + solidRegion shells, faceuses grouped by
+    shell with faceuse:faceIndex) the voidRegion faceuse is the outward side.
+    Either way outward orientation is exact, not heuristic.
     """
 
     def _check_winding(self, fixture_name):
@@ -259,6 +268,22 @@ class TestTessellationWindingOrder(unittest.TestCase):
 
     def test_TwoBoxes(self):
         self._check_winding('testTwoBoxes.usda')
+
+    def test_ProducerCube(self):
+        # Producer radial-edge layout (voidRegion + solidRegion, faceuses
+        # grouped by shell): the 10x10x10 box must keep outward winding AND its
+        # full volume. The legacy 2*fi orientation lookup straddles the two
+        # shells here and mis-orients half the faces, collapsing the signed
+        # volume toward zero -- so assert the magnitude, not just the sign.
+        stage = _tessellate_fixture('testProducerCube.usda')
+        for mesh in _meshes(stage):
+            vol = _signed_volume(mesh.GetPointsAttr().Get(),
+                                 mesh.GetFaceVertexCountsAttr().Get(),
+                                 mesh.GetFaceVertexIndicesAttr().Get())
+            self.assertAlmostEqual(
+                vol, 1000.0, delta=1.0,
+                msg=f"testProducerCube: signed volume {vol} != 1000 "
+                    f"(orientation/closure error)")
 
 
 class TestTessellationMeshProperties(unittest.TestCase):
