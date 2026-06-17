@@ -867,6 +867,34 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
               }
             }
 
+            // Parametric fallback for analytic faces whose 3D-edge wire cannot
+            // bound the patch — pole-enclosing or seam-encoded faces, e.g. a full
+            // sphere whose only edge is a pole-to-pole meridian seam, a spherical
+            // cap or apex cone that includes a pole. Build the face from the
+            // authored face:range UV bounds; OCCT supplies the seam + degenerate
+            // pole edges that a wire alone cannot express. (Common in real CAD:
+            // producers trim analytic faces with 3D edges and no curveUv.)
+            if (!haveFace && analyticSurf &&
+                2 * faceIdx + 1 < data.faceRange.size()) {
+                const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
+                const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
+                if (uvHi[0] > uvLo[0] && uvHi[1] > uvLo[1]) {
+                    try {
+                        BRepBuilderAPI_MakeFace pf(surface, uvLo[0], uvHi[0],
+                            uvLo[1], uvHi[1], data.intersectTol3d);
+                        if (pf.IsDone()) {
+                            ShapeFix_Face fx(pf.Face());
+                            fx.Perform();
+                            TopoDS_Face pff = fx.Face();
+                            if (BRepCheck_Analyzer(pff).IsValid()) {
+                                finalFace = pff;
+                                haveFace = true;
+                            }
+                        }
+                    } catch (const Standard_Failure&) {}
+                }
+            }
+
             // Untrimmed fallback: single-loop NURBS faces (legacy) and faces
             // with no boundary loops fall back to natural surface bounds. Faces
             // that had edges but failed to trim are skipped (no garbage geometry).

@@ -65,6 +65,7 @@ PRIM_PATHS = {
     'testAnalyticTorus.usda': '/World/AnTorus',
     'testAnalyticCylinderEdges.usda': '/World/CylEdge',
     'testAnalyticConeEdges.usda': '/World/ConeEdge',
+    'testFullSphere.usda': '/World/FullSphere',
 }
 
 # Closed solids: signed volume must be positive (outward winding).
@@ -97,6 +98,11 @@ ANALYTIC_AREA_FIXTURES = {
     'testAnalyticTorus.usda':         (203.22, 6.0),
     'testAnalyticCylinderEdges.usda': (70.686, 2.5),
     'testAnalyticConeEdges.usda':     (25.28, 1.5),
+    # Full sphere (r=2) encoded as a producer does it: one face whose only edge is
+    # a pole-to-pole meridian SEAM, no curveUv, face:range = the full sphere. The
+    # 3D-edge wire cannot bound a pole-enclosing patch, so this exercises the
+    # parametric face:range fallback (OCCT adds the seam + degenerate pole edges).
+    'testFullSphere.usda':            (4.0 * math.pi * 4.0, 2.0),
 }
 
 
@@ -433,6 +439,11 @@ class TestAnalyticSurfaceArea(unittest.TestCase):
 
     def test_AnalyticConeEdges(self):
         self._check_area('testAnalyticConeEdges.usda')
+
+    def test_FullSphere(self):
+        # Pole-enclosing analytic face (full sphere via meridian seam, no
+        # curveUv) -> parametric face:range fallback. Common in real CAD output.
+        self._check_area('testFullSphere.usda')
 
 
 if __name__ == '__main__':
