@@ -645,6 +645,13 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     //      the faceuse bounding the VOID region's shell (the solid's exterior
     //      side) as the outward reference, so the same opposite->REVERSED rule
     //      as (A) applies and normals point outward.
+    //  (C) A void-ONLY body (voidRegion with no solidRegion -- e.g. CATIA
+    //      solids via hoops-converter). Faceuses are interleaved coedge pairs,
+    //      but the producer's pair ORDER varies between bodies, so the fixed
+    //      2*fi pick (A) flips ('opposite','same')-first bodies entirely
+    //      inward. Pick by CONTENT: the 'same' coedge of each pair is the
+    //      outward (FORWARD) reference; REVERSE only when both coedges of the
+    //      face are 'opposite'.
     std::vector<int> faceOutwardOpposite(numFaces, -1);   // -1 = unknown
     {
         bool hasVoid = false, hasSolid = false;
@@ -679,12 +686,29 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     }
                 }
             }
+        } else if (hasVoid && !hasSolid) {
+            // Layout (C): void-only body -- pick each face's outward
+            // orientation by CONTENT from its interleaved coedge pair, since
+            // the producer's pair order varies. Default to the 'same' coedge
+            // as FORWARD; REVERSE only when both coedges are 'opposite'.
+            for (size_t fi = 0; fi < numFaces; ++fi) {
+                const size_t f0 = faceuseStart + 2 * fi, f1 = f0 + 1;
+                if (f1 >= data.faceuseOrientationType.size()) break;
+                if (!data.faceuseFaceIndex.empty() &&
+                    f1 < data.faceuseFaceIndex.size() &&
+                    data.faceuseFaceIndex[f0] != data.faceuseFaceIndex[f1])
+                    continue;   // {f0,f1} not this face's interleaved pair
+                faceOutwardOpposite[fi] =
+                    (data.faceuseOrientationType[f0] == _tokens->opposite &&
+                     data.faceuseOrientationType[f1] == _tokens->opposite)
+                        ? 1 : 0;
+            }
         }
     }
     auto applyFaceuseOrientation = [&](TopoDS_Face face, size_t fi) {
         bool outwardOpposite;
         if (fi < faceOutwardOpposite.size() && faceOutwardOpposite[fi] >= 0) {
-            outwardOpposite = (faceOutwardOpposite[fi] == 1);    // layout (B)
+            outwardOpposite = (faceOutwardOpposite[fi] == 1);    // (B)/(C)
         } else {
             const size_t fu = faceuseStart + 2 * fi;             // layout (A)
             outwardOpposite =

@@ -68,6 +68,7 @@ PRIM_PATHS = {
     'testAnalyticConeEdges.usda': '/World/ConeEdge',
     'testFullSphere.usda': '/World/FullSphere',
     'testProducerCube.usda': '/World/Cube',
+    'testVoidOnlySphere.usda': '/World/VoidSphere',
 }
 
 # Closed solids: signed volume must be positive (outward winding).
@@ -284,6 +285,23 @@ class TestTessellationWindingOrder(unittest.TestCase):
                 vol, 1000.0, delta=1.0,
                 msg=f"testProducerCube: signed volume {vol} != 1000 "
                     f"(orientation/closure error)")
+
+    def test_VoidOnlySphere(self):
+        # Void-only body (voidRegion, no solidRegion) whose interleaved coedge
+        # pair is ordered ("opposite","same"). The fixed faceuse[2*fi] lookup
+        # reads "opposite" and flips the whole sphere inward; the content-based
+        # pick (layout C) keeps it outward. Expect a positive, sphere-sized
+        # signed volume (4/3*pi*2^3 ~= 33.5, meshed slightly under).
+        stage = _tessellate_fixture('testVoidOnlySphere.usda')
+        for mesh in _meshes(stage):
+            vol = _signed_volume(mesh.GetPointsAttr().Get(),
+                                 mesh.GetFaceVertexCountsAttr().Get(),
+                                 mesh.GetFaceVertexIndicesAttr().Get())
+            self.assertGreater(
+                vol, 20.0,
+                msg=f"testVoidOnlySphere: signed volume {vol} -- expected "
+                    f"~33.5 outward; <=0 means the layout-C void-only "
+                    f"orientation regressed (flipped inward)")
 
 
 class TestTessellationMeshProperties(unittest.TestCase):
