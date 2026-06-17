@@ -85,6 +85,7 @@ private:
         VtArray<unsigned int> edgeuseEdgeIndex;
         VtArray<TfToken> edgeuseOrientationType;
         VtArray<TfToken> faceuseOrientationType;
+        VtArray<unsigned int> faceuseFaceIndex;
         VtArray<unsigned int> edgeuseNextRadialEUIndex;
 
         // Edge
