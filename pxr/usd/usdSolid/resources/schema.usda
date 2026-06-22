@@ -38,17 +38,12 @@ class BrepArray  "BrepArray" (
 ) {
     uniform double[]  brep:intersectTol3d        ( doc = """ Max distance at which two objects intersect and min distance at which two points are distinct. size() = number of Breps. """ )
     uniform double3[] brep:extent                ( doc = """ Brep_ii's bounding box corner pts {XYZmin, XYZmax}. size() = 2 * number of Breps. """ )
-  # uniform token[]   brep:sourceType            ( allowedTokens =["USD", "STEP",  "Alias",   "ParaSolid", 
-  #                                                                "PRC", "IGES",  "SMLib",   "OpenNurbs",
-  #                                                                "STL", "VDAFS", "DataKit", "SolidWorks", 
-  #                                                                "SAT", "DGN",   "other"]
-  #                                                 doc = """ optional geometry engine source for these Breps. size() = Number of Breps. """ )
-    uniform uint[]    brep:regionCount           ( doc = """ Number of Regions in this Brep. size() = Number of Breps """ )
+    uniform uint[]    brep:regionCount           ( doc = """ Number of Regions in this Brep, INCLUDING the infinite exterior void region, which is always the first region of each Brep. A closed manifold solid therefore has regionCount = 2 (the infinite void region + the interior solid region). size() = Number of Breps. """ )
     
     # regions are packed in order used by Breps (1st region perBrep is infinite region)
     uniform uint[]    region:shellCount          ( doc = """ Region_ii's number of Shells.  1st shell = outerShell, subsequent shells = innerShells. size() = number of regions. """ )
     uniform token[]   region:type                ( allowedTokens = ["solidRegion", "voidRegion"]
-                                                   doc = """ solidRegion = region_ii points are in the Brep. voidRegion = region_ii points are out of the Brep. size() = number of regions. """ )
+                                                   doc = """ solidRegion = region_ii points are in the Brep. voidRegion = region_ii points are out of the Brep. The first region of each Brep is always the infinite exterior voidRegion (consistent with brep:regionCount counting it). size() = number of regions. """ )
     
     # shells packed in order used by regions
     uniform uint[]    shell:faceuseCount         ( doc = """Shell_ii's number of faceuses. size() = number of Shells """ )
@@ -120,7 +115,7 @@ class BrepArray  "BrepArray" (
                                                               where Vertex_startVertexIndex:position = Edge_ii:Curve(Edge:Range(0)).
                                                                     Vertex_endVertexIndex:position   = Edge_ii:Curve(Edge:Range(1)).
                                                               edge:vertexIndices are required because vertices can be shared with loopVertices and wireEdgeVertices.
-                                                              (note: edge:vertexIndices is defined as int2 because uint2 is not defined.  These should be uint values.)
+                                                              (note: edge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
                                                               size() = number of Edges. """ )
                                                  
     # wireEdges packed in order used by shells
@@ -136,7 +131,7 @@ class BrepArray  "BrepArray" (
                                                               where Vertex_startVertexIndex:position = Edge_ii:Curve(Edge:Range(0)).
                                                                     Vertex_EndVertexIndex:position   = Edge_ii:Curve(Edge:Range(1)).
                                                               wireEdge:vertexIndices are required because vertices can be shared with loopVertices and edgeVertices.
-                                                              (note: wireEdge:vertexIndices is defined as int2 because uint2 is not defined.  These should be uint values.)
+                                                              (note: wireEdge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
                                                               size() = number of Edges. """ )
                                                  
     # vertices not packed in an order
@@ -144,23 +139,23 @@ class BrepArray  "BrepArray" (
                                                          # in the future add ["BrepMultiPointAPI"]
                                                    doc = """ BrepPointAPI = shape for vertex_ii is a point in the pointType array. size() = number of Vertices. """ )
 
-    # HasAPI(SduSolidTokens->brepPointAPI,              SduSolidTokens->vertexPoint)        packed in order used by vertices
-    # HasAPI(SduSolidTokens->brepPointAPI,              SduSolidTokens->shellPoint)         packed in order used by shellVertices
-    # HasAPI(SduSolidTokens->brepCurve3dNurbAPI,        SduSolidTokens->edge3dNurb)         packed in order used by NURB edges
-    # HasAPI(SduSolidTokens->brepCurve3dNurbAPI,        SduSolidTokens->wireEdge3dNurb)     packed in order used by NURB wireEdges
-    # HasAPI(SduSolidTokens->brepCurve3dLineAPI,        SduSolidTokens->edge3dLine)         packed in order used by line edges
-    # HasAPI(SduSolidTokens->brepCurve3dLineAPI,        SduSolidTokens->wireEdge3dLine)     packed in order used by line wireEdges
-    # HasAPI(SduSolidTokens->brepCurve3dCircleAPI,      SduSolidTokens->edge3dCircle)       packed in order used by circle edges
-    # HasAPI(SduSolidTokens->brepCurve3dCircleAPI,      SduSolidTokens->wireEdge3dCircle)   packed in order used by circle wireEdges
-    # HasAPI(SduSolidTokens->brepCurve3dEllipseAPI,     SduSolidTokens->edge3dEllipse)      packed in order used by ellipse edges
-    # HasAPI(SduSolidTokens->brepCurve3dEllipseAPI,     SduSolidTokens->wireEdge3dEllipse)  packed in order used by ellipse wireEdges
-    # HasAPI(SduSolidTokens->brepCurveUvNurbAPI)                                            packed in order used by edgeuses
-    # HasAPI(SduSolidTokens->brepSurfaceNurbAPI)                                            packed in order used by NURB faces
-    # HasAPI(SduSolidTokens->brepSurfacePlaneAPI)                                           packed in order used by plane faces
-    # HasAPI(SduSolidTokens->brepSurfaceCylinderAPI)                                        packed in order used by cylinder faces
-    # HasAPI(SduSolidTokens->brepSurfaceConeAPI)                                            packed in order used by cone faces
-    # HasAPI(SduSolidTokens->brepSurfaceSphereAPI)                                          packed in order used by sphere faces
-    # HasAPI(SduSolidTokens->brepSurfaceTorusAPI)                                           packed in order used by torus faces
+    # HasAPI(UsdSolidTokens->brepPointAPI,              UsdSolidTokens->vertexPoint)        packed in order used by vertices
+    # HasAPI(UsdSolidTokens->brepPointAPI,              UsdSolidTokens->shellPoint)         packed in order used by shellVertices
+    # HasAPI(UsdSolidTokens->brepCurve3dNurbAPI,        UsdSolidTokens->edge3dNurb)         packed in order used by NURB edges
+    # HasAPI(UsdSolidTokens->brepCurve3dNurbAPI,        UsdSolidTokens->wireEdge3dNurb)     packed in order used by NURB wireEdges
+    # HasAPI(UsdSolidTokens->brepCurve3dLineAPI,        UsdSolidTokens->edge3dLine)         packed in order used by line edges
+    # HasAPI(UsdSolidTokens->brepCurve3dLineAPI,        UsdSolidTokens->wireEdge3dLine)     packed in order used by line wireEdges
+    # HasAPI(UsdSolidTokens->brepCurve3dCircleAPI,      UsdSolidTokens->edge3dCircle)       packed in order used by circle edges
+    # HasAPI(UsdSolidTokens->brepCurve3dCircleAPI,      UsdSolidTokens->wireEdge3dCircle)   packed in order used by circle wireEdges
+    # HasAPI(UsdSolidTokens->brepCurve3dEllipseAPI,     UsdSolidTokens->edge3dEllipse)      packed in order used by ellipse edges
+    # HasAPI(UsdSolidTokens->brepCurve3dEllipseAPI,     UsdSolidTokens->wireEdge3dEllipse)  packed in order used by ellipse wireEdges
+    # HasAPI(UsdSolidTokens->brepCurveUvNurbAPI)                                            packed in order used by edgeuses
+    # HasAPI(UsdSolidTokens->brepSurfaceNurbAPI)                                            packed in order used by NURB faces
+    # HasAPI(UsdSolidTokens->brepSurfacePlaneAPI)                                           packed in order used by plane faces
+    # HasAPI(UsdSolidTokens->brepSurfaceCylinderAPI)                                        packed in order used by cylinder faces
+    # HasAPI(UsdSolidTokens->brepSurfaceConeAPI)                                            packed in order used by cone faces
+    # HasAPI(UsdSolidTokens->brepSurfaceSphereAPI)                                          packed in order used by sphere faces
+    # HasAPI(UsdSolidTokens->brepSurfaceTorusAPI)                                           packed in order used by torus faces
 
 
 } # end class BrepArray "BrepArray"              
@@ -273,7 +268,7 @@ class "BrepCurve3dNurbAPI" (
         \\note Some DCC's pre-weight the \\em points, but in this schema, \\em points are not pre-weighted.        
         size() = curve3dControlVertices.size() """
         customData = {
-            string apiName = "Curve3dWeights"
+            string apiName = "curve3dWeights"
         }
     )
 } # end class "BrepCurve3dNurbAPI"
@@ -814,6 +809,15 @@ class "BrepSurfaceConeAPI" (
     When semiAngle is 0, the cone degenerates to a cylinder.
     The surface normal points outward (away from the axis).
     The face:range attribute provides the UV trim domain bounds in radians (u) and linear units (v).
+
+    Convention note (v-parameter): this v is the AXIAL height (radius grows as
+    tan(semiAngle), axial term + v * axis), matching the STEP/PRC convention. It
+    DIFFERS from OpenCascade's Geom_ConicalSurface, whose V is the SLANT distance
+    along the generatrix (radius grows as sin(semiAngle), axial as cos(semiAngle)).
+    A consumer that maps this surface onto OCCT must rescale V_occt = v / cos(semiAngle);
+    the same applies to face:range v. Authored brep:curveUv pcurves, by contrast, are
+    expressed in the consuming surface's native parameterization (i.e. OCCT slant for an
+    OCCT-based tessellator), not this axial v.
 
     Both PRC and SMLib define the cone with an axis placement, base radius, and semi-angle.
     PRC uses radians for the angular parameter; SMLib (SmCone) uses degrees internally

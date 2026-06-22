@@ -195,7 +195,7 @@ public:
     // --------------------------------------------------------------------- //
     // BREPREGIONCOUNT 
     // --------------------------------------------------------------------- //
-    /// Number of Regions in this Brep. size() = Number of Breps 
+    /// Number of Regions in this Brep, INCLUDING the infinite exterior void region, which is always the first region of each Brep. A closed manifold solid therefore has regionCount = 2 (the infinite void region + the interior solid region). size() = Number of Breps. 
     ///
     /// | ||
     /// | -- | -- |
@@ -241,7 +241,7 @@ public:
     // --------------------------------------------------------------------- //
     // REGIONTYPE 
     // --------------------------------------------------------------------- //
-    /// solidRegion = region_ii points are in the Brep. voidRegion = region_ii points are out of the Brep. size() = number of regions. 
+    /// solidRegion = region_ii points are in the Brep. voidRegion = region_ii points are out of the Brep. The first region of each Brep is always the infinite exterior voidRegion (consistent with brep:regionCount counting it). size() = number of regions. 
     ///
     /// | ||
     /// | -- | -- |
@@ -697,7 +697,7 @@ public:
     /// where Vertex_startVertexIndex:position = Edge_ii:Curve(Edge:Range(0)).
     /// Vertex_endVertexIndex:position   = Edge_ii:Curve(Edge:Range(1)).
     /// edge:vertexIndices are required because vertices can be shared with loopVertices and wireEdgeVertices.
-    /// (note: edge:vertexIndices is defined as int2 because uint2 is not defined.  These should be uint values.)
+    /// (note: edge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
     /// size() = number of Edges. 
     ///
     /// | ||
@@ -777,7 +777,7 @@ public:
     /// where Vertex_startVertexIndex:position = Edge_ii:Curve(Edge:Range(0)).
     /// Vertex_EndVertexIndex:position   = Edge_ii:Curve(Edge:Range(1)).
     /// wireEdge:vertexIndices are required because vertices can be shared with loopVertices and edgeVertices.
-    /// (note: wireEdge:vertexIndices is defined as int2 because uint2 is not defined.  These should be uint values.)
+    /// (note: wireEdge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
     /// size() = number of Edges. 
     ///
     /// | ||

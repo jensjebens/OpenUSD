@@ -5,7 +5,7 @@
 
 class BrepArray "BrepArray" (
     customData = {
-        string userDocBrief = "Solid boundary representation models (Breps) rigorously partition space into regions by connecting sets of surfaces into region boundaries."
+        string userDocBrief = "UsdSolid provides native, mathematically-exact solid boundary-representation (B-rep) geometry for OpenUSD, built on the Radial Edge data model. Solid boundary representation models (Breps) rigorously partition space into regions by connecting sets of surfaces into region boundaries."
     }
 )
 {
@@ -21,7 +21,7 @@ class BrepArray "BrepArray" (
     )
     uniform uint[] brep:regionCount (
         customData = {
-            string userDocBrief = "Number of Regions in this Brep."
+            string userDocBrief = "Number of Regions in this Brep, INCLUDING the infinite exterior void region, which is always the first region of each Brep."
         }
     )
     uniform bool doubleSided = 0 (

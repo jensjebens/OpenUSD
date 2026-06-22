@@ -2,7 +2,7 @@
 
 `UsdSolid` introduces native, mathematically-exact **solid boundary-representation (B-rep)** geometry to OpenUSD. Its single concrete schema, `UsdSolidBrepArray`, is an `IsA` Gprim (deriving from `UsdGeomGprim`) that stores one or more Breps in a packed, flat, array-based representation. It is the schema companion (the "P2" proposal) to the CAD-geometry problem statement, and is built on Weiler's Radial Edge Data Model so it can represent manifold solids, non-manifold solids, sheet bodies, and wireframes in a single, kernel-neutral form.
 
-> **Status:** `UsdSolid` is an active OpenUSD proposal (AOUSD PR #109), not yet a ratified Core Spec schema. The schema ships with `skipCodeGeneration = true` as `prelimUsdSolid`. Attribute names, packing conventions, and rules are subject to change as the AOUSD Geometry Working Group aligns on a design. Author against it for experimentation, not for long-term archival assets.
+> **Status:** `UsdSolid` is an active OpenUSD proposal (AOUSD PR #109) and is not yet a ratified Core schema. Attribute names, packing conventions, and rules are subject to change as the AOUSD Geometry Working Group aligns on a design — author against it for experimentation, not long-term archival assets.
 
 ## Overview
 
