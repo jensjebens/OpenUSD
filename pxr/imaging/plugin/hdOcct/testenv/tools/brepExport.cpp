@@ -237,12 +237,14 @@ static void emit(const Out& o, const std::string& prim, const std::string& path,
         std::ostringstream s; s << "uniform double[] " << nm << " = [";
         for (size_t i=0;i<v.size();++i){ s<<fnum(v[i]); if(i+1<v.size())s<<", "; } s<<"]"; line(s.str()); };
 
-    // topology
-    arrU("brep:regionCount", {1});
-    arrU("region:shellCount", {1});
-    arrTok("region:type", {"solidRegion"});
-    arrU("shell:faceuseCount", {(int)(2*nFaces)});
-    arrU("shell:wireEdgeCount", {0});
+    // topology (void-included form, issue #68): the infinite exterior void
+    // region is first, then the solid; faceuses are grouped by shell with an
+    // explicit faceuse:faceIndex map.
+    arrU("brep:regionCount", {2});
+    arrU("region:shellCount", {1, 1});
+    arrTok("region:type", {"voidRegion", "solidRegion"});
+    arrU("shell:faceuseCount", {(int)nFaces, (int)nFaces});
+    arrU("shell:wireEdgeCount", {0, 0});
     { std::vector<int> lc(o.faceLoopCount); arrU("face:loopCount", lc); }
     { std::vector<std::string> st(nFaces, "BrepSurfaceNurbAPI"); arrTok("face:surfaceType", st); }
     { std::vector<std::string> tt(nFaces, "general"); arrTok("face:trimType", tt); }
@@ -254,7 +256,16 @@ static void emit(const Out& o, const std::string& prim, const std::string& path,
     { std::vector<int> lv(o.loopEdgeuseCount.size(),0); arrU("loop:vertexIndex", lv); }
     arrU("edgeuse:edgeIndex", o.edgeuseEdgeIndex);
     { std::vector<std::string> eo(nEU,"same"); arrTok("edgeuse:orientationType", eo); }
-    arrTok("faceuse:orientationType", o.faceuseOrient);
+    // De-interleave the per-face [outward, complement] pairs into the void
+    // shell (outward refs) then the solid shell (complements), and emit the
+    // faceuse:faceIndex map (each shell lists faces 0..nFaces-1 in order).
+    { std::vector<std::string> fo; std::vector<int> fidx;
+      for (size_t fi = 0; fi < nFaces; ++fi) fo.push_back(o.faceuseOrient[2*fi]);
+      for (size_t fi = 0; fi < nFaces; ++fi) fo.push_back(o.faceuseOrient[2*fi+1]);
+      for (int pass = 0; pass < 2; ++pass)
+          for (size_t fi = 0; fi < nFaces; ++fi) fidx.push_back((int)fi);
+      arrTok("faceuse:orientationType", fo);
+      arrU("faceuse:faceIndex", fidx); }
     { std::vector<int> nr(nEU); for(size_t i=0;i<nEU;++i)nr[i]=(int)i; arrU("edgeuse:nextRadialEUIndex", nr); }
     { std::vector<std::string> te(nEU,"topEntry"); arrTok("edgeuse:thisRadialEntryType", te); }
 

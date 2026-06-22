@@ -64,15 +64,20 @@ class Brep:
         def toks(xs): return [f'"{x}"' for x in xs]
         def i2(xs): return [f"({a_},{b_})" for (a_,b_) in xs]
 
-        nreg=len(self.shells)  # one shell per region here
-        arr("uint","brep:regionCount",[str(nreg)])
-        arr("uint","region:shellCount",["1"]*nreg)
-        arr("token","region:type",toks(["solidRegion"]*nreg))
-        arr("uint","shell:faceuseCount",nums([s for s in self.shells]))
-        arr("uint","shell:wireEdgeCount",["0"]*len(self.shells))
-        arr("token","shell:pointType",toks(["none"]*len(self.shells)))
-        arr("uint","faceuse:faceIndex",nums([f["face"] for f in self.faceuses]))
-        arr("token","faceuse:orientationType",toks([f["o"] for f in self.faceuses]))
+        # Void-included form (issue #68): infinite void region first, then the
+        # solid; faceuses grouped by shell with an explicit faceuse:faceIndex.
+        # self.faceuses holds interleaved [outward, complement] pairs per face.
+        nF=len(self.faceuses)//2
+        outward=[self.faceuses[2*i]["o"] for i in range(nF)]
+        complement=[self.faceuses[2*i+1]["o"] for i in range(nF)]
+        arr("uint","brep:regionCount",["2"])
+        arr("uint","region:shellCount",["1","1"])
+        arr("token","region:type",toks(["voidRegion","solidRegion"]))
+        arr("uint","shell:faceuseCount",[str(nF),str(nF)])
+        arr("uint","shell:wireEdgeCount",["0","0"])
+        arr("token","shell:pointType",toks(["none","none"]))
+        arr("uint","faceuse:faceIndex",nums(list(range(nF))+list(range(nF))))
+        arr("token","faceuse:orientationType",toks(outward+complement))
         arr("uint","face:loopCount",nums([f["lc"] for f in self.faces]))
         arr("token","face:surfaceType",toks(["BrepSurfaceNurbAPI"]*len(self.faces)))
         # face:range = 2 double2 per face (uMin,uMax),(vMin,vMax)
