@@ -1,65 +1,40 @@
 #usda 1.0
 (
     defaultPrim = "World"
+    doc = """Generated BrepArray test fixture.\r
+    Cone: radius=5 at base (z=0), apex at (0,0,10). 2 faces: conical barrel + base disk.\r
+    Expected volume: pi * 5^2 * 10 / 3 ≈ 261.80"""
     metersPerUnit = 1
     upAxis = "Z"
-    doc = """Generated BrepArray test fixture.
-    Cone: radius=5 at base (z=0), apex at (0,0,10). 2 faces: conical barrel + base disk.
-    Expected volume: pi * 5^2 * 10 / 3 ≈ 261.80"""
 )
 
 def Xform "World"
 {
     def BrepArray "Cone"
     {
-        # Topology: 2 faces (conical barrel + base cap)
-        uniform uint[] brep:regionCount = [1]
-        uniform uint[] region:shellCount = [1]
-        uniform token[] region:type = ["solidRegion"]
-        uniform uint[] shell:faceuseCount = [4]
-        uniform uint[] shell:wireEdgeCount = [0]
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform uint[] brep:regionCount = [2]
+        uniform point3d[] brep:surface:nurb:controlVertices = [(5, 0, 0), (0, 0, 10), (5, 5, 0), (0, 0, 10), (0, 5, 0), (0, 0, 10), (-5, 5, 0), (0, 0, 10), (-5, 0, 0), (0, 0, 10), (-5, -5, 0), (0, 0, 10), (0, -5, 0), (0, 0, 10), (5, -5, 0), (0, 0, 10), (5, 0, 0), (0, 0, 10), (0, 0, 0), (5, 0, 0), (0, 0, 0), (5, 5, 0), (0, 0, 0), (0, 5, 0), (0, 0, 0), (-5, 5, 0), (0, 0, 0), (-5, 0, 0), (0, 0, 0), (-5, -5, 0), (0, 0, 0), (0, -5, 0), (0, 0, 0), (5, -5, 0), (0, 0, 0), (5, 0, 0)]
+        uniform double[] brep:surface:nurb:uKnots = [0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 4.7123889804, 4.7123889804, 6.2831853072, 6.2831853072, 6.2831853072, 0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 4.7123889804, 4.7123889804, 6.2831853072, 6.2831853072, 6.2831853072]
+        uniform uint[] brep:surface:nurb:uOrder = [3, 3]
+        uniform uint[] brep:surface:nurb:uVertexCount = [9, 9]
+        uniform double[] brep:surface:nurb:vKnots = [0, 0, 10, 10, 0, 0, 5, 5]
+        uniform uint[] brep:surface:nurb:vOrder = [2, 2]
+        uniform uint[] brep:surface:nurb:vVertexCount = [2, 2]
+        uniform double[] brep:surface:nurb:weights = [1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1]
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (0, 0, 10)]
         uniform uint[] face:loopCount = [1, 1]
+        uniform double2[] face:range = [(0, 6.2831853072), (0, 10), (0, 6.2831853072), (0, 5)]
         uniform token[] face:surfaceType = ["BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI"]
         uniform token[] face:trimType = ["natural", "natural"]
-        uniform double2[] face:range = [(0, 6.2831853072), (0, 10), (0, 6.2831853072), (0, 5)]
-
-        # Barrel: parametric normal points outward → same
-        # Base cap: parametric normal points from center outward on Z=0 plane; 
-        # but for a disk, du×dv with center→edge produces normal in +Z; outward at z=0 is -Z → opposite
+        uniform uint[] faceuse:faceIndex = [0, 1, 0, 1]
         uniform token[] faceuse:orientationType = ["same", "opposite", "opposite", "same"]
         uniform uint[] loop:edgeuseCount = [0, 0]
         uniform uint[] loop:vertexIndex = [0, 0]
-
-        # Vertex positions
-        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (0, 0, 10)]
-
-        # 2 NURBS surfaces
-        # Surface 0: Conical barrel (9x2, degree 2 in u for circle, degree 1 in v for height)
-        #   Bottom ring at z=0 r=5, apex row at z=10 r=0 (degenerate)
-        # Surface 1: Base cap disk (9x2, degree 2 in u, degree 1 in v)
-        #   Center row at (0,0,0) → edge ring at r=5, z=0
-        uniform uint[] brep:surface:nurb:uVertexCount = [9, 9]
-        uniform uint[] brep:surface:nurb:vVertexCount = [2, 2]
-        uniform uint[] brep:surface:nurb:uOrder = [3, 3]
-        uniform uint[] brep:surface:nurb:vOrder = [2, 2]
-
-        # u knots (circular, 12 each × 2 = 24)
-        uniform double[] brep:surface:nurb:uKnots = [0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 4.7123889804, 4.7123889804, 6.2831853072, 6.2831853072, 6.2831853072, 0, 0, 0, 1.5707963268, 1.5707963268, 3.1415926536, 3.1415926536, 4.7123889804, 4.7123889804, 6.2831853072, 6.2831853072, 6.2831853072]
-
-        # v knots: barrel [0,0,10,10], base cap [0,0,5,5]
-        uniform double[] brep:surface:nurb:vKnots = [0, 0, 10, 10, 0, 0, 5, 5]
-
-        # Control points: 18 + 18 = 36
-        # Storage: u-major (for each u position, iterate all v positions)
-        # Surface 0 (barrel): alternating base(z=0,r=5) / apex(z=10,r=0) for each u
-        # Surface 1 (base cap): alternating center(0,0,0) / edge(r=5,z=0) for each u
-        uniform point3d[] brep:surface:nurb:controlVertices = [(5, 0, 0), (0, 0, 10), (5, 5, 0), (0, 0, 10), (0, 5, 0), (0, 0, 10), (-5, 5, 0), (0, 0, 10), (-5, 0, 0), (0, 0, 10), (-5, -5, 0), (0, 0, 10), (0, -5, 0), (0, 0, 10), (5, -5, 0), (0, 0, 10), (5, 0, 0), (0, 0, 10), (0, 0, 0), (5, 0, 0), (0, 0, 0), (5, 5, 0), (0, 0, 0), (0, 5, 0), (0, 0, 0), (-5, 5, 0), (0, 0, 0), (-5, 0, 0), (0, 0, 0), (-5, -5, 0), (0, 0, 0), (0, -5, 0), (0, 0, 0), (5, -5, 0), (0, 0, 0), (5, 0, 0)]
-
-        # Weights: u-major interleaved. For each u position, weight applies to both v=0 and v=1.
-        # u_weights = [1, w, 1, w, 1, w, 1, w, 1] → interleaved: [1,1, w,w, 1,1, w,w, ...]
-        uniform double[] brep:surface:nurb:weights = [1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1, 0.7071067812, 0.7071067812, 1, 1]
-
-        # Tolerance
-        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform uint[] region:shellCount = [1, 1]
+        uniform token[] region:type = ["voidRegion", "solidRegion"]
+        uniform uint[] shell:faceuseCount = [2, 2]
+        uniform uint[] shell:wireEdgeCount = [0, 0]
     }
 }
+

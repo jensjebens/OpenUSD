@@ -632,12 +632,11 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     // may itself leave the face REVERSED, and the authored data is the single
     // source of truth.
     //
-    // Two faceuse layouts occur in the wild:
-    //  (A) A single solidRegion shell with each face's two faceuses stored
-    //      consecutively (interleaved) and no faceuse:faceIndex. The first
-    //      faceuse of the pair (index 2*fi) is the outward reference. (Verified
-    //      against the cube fixture: x=0 face natural normal +X, outward -X,
-    //      faceuse pair ["opposite","same"].) This is the hand-authored layout.
+    // The schema requires the void-included form (issue #68): a closed solid
+    // counts its infinite exterior void region, with faceuses grouped by shell
+    // and an explicit faceuse:faceIndex. Two such layouts occur from CAD
+    // producers (the legacy single-solidRegion interleaved layout with no void
+    // region is no longer accepted):
     //  (B) Separate voidRegion + solidRegion shells with faceuses grouped by
     //      shell plus an explicit faceuse:faceIndex map (CAD producers, e.g.
     //      hoops-converter). Here 2*fi straddles both shells and mis-orients
@@ -705,15 +704,21 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             }
         }
     }
+    bool warnedMissingVoid = false;
     auto applyFaceuseOrientation = [&](TopoDS_Face face, size_t fi) {
-        bool outwardOpposite;
+        // Layout (B)/(C) above resolved each face's outward side from its
+        // void-region faceuse. The legacy single-solidRegion interleaved layout
+        // (2*fi, no void region) is no longer accepted (issue #68); a face that
+        // reaches here falls back to the surface's natural normal with a
+        // one-time warning.
+        bool outwardOpposite = false;
         if (fi < faceOutwardOpposite.size() && faceOutwardOpposite[fi] >= 0) {
             outwardOpposite = (faceOutwardOpposite[fi] == 1);    // (B)/(C)
-        } else {
-            const size_t fu = faceuseStart + 2 * fi;             // layout (A)
-            outwardOpposite =
-                fu < data.faceuseOrientationType.size() &&
-                data.faceuseOrientationType[fu] == _tokens->opposite;
+        } else if (!warnedMissingVoid) {
+            TF_WARN("hdOcct: a Brep face has no void-region faceuse; expected "
+                    "the void-included BrepArray form (regionCount counts the "
+                    "infinite void region). Orienting from the natural normal.");
+            warnedMissingVoid = true;
         }
         face.Orientation(outwardOpposite ? TopAbs_REVERSED : TopAbs_FORWARD);
         return face;
