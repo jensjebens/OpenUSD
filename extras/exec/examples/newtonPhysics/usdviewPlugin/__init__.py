@@ -406,46 +406,83 @@ class NewtonPhysicsPlugin(PluginContainer):
 
         self._toggle_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.togglePhysics",
-            "Start Physics",
+            "Simulate",
             lambda ctx: self._safeCall(self._togglePhysics, ctx))
 
         self._grab_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.toggleGrab",
-            "Enable Grab Mode",
+            "Grab Mode",
             lambda ctx: self._safeCall(self._toggleGrab, ctx))
 
         self._reset_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.resetPhysics",
-            "Reset Simulation",
+            "Reset",
             lambda ctx: self._safeCall(self._resetPhysics, ctx))
 
-        self._engine_cmd = plugRegistry.registerCommandPlugin(
-            "NewtonPhysicsPlugin.switchEngine",
-            self._engineMenuLabel(),
-            lambda ctx: self._safeCall(self._switchEngine, ctx))
+        # Engine commands — one per available engine
+        if HAS_NEWTON:
+            self._newton_cmd = plugRegistry.registerCommandPlugin(
+                "NewtonPhysicsPlugin.selectNewton",
+                "Newton GPU",
+                lambda ctx: self._safeCall(self._selectEngine, ctx, "newton"))
+        if HAS_PHYSX:
+            self._physx_cmd = plugRegistry.registerCommandPlugin(
+                "NewtonPhysicsPlugin.selectPhysX",
+                "PhysX 5",
+                lambda ctx: self._safeCall(self._selectEngine, ctx, "physx"))
 
     def configureView(self, plugRegistry, plugUIBuilder):
         _log.info("configureView called!")
+
+        try:
+            from PySide6.QtWidgets import QActionGroup
+            from PySide6.QtGui import QKeySequence
+        except ImportError:
+            from PySide2.QtWidgets import QActionGroup
+            from PySide2.QtGui import QKeySequence
+
         menu = plugUIBuilder.findOrCreateMenu("Physics")
+
+        # Simulate toggle (checkable)
         self._toggle_action = menu.addItem(self._toggle_cmd)
+        self._toggle_action.setCheckable(True)
+        self._toggle_action.setChecked(False)
+
+        # Grab mode toggle (checkable)
         self._grab_action = menu.addItem(self._grab_cmd)
-        self._reset_action = menu.addItem(self._reset_cmd)
+        self._grab_action.setCheckable(True)
+        self._grab_action.setChecked(False)
+
         menu.addSeparator()
-        self._engine_action = menu.addItem(self._engine_cmd)
+
+        # Reset (plain action)
+        self._reset_action = menu.addItem(self._reset_cmd)
+
+        menu.addSeparator()
+
+        # Engine submenu with radio buttons
+        engine_submenu = menu.findOrCreateSubmenu("Engine")
+        self._engine_group = QActionGroup(engine_submenu._qMenu)
+        self._engine_group.setExclusive(True)
+
+        if HAS_NEWTON:
+            self._newton_action = engine_submenu.addItem(self._newton_cmd)
+            self._newton_action.setCheckable(True)
+            self._newton_action.setChecked(self._selected_engine == "newton")
+            self._engine_group.addAction(self._newton_action)
+
+        if HAS_PHYSX:
+            self._physx_action = engine_submenu.addItem(self._physx_cmd)
+            self._physx_action.setCheckable(True)
+            self._physx_action.setChecked(self._selected_engine == "physx")
+            self._engine_group.addAction(self._physx_action)
+
         _log.info(f"  menu items added (engine={self._selected_engine})")
 
-    def _engineMenuLabel(self):
-        if self._selected_engine == "newton":
-            return "Engine: Newton GPU  [click → PhysX 5]"
-        elif self._selected_engine == "physx":
-            return "Engine: PhysX 5  [click → Newton GPU]"
-        else:
-            return "Engine: (none available)"
-
-    def _safeCall(self, fn, ctx):
+    def _safeCall(self, fn, ctx, *args):
         try:
             _log.info(f"Menu action: {fn.__name__}")
-            fn(ctx)
+            fn(ctx, *args)
         except Exception:
             _log.error(f"Error in {fn.__name__}:\n{traceback.format_exc()}")
 
@@ -453,29 +490,18 @@ class NewtonPhysicsPlugin(PluginContainer):
     # Commands
     # ------------------------------------------------------------------
 
-    def _switchEngine(self, usdviewApi):
+    def _selectEngine(self, usdviewApi, engine_name):
         if self._running:
             _log.info("Stop physics before switching engine.")
+            # Revert the radio button to current selection
+            if engine_name == "newton" and hasattr(self, '_newton_action'):
+                self._newton_action.setChecked(self._selected_engine == "newton")
+            if engine_name == "physx" and hasattr(self, '_physx_action'):
+                self._physx_action.setChecked(self._selected_engine == "physx")
             return
 
-        if self._selected_engine == "newton" and HAS_PHYSX:
-            self._selected_engine = "physx"
-        elif self._selected_engine == "physx" and HAS_NEWTON:
-            self._selected_engine = "newton"
-        elif not HAS_NEWTON and not HAS_PHYSX:
-            _log.info("No physics engines available!")
-            return
-        else:
-            # Toggle to whatever is available
-            if HAS_NEWTON:
-                self._selected_engine = "newton"
-            else:
-                self._selected_engine = "physx"
-
-        label = self._engineMenuLabel()
-        if hasattr(self, '_engine_action') and self._engine_action:
-            self._engine_action.setText(label)
-        _log.info(f"Switched to: {self._selected_engine}")
+        self._selected_engine = engine_name
+        _log.info(f"Engine selected: {self._selected_engine}")
 
     def _togglePhysics(self, usdviewApi):
         if not self._selected_engine:
@@ -494,25 +520,27 @@ class NewtonPhysicsPlugin(PluginContainer):
         if self._running:
             self._stopSim()
             if self._toggle_action:
-                self._toggle_action.setText("Start Physics")
+                self._toggle_action.setChecked(False)
         else:
             self._startSim(usdviewApi)
             if self._toggle_action:
-                self._toggle_action.setText("Stop Physics")
+                self._toggle_action.setChecked(True)
 
     def _toggleGrab(self, usdviewApi):
         if self._event_filter:
             self._removeEventFilter(usdviewApi)
             if self._grab_action:
-                self._grab_action.setText("Enable Grab Mode")
+                self._grab_action.setChecked(False)
             _log.info("Grab mode disabled.")
         else:
             if not self._provider:
                 _log.info("Start physics first.")
+                if self._grab_action:
+                    self._grab_action.setChecked(False)
                 return
             self._installEventFilter(usdviewApi)
             if self._grab_action:
-                self._grab_action.setText("Disable Grab Mode")
+                self._grab_action.setChecked(True)
             _log.info("Grab mode enabled — shift+left-click-drag to grab bodies.")
 
     def _resetPhysics(self, usdviewApi):
@@ -524,7 +552,7 @@ class NewtonPhysicsPlugin(PluginContainer):
         if self._event_filter:
             self._removeEventFilter(usdviewApi)
             if self._grab_action:
-                self._grab_action.setText("Enable Grab Mode")
+                self._grab_action.setChecked(False)
 
         # Clear grab state
         self._grab_body_idx = -1
@@ -544,7 +572,7 @@ class NewtonPhysicsPlugin(PluginContainer):
             self._stageView.updateGL()
 
         if self._toggle_action:
-            self._toggle_action.setText("Start Physics")
+            self._toggle_action.setChecked(False)
         _log.info("Simulation reset.")
 
     # ------------------------------------------------------------------
