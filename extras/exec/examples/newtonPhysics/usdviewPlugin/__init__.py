@@ -1,19 +1,24 @@
-# Newton GPU interactive physics plugin for UsdView.
+# Newton/PhysX interactive physics plugin for UsdView.
 #
-# Right-click on a physics body to grab it. Drag to move. Release to throw.
-# Uses Newton GPU's built-in Picking class (GPU raycast + spring-damper).
-#
-# The plugin also runs physics simulation in real-time, updating body
-# transforms each frame via the HdExec TransformProvider pipeline.
+# Physics menu with engine selector:
+#   - Start/Stop Physics (runs whichever engine is selected)
+#   - Enable/Disable Grab Mode (shift+left-click-drag)
+#   - Reset Simulation
+#   - Engine: Newton GPU / PhysX 5 (toggle between providers)
 #
 # Installation:
 #   export PXR_PLUGINPATH_NAME=/path/to/usdviewPlugin:$PXR_PLUGINPATH_NAME
+#   export PYTHONPATH=/path/to/newtonPhysics:$PYTHONPATH
 #   usdview scene.usda
 
 import os
 import sys
+import json
+import math
 import logging
 import traceback
+
+import numpy as np
 
 # File logger for debugging — usdview swallows stdout/stderr.
 _LOG_PATH = "/tmp/newton_plugin.log"
@@ -41,20 +46,363 @@ try:
 except ImportError:
     HAS_NEWTON = False
 
+# ovphysx can't coexist in-process with from-source USD (dual runtime).
+# We check if the package exists but run it in a subprocess.
+import importlib.util
+HAS_PHYSX = importlib.util.find_spec("ovphysx") is not None
+
 from pxr.Usdviewq.plugin import PluginContainer
 
 
+# ======================================================================
+# Provider Interface
+# ======================================================================
+
+class PhysicsProvider:
+    """Abstract base for physics providers."""
+
+    @property
+    def name(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def needs_axis_swap(self) -> bool:
+        """Whether this provider simulates in Z-up and needs Y↔Z conversion."""
+        return False
+
+    def initialize(self, scene_path: str, stage, device: str = 'gpu') -> dict:
+        """Initialize and return {sdf_path: body_index} mapping."""
+        raise NotImplementedError
+
+    def step(self, dt: float, sim_time: float):
+        raise NotImplementedError
+
+    def get_body_transforms(self, swap_yz: bool) -> list:
+        """Return list of (Sdf.Path, Gf.Matrix4d) for HdExec."""
+        raise NotImplementedError
+
+    def begin_grab(self, body_idx: int, target_pos):
+        """Start grabbing body at index."""
+        pass
+
+    def update_grab(self, target_pos):
+        """Update grab target position (in Newton/sim space)."""
+        pass
+
+    def end_grab(self):
+        """Release grabbed body."""
+        pass
+
+    def release(self):
+        """Clean up resources."""
+        pass
+
+
+# ======================================================================
+# Newton GPU Provider
+# ======================================================================
+
+class NewtonProvider(PhysicsProvider):
+    """Newton GPU via warp/newton pip package."""
+
+    @property
+    def name(self):
+        return "Newton GPU"
+
+    @property
+    def needs_axis_swap(self):
+        """Newton always simulates in Z-up."""
+        return True
+
+    def initialize(self, scene_path, stage, device='gpu'):
+        newton_device = 'cuda:0' if wp.is_cuda_available() else 'cpu'
+        _log.info(f"[Newton] Initializing on {newton_device}...")
+
+        # Open separate stage to avoid Hydra contention
+        newton_stage = Usd.Stage.Open(scene_path)
+
+        builder = newton.ModelBuilder()
+        Work.SetConcurrencyLimit(1)
+        try:
+            builder.add_usd(newton_stage, skip_mesh_approximation=True)
+        finally:
+            Work.SetConcurrencyLimit(0)
+        builder.approximate_meshes(method='convex_hull')
+        self._model = builder.finalize(device=newton_device)
+
+        self._body_map = {}
+        for idx, label in enumerate(builder.body_label):
+            self._body_map[Sdf.Path(label)] = idx
+
+        self._solver = newton.solvers.SolverXPBD(self._model)
+        self._states = [self._model.state(), self._model.state()]
+        self._current = 0
+        self._grab_body_idx = -1
+        self._grab_target = None
+
+        _log.info(f"[Newton] {len(self._body_map)} bodies ready")
+        return self._body_map
+
+    def step(self, dt, sim_time):
+        cur = self._current
+        nxt = 1 - cur
+
+        # Apply grab velocity before stepping
+        if self._grab_body_idx >= 0 and self._grab_target is not None:
+            body_qd = self._states[cur].body_qd.numpy()
+            body_q = self._states[cur].body_q.numpy()
+            tf = body_q[self._grab_body_idx]
+            pos = np.array([tf[0], tf[1], tf[2]], dtype=np.float64)
+            target = np.array(self._grab_target, dtype=np.float64)
+            delta = target - pos
+            vel = delta * 5.0  # gain
+            speed = np.linalg.norm(vel)
+            if speed > 20.0:
+                vel *= 20.0 / speed
+            body_qd[self._grab_body_idx][0] = vel[0]
+            body_qd[self._grab_body_idx][1] = vel[1]
+            body_qd[self._grab_body_idx][2] = vel[2]
+            body_qd[self._grab_body_idx][3:6] = 0.0
+            self._states[cur].body_qd.assign(
+                wp.array(body_qd, dtype=wp.spatial_vectorf,
+                         device=self._model.device))
+
+        contacts = self._model.collide(self._states[cur])
+        self._solver.step(
+            self._states[cur], self._states[nxt],
+            control=None, contacts=contacts, dt=dt)
+        self._current = nxt
+
+    def get_body_transforms(self, swap_yz):
+        body_q = self._states[self._current].body_q.numpy()
+
+        if swap_yz:
+            q_undo = Gf.Quatd(math.cos(-math.pi/4), math.sin(-math.pi/4), 0, 0)
+
+        transforms = []
+        for path, idx in self._body_map.items():
+            tf = body_q[idx]
+            qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
+            q_newton = Gf.Quatd(qw, qx, qy, qz)
+            pos_newton = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
+
+            if swap_yz:
+                q_usd = q_undo * q_newton
+                pos_usd = q_undo.Transform(pos_newton)
+            else:
+                q_usd = q_newton
+                pos_usd = pos_newton
+
+            M = Gf.Matrix4d()
+            M.SetRotate(q_usd)
+            M.SetTranslateOnly(pos_usd)
+            transforms.append((path, M))
+
+        return transforms
+
+    def begin_grab(self, body_idx, target_pos):
+        self._grab_body_idx = body_idx
+        self._grab_target = target_pos
+        _log.info(f"[Newton] Grab body {body_idx}")
+
+    def update_grab(self, target_pos):
+        self._grab_target = target_pos
+
+    def end_grab(self):
+        self._grab_body_idx = -1
+        self._grab_target = None
+
+    def release(self):
+        self._model = None
+        self._solver = None
+        self._states = None
+
+
+# ======================================================================
+# PhysX 5 Provider (ovphysx)
+# ======================================================================
+
+class PhysXProvider(PhysicsProvider):
+    """NVIDIA PhysX 5 via ovphysx — runs in a subprocess to avoid
+    dual-USD-runtime crashes with the from-source OpenUSD in this process.
+    """
+
+    @property
+    def name(self):
+        return "PhysX 5"
+
+    def initialize(self, scene_path, stage, device='gpu'):
+        import subprocess
+
+        _log.info("[PhysX] Launching subprocess worker...")
+
+        # Find the worker script (sibling of the usdviewPlugin package)
+        worker_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "ovphysx_worker.py")
+
+        # Launch with clean PYTHONPATH so ovphysx uses its bundled USD
+        env = os.environ.copy()
+        env["PYTHONPATH"] = ""
+        # Keep LD_LIBRARY_PATH clean too
+        env.pop("LD_PRELOAD", None)
+
+        python = sys.executable  # same venv python (has ovphysx)
+        self._proc = subprocess.Popen(
+            [python, worker_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+            bufsize=1,
+        )
+
+        # Wait for ready
+        resp = self._recv()
+        if resp.get("status") != "ready":
+            raise RuntimeError(f"Worker failed to start: {resp}")
+
+        # Send init command
+        self._send({"action": "init", "scene_path": scene_path, "device": device})
+        resp = self._recv()
+        if "error" in resp:
+            raise RuntimeError(f"PhysX init failed: {resp['error']}")
+
+        prim_paths = resp["prim_paths"]
+        self._n_bodies = resp["n_bodies"]
+        self._mmap_path = resp["mmap_path"]
+        self._mmap_size = resp["mmap_size"]
+
+        # Open mmap for reading poses
+        self._mmap_fd = open(self._mmap_path, "rb")
+
+        # Build body map
+        self._body_map = {}
+        for idx, path_str in enumerate(prim_paths):
+            self._body_map[Sdf.Path(path_str)] = idx
+
+        _log.info(f"[PhysX] {len(self._body_map)} bodies ready (subprocess)")
+        return self._body_map
+
+    def _send(self, msg):
+        self._proc.stdin.write(json.dumps(msg) + "\n")
+        self._proc.stdin.flush()
+
+    def _recv(self):
+        line = self._proc.stdout.readline()
+        if not line:
+            stderr = self._proc.stderr.read() if self._proc.stderr else ""
+            raise RuntimeError(f"Worker died: {stderr[:500]}")
+        return json.loads(line)
+
+    def step(self, dt, sim_time):
+        # Drain any pending update_grab response before sending step.
+        # update_grab is fire-and-forget, so the worker may have sent
+        # a response we haven't consumed yet.
+        import select
+        while True:
+            # Non-blocking check if there's data to read
+            rlist, _, _ = select.select([self._proc.stdout], [], [], 0)
+            if rlist:
+                self._proc.stdout.readline()  # discard stale response
+            else:
+                break
+
+        self._send({"action": "step", "dt": dt, "sim_time": sim_time})
+        resp = self._recv()
+        if "error" in resp:
+            _log.error(f"[PhysX] step error: {resp['error']}")
+
+    def get_body_transforms(self, swap_yz):
+        # Read poses from mmap (written by worker after each step)
+        self._mmap_fd.seek(0)
+        data = self._mmap_fd.read(self._mmap_size)
+        poses_buf = np.frombuffer(data, dtype=np.float32).reshape(
+            self._n_bodies, 7)
+
+        if swap_yz:
+            q_undo = Gf.Quatd(math.cos(-math.pi/4), math.sin(-math.pi/4), 0, 0)
+
+        transforms = []
+        for path, idx in self._body_map.items():
+            tf = poses_buf[idx]
+            px, py, pz = float(tf[0]), float(tf[1]), float(tf[2])
+            qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
+            q_sim = Gf.Quatd(qw, qx, qy, qz)
+            pos_sim = Gf.Vec3d(px, py, pz)
+
+            if swap_yz:
+                q_usd = q_undo * q_sim
+                pos_usd = q_undo.Transform(pos_sim)
+            else:
+                q_usd = q_sim
+                pos_usd = pos_sim
+
+            M = Gf.Matrix4d()
+            M.SetRotate(q_usd)
+            M.SetTranslateOnly(pos_usd)
+            transforms.append((path, M))
+
+        return transforms
+
+    def begin_grab(self, body_idx, target_pos):
+        self._send({
+            "action": "grab",
+            "body_idx": body_idx,
+            "target": list(target_pos),
+        })
+        self._recv()
+        _log.info(f"[PhysX] Grab body {body_idx}")
+
+    def update_grab(self, target_pos):
+        # Fire-and-forget — don't block Qt event loop waiting for ack.
+        # The worker will process this before the next step.
+        self._send({"action": "update_grab", "target": list(target_pos)})
+        # Don't recv here — we'll drain any pending response on next step
+
+    def end_grab(self):
+        self._send({"action": "end_grab"})
+        self._recv()
+
+    def release(self):
+        try:
+            self._send({"action": "release"})
+            self._recv()
+        except Exception:
+            pass
+        if hasattr(self, '_proc') and self._proc:
+            self._proc.terminate()
+            self._proc.wait(timeout=5)
+            self._proc = None
+        if hasattr(self, '_mmap_fd') and self._mmap_fd:
+            self._mmap_fd.close()
+            self._mmap_fd = None
+
+
+# ======================================================================
+# UsdView Plugin Container
+# ======================================================================
+
 class NewtonPhysicsPlugin(PluginContainer):
-    """UsdView plugin for interactive Newton GPU physics."""
+    """UsdView plugin for interactive physics with engine selector."""
 
     def registerPlugins(self, plugRegistry, plugCtx):
         _log.info("registerPlugins called!")
         self._ctx = plugCtx
-        self._engine = None
-        self._picking = None
+        self._provider = None
         self._running = False
-        self._sim_thread = None
         self._event_filter = None
+        self._stageView = None
+        self._sim_timer = None
+
+        # Default engine selection
+        if HAS_NEWTON:
+            self._selected_engine = "newton"
+        elif HAS_PHYSX:
+            self._selected_engine = "physx"
+        else:
+            self._selected_engine = None
 
         self._toggle_cmd = plugRegistry.registerCommandPlugin(
             "NewtonPhysicsPlugin.togglePhysics",
@@ -71,13 +419,28 @@ class NewtonPhysicsPlugin(PluginContainer):
             "Reset Simulation",
             lambda ctx: self._safeCall(self._resetPhysics, ctx))
 
+        self._engine_cmd = plugRegistry.registerCommandPlugin(
+            "NewtonPhysicsPlugin.switchEngine",
+            self._engineMenuLabel(),
+            lambda ctx: self._safeCall(self._switchEngine, ctx))
+
     def configureView(self, plugRegistry, plugUIBuilder):
         _log.info("configureView called!")
         menu = plugUIBuilder.findOrCreateMenu("Physics")
         self._toggle_action = menu.addItem(self._toggle_cmd)
         self._grab_action = menu.addItem(self._grab_cmd)
         self._reset_action = menu.addItem(self._reset_cmd)
-        _log.info("  menu items added")
+        menu.addSeparator()
+        self._engine_action = menu.addItem(self._engine_cmd)
+        _log.info(f"  menu items added (engine={self._selected_engine})")
+
+    def _engineMenuLabel(self):
+        if self._selected_engine == "newton":
+            return "Engine: Newton GPU  [click → PhysX 5]"
+        elif self._selected_engine == "physx":
+            return "Engine: PhysX 5  [click → Newton GPU]"
+        else:
+            return "Engine: (none available)"
 
     def _safeCall(self, fn, ctx):
         try:
@@ -90,63 +453,98 @@ class NewtonPhysicsPlugin(PluginContainer):
     # Commands
     # ------------------------------------------------------------------
 
+    def _switchEngine(self, usdviewApi):
+        if self._running:
+            _log.info("Stop physics before switching engine.")
+            return
+
+        if self._selected_engine == "newton" and HAS_PHYSX:
+            self._selected_engine = "physx"
+        elif self._selected_engine == "physx" and HAS_NEWTON:
+            self._selected_engine = "newton"
+        elif not HAS_NEWTON and not HAS_PHYSX:
+            _log.info("No physics engines available!")
+            return
+        else:
+            # Toggle to whatever is available
+            if HAS_NEWTON:
+                self._selected_engine = "newton"
+            else:
+                self._selected_engine = "physx"
+
+        label = self._engineMenuLabel()
+        if hasattr(self, '_engine_action') and self._engine_action:
+            self._engine_action.setText(label)
+        _log.info(f"Switched to: {self._selected_engine}")
+
     def _togglePhysics(self, usdviewApi):
-        if not HAS_NEWTON:
-            _log.info("Error: newton not installed. pip install newton")
+        if not self._selected_engine:
+            _log.info("No physics engine available!")
+            return
+        if self._selected_engine == "newton" and not HAS_NEWTON:
+            _log.info("Newton not installed (pip install newton)")
+            return
+        if self._selected_engine == "physx" and not HAS_PHYSX:
+            _log.info("ovphysx not installed")
             return
         if not HAS_HDEXEC:
-            _log.info("Error: pxr.HdExec not available.")
+            _log.info("pxr.HdExec not available")
             return
 
         if self._running:
             self._stopSim()
-            if hasattr(self, '_toggle_action') and self._toggle_action:
+            if self._toggle_action:
                 self._toggle_action.setText("Start Physics")
         else:
             self._startSim(usdviewApi)
-            if hasattr(self, '_toggle_action') and self._toggle_action:
+            if self._toggle_action:
                 self._toggle_action.setText("Stop Physics")
 
     def _toggleGrab(self, usdviewApi):
         if self._event_filter:
             self._removeEventFilter(usdviewApi)
-            if hasattr(self, '_grab_action') and self._grab_action:
+            if self._grab_action:
                 self._grab_action.setText("Enable Grab Mode")
             _log.info("Grab mode disabled.")
         else:
-            if not self._engine:
+            if not self._provider:
                 _log.info("Start physics first.")
                 return
             self._installEventFilter(usdviewApi)
-            if hasattr(self, '_grab_action') and self._grab_action:
+            if self._grab_action:
                 self._grab_action.setText("Disable Grab Mode")
             _log.info("Grab mode enabled — shift+left-click-drag to grab bodies.")
 
     def _resetPhysics(self, usdviewApi):
-        # Capture body paths before teardown.
         body_paths = []
-        if self._engine:
-            body_paths = list(self._engine["body_map"].keys())
+        if self._provider and hasattr(self, '_body_map') and self._body_map:
+            body_paths = list(self._body_map.keys())
+
+        # Remove grab event filter before teardown
+        if self._event_filter:
+            self._removeEventFilter(usdviewApi)
+            if self._grab_action:
+                self._grab_action.setText("Enable Grab Mode")
+
+        # Clear grab state
+        self._grab_body_idx = -1
 
         self._stopSim()
-        if self._engine:
-            self._engine = None
-            self._picking = None
+        if self._provider:
+            self._provider.release()
+            self._provider = None
 
-        # After _stopSim clears the transform cache, we need to dirty
-        # the physics prims so Hydra re-pulls GetPrim() and falls back
-        # to the original USD transforms.  Momentarily write identity
-        # matrices into the cache just to trigger the dirty pass.
         if HAS_HDEXEC and body_paths:
             dummy = [(p, Gf.Matrix4d(1.0)) for p in body_paths]
             HdExec.SetCachedTransforms(dummy)
             HdExec.AdvanceGlobalTime(0.0)
             HdExec.ClearAllCachedTransforms()
 
-        # Repaint to show restored original poses.
-        if hasattr(self, '_stageView') and self._stageView:
+        if self._stageView:
             self._stageView.updateGL()
 
+        if self._toggle_action:
+            self._toggle_action.setText("Start Physics")
         _log.info("Simulation reset.")
 
     # ------------------------------------------------------------------
@@ -161,117 +559,55 @@ class NewtonPhysicsPlugin(PluginContainer):
 
     def _startSimInner(self, usdviewApi):
         stage = usdviewApi.stage
-        device = "cuda:0" if wp.is_cuda_available() else "cpu"
-
-        _log.info(f"Initializing on {device}...")
-
-        # Open a separate stage for Newton to parse — using the same
-        # stage that UsdView owns can crash inside LoadUsdPhysicsFromRange
-        # due to concurrent Hydra/ExecUsd access.
         root_layer = stage.GetRootLayer()
-        newton_stage = Usd.Stage.Open(root_layer.identifier)
-        _log.info(f"Opened separate stage for Newton: {root_layer.identifier}")
+        scene_path = root_layer.identifier
 
-        builder = newton.ModelBuilder()
-        # Temporarily limit TBB concurrency to 1 during physics parsing
-        # to work around an intermittent segfault in
-        # UsdPhysics.LoadUsdPhysicsFromRange's parallel prim processing.
-        # Also skip mesh approximation to avoid CoACD fork crashes.
-        Work.SetConcurrencyLimit(1)
-        try:
-            builder.add_usd(newton_stage, skip_mesh_approximation=True)
-        finally:
-            Work.SetConcurrencyLimit(0)  # restore full concurrency
-        builder.approximate_meshes(method='convex_hull')
-        model = builder.finalize(device=device)
+        # Create provider
+        if self._selected_engine == "newton":
+            self._provider = NewtonProvider()
+        else:
+            self._provider = PhysXProvider()
 
-        # Body path mapping.
-        body_map = {}
-        for idx, label in enumerate(builder.body_label):
-            body_map[Sdf.Path(label)] = idx
-            _log.info(f"  Body {idx}: {label}")
+        _log.info(f"Starting {self._provider.name}...")
+        self._body_map = self._provider.initialize(scene_path, stage, device='gpu')
 
-        if not body_map:
+        if not self._body_map:
             _log.info("No physics bodies found.")
+            self._provider = None
             return
 
-        # Detect axis convention BEFORE computing rest transforms.
+        # Detect axis convention
         up_axis = UsdGeom.GetStageUpAxis(stage)
-        self._swap_yz = (up_axis == UsdGeom.Tokens.y)
+        # Only swap axes if provider needs it (Newton = Z-up internally)
+        # PhysX respects the stage upAxis natively, no conversion needed.
+        self._swap_yz = (up_axis == UsdGeom.Tokens.y) and self._provider.needs_axis_swap
+        meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
+        self._grab_threshold = 2.0 / meters_per_unit
+
         if self._swap_yz:
-            import math
             self._q_undo = Gf.Quatd(
-                math.cos(-math.pi / 4),
-                math.sin(-math.pi / 4), 0, 0)
+                math.cos(-math.pi / 4), math.sin(-math.pi / 4), 0, 0)
             self._q_to_newton = Gf.Quatd(
-                math.cos(math.pi / 4),
-                math.sin(math.pi / 4), 0, 0)
+                math.cos(math.pi / 4), math.sin(math.pi / 4), 0, 0)
         else:
             self._q_undo = None
             self._q_to_newton = None
 
-        meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
-        self._grab_threshold = 2.0 / meters_per_unit
-        _log.info(f"Stage upAxis={up_axis}, swap_yz={self._swap_yz}, grab_threshold={self._grab_threshold:.1f}")
+        _log.info(f"upAxis={up_axis}, swap_yz={self._swap_yz}, "
+                  f"grab_threshold={self._grab_threshold:.1f}")
 
-        # Store rest transforms (Newton → USD) for delta computation.
-        # Option C: we overlay correction = M_sim * M_rest⁻¹ with
-        # resetXformStack=false so Hydra's flattening propagates to children.
-        rest_transforms = {}
-        bq_rest = model.state().body_q.numpy()
-        for path, idx in body_map.items():
-            tf = bq_rest[idx]
-            qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
-            q_newton = Gf.Quatd(qw, qx, qy, qz)
-            pos_newton = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
-
-            if self._swap_yz:
-                q_usd = self._q_undo * q_newton
-                pos_usd = self._q_undo.Transform(pos_newton)
-            else:
-                q_usd = q_newton
-                pos_usd = pos_newton
-
-            M_rest = Gf.Matrix4d()
-            M_rest.SetRotate(q_usd)
-            M_rest.SetTranslateOnly(pos_usd)
-            rest_transforms[path] = M_rest
-
-        _log.info(f"Cached {len(rest_transforms)} rest transforms")
-
-        # Solver — default XPBD.
-        solver = newton.solvers.SolverXPBD(model)
-        states = [model.state(), model.state()]
-
-        # Picking — low stiffness + high damping to prevent oscillation.
-        # Newton's spring force is applied every substep, so even small
-        # stiffness produces significant forces at 24fps.
-        self._picking = newton._src.viewer.picking.Picking(
-            model, pick_stiffness=2.0, pick_damping=10.0)
-
+        # Timing
         fps = stage.GetTimeCodesPerSecond()
         if fps <= 0:
             fps = 60.0
-        dt = 1.0 / fps
+        self._dt = 1.0 / fps
+        self._time = 0.0
+        self._fps = fps
 
-        self._engine = {
-            "model": model,
-            "solver": solver,
-            "states": states,
-            "current": 0,
-            "body_map": body_map,
-            "rest_transforms": rest_transforms,
-            "dt": dt,
-            "time": 0.0,
-            "stage": stage,
-            "fps": fps,
-        }
-
-        # Register with HdExec so the scene index knows about our stage.
+        # Register with HdExec
         HdExec.SetGlobalStage(stage)
 
-        # Start a QTimer on the main thread to step physics and refresh.
-        # (Background threads can't trigger GL repaints.)
+        # Start QTimer
         try:
             from PySide6 import QtCore
         except ImportError:
@@ -281,21 +617,21 @@ class NewtonPhysicsPlugin(PluginContainer):
         self._stageView = usdviewApi._UsdviewApi__appController._stageView
         self._sim_timer = QtCore.QTimer()
         self._sim_timer.timeout.connect(lambda: self._simStep())
-        interval_ms = max(1, int(dt * 1000))
+        interval_ms = max(1, int(self._dt * 1000))
         self._sim_timer.start(interval_ms)
 
-        _log.info(f"Running — {len(body_map)} bodies at {fps}fps")
+        _log.info(f"Running {self._provider.name} — "
+                  f"{len(self._body_map)} bodies at {fps}fps")
 
     def _stopSim(self):
         self._running = False
-        if hasattr(self, '_sim_timer') and self._sim_timer:
+        if self._sim_timer:
             self._sim_timer.stop()
             self._sim_timer = None
         if HAS_HDEXEC:
             HdExec.ClearAllCachedTransforms()
 
     def _simStep(self):
-        """Called by QTimer on the main thread — step physics + refresh."""
         try:
             self._simStepInner()
         except Exception:
@@ -303,120 +639,40 @@ class NewtonPhysicsPlugin(PluginContainer):
             self._running = False
 
     def _simStepInner(self):
-        if not self._running or not self._engine:
+        if not self._running or not self._provider:
             return
 
-        e = self._engine
-        cur = e["current"]
-        nxt = 1 - cur
-
-        # Apply grab: set body velocity to move toward target.
-        # This is simpler and more stable than applying forces, which
-        # can conflict with Newton's internal force accumulation.
+        # Apply grab via provider
         if hasattr(self, '_grab_body_idx') and self._grab_body_idx >= 0:
             target_usd = self._grab_target_usd
             if self._swap_yz:
-                target_n = self._q_to_newton.Transform(target_usd)
+                target_sim = self._q_to_newton.Transform(target_usd)
             else:
-                target_n = target_usd
-            
-            body_q_cur = e["states"][cur].body_q.numpy()
-            tf = body_q_cur[self._grab_body_idx]
-            pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
-            
-            # Velocity = (target - pos) * gain
-            # This effectively makes the body track the target smoothly
-            gain = 5.0  # how quickly the body follows (units/sec per unit displacement)
-            desired_vel = (target_n - pos_n) * gain
-            
-            # Write velocity directly
-            body_qd = e["states"][cur].body_qd.numpy()
-            body_qd[self._grab_body_idx][0] = float(desired_vel[0])
-            body_qd[self._grab_body_idx][1] = float(desired_vel[1])
-            body_qd[self._grab_body_idx][2] = float(desired_vel[2])
-            # Zero angular velocity to prevent spinning
-            body_qd[self._grab_body_idx][3] = 0.0
-            body_qd[self._grab_body_idx][4] = 0.0
-            body_qd[self._grab_body_idx][5] = 0.0
-            e["states"][cur].body_qd.assign(
-                wp.array(body_qd, dtype=wp.spatial_vectorf, device=e["model"].device))
+                target_sim = target_usd
+            self._provider.update_grab(
+                (target_sim[0], target_sim[1], target_sim[2]))
 
-        # Step.
-        contacts = e["model"].collide(e["states"][cur])
-        e["solver"].step(
-            e["states"][cur], e["states"][nxt],
-            control=None, contacts=contacts, dt=e["dt"])
-        e["current"] = nxt
-        e["time"] += e["dt"]
+        # Step physics
+        self._provider.step(self._dt, self._time)
+        self._time += self._dt
 
-        # Cache the numpy readback and push transforms to HdExec's C++
-        # cache.  This avoids Python callbacks from TBB threads entirely.
-        body_q = e["states"][nxt].body_q.numpy()
-
-        transforms = []
-        for path, idx in e["body_map"].items():
-            tf = body_q[idx]
-            # body_q layout: (px, py, pz, qx, qy, qz, qw)
-            qx, qy, qz, qw = float(tf[3]), float(tf[4]), float(tf[5]), float(tf[6])
-            q_newton = Gf.Quatd(qw, qx, qy, qz)
-            pos_newton = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
-
-            if self._swap_yz:
-                # Convert Newton Z-up → USD Y-up
-                q_usd = self._q_undo * q_newton
-                pos_usd = self._q_undo.Transform(pos_newton)
-            else:
-                q_usd = q_newton
-                pos_usd = pos_newton
-
-            M_sim = Gf.Matrix4d()
-            M_sim.SetRotate(q_usd)
-            M_sim.SetTranslateOnly(pos_usd)
-
-            # Use M_sim directly with resetXformStack=false.
-            # The overlay REPLACES the prim's local xform data source,
-            # so M_sim becomes the body's local-to-parent transform.
-            # Children inherit this via Hydra's flattening.
-            transforms.append((path, M_sim))
-
+        # Get transforms and push to HdExec
+        transforms = self._provider.get_body_transforms(self._swap_yz)
         HdExec.SetCachedTransforms(transforms)
+        HdExec.AdvanceGlobalTime(self._time * self._fps)
 
-        # Log every ~1 second
-        if int(e["time"] * 24) % 24 == 0:
-            tf = body_q[0] if len(body_q) > 0 else [0,0,0,0,0,0,1]
-            _log.info(f"Step t={e['time']:.2f}s pos=({tf[0]:.2f}, {tf[1]:.2f}, {tf[2]:.2f})")
-            # Also log a dynamic body for debugging
-            if len(body_q) > 1:
-                tf1 = body_q[1]
-                label1 = list(e["body_map"].keys())[1] if len(e["body_map"]) > 1 else "?"
-                # Show both Newton pos and USD-converted pos
-                pos_n = Gf.Vec3d(float(tf1[0]), float(tf1[1]), float(tf1[2]))
-                if self._swap_yz:
-                    pos_usd = self._q_undo.Transform(pos_n)
-                else:
-                    pos_usd = pos_n
-                _log.info(f"  body[1] {label1}: newton=({pos_n[0]:.1f},{pos_n[1]:.1f},{pos_n[2]:.1f}) usd=({pos_usd[0]:.1f},{pos_usd[1]:.1f},{pos_usd[2]:.1f})")
-
-        # Dirty the HdExec scene index so Hydra re-pulls transforms.
-        # Advance global time so the TransformProvider sees the new frame.
-        HdExec.AdvanceGlobalTime(e["time"] * e.get("fps", 24.0))
-
-        # Refresh viewport.  Release the GIL first so that Hydra's TBB
-        # worker threads can call back into the Python TransformProvider
-        # without deadlocking on the GIL.
+        # Refresh viewport
         if self._stageView:
             self._stageView.updateGL()
 
     # ------------------------------------------------------------------
-    # Qt event filter for grab mode
+    # Grab mode (Qt event filter)
     # ------------------------------------------------------------------
 
     def _installEventFilter(self, usdviewApi):
         stageView = usdviewApi._UsdviewApi__appController._stageView
-        self._event_filter = _GrabEventFilter(
-            stageView, self, usdviewApi)
+        self._event_filter = _GrabEventFilter(stageView, self, usdviewApi)
         stageView.installEventFilter(self._event_filter)
-        # Enable mouse tracking so we get move events without buttons held.
         stageView.setMouseTracking(True)
 
     def _removeEventFilter(self, usdviewApi):
@@ -426,12 +682,10 @@ class NewtonPhysicsPlugin(PluginContainer):
             self._event_filter = None
 
     def _screenToRay(self, usdviewApi, x, y):
-        """Convert screen coordinates to a world-space ray."""
         stageView = usdviewApi._UsdviewApi__appController._stageView
         gfCamera, _ = stageView.resolveCamera()
         frustum = gfCamera.frustum
 
-        # Normalize to [-1, 1].
         w = stageView.width()
         h = stageView.height()
         ndc = Gf.Vec2d(
@@ -447,116 +701,87 @@ class NewtonPhysicsPlugin(PluginContainer):
             float(ray.direction[0]),
             float(ray.direction[1]),
             float(ray.direction[2]))
-
-        _log.info(f"  screenToRay: screen=({x:.0f},{y:.0f}) viewport=({w}x{h}) "
-                   f"ndc=({ndc[0]:.3f},{ndc[1]:.3f})")
-        _log.info(f"  ray origin=({origin[0]:.2f},{origin[1]:.2f},{origin[2]:.2f}) "
-                   f"dir=({direction[0]:.4f},{direction[1]:.4f},{direction[2]:.4f})")
-
         return origin, direction
 
     def beginGrab(self, usdviewApi, x, y):
-        """Start grabbing a body at screen position (x, y).
-        
-        Uses a simple position-based approach: find the closest body
-        to the screen ray (in USD space), then track its offset from
-        the ray intersection point. The grab force is applied directly
-        in Newton space each frame.
-        """
-        if not self._engine:
-            _log.info("beginGrab: no engine")
+        if not self._provider:
             return False
 
         origin, direction = self._screenToRay(usdviewApi, x, y)
-        
-        # Find the closest body to the ray in USD space.
-        # We check all bodies and find the one whose USD position
-        # is closest to the ray.
-        e = self._engine
-        cur = e["current"]
-        body_q = e["states"][cur].body_q.numpy()
-        
+
+        # Find closest body to ray in USD space
+        transforms = self._provider.get_body_transforms(self._swap_yz)
+
+        ray_o = Gf.Vec3d(origin[0], origin[1], origin[2])
+        ray_d = Gf.Vec3d(direction[0], direction[1], direction[2]).GetNormalized()
+
         best_dist = 1e10
         best_idx = -1
         best_path = None
-        
-        ray_o = Gf.Vec3d(origin[0], origin[1], origin[2])
-        ray_d = Gf.Vec3d(direction[0], direction[1], direction[2]).GetNormalized()
-        
-        for path, idx in e["body_map"].items():
-            tf = body_q[idx]
-            q_n = Gf.Quatd(float(tf[6]), float(tf[3]), float(tf[4]), float(tf[5]))
-            pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
-            
-            # Convert to USD space
-            if self._swap_yz:
-                pos_usd = self._q_undo.Transform(pos_n)
-            else:
-                pos_usd = pos_n
-            
-            # Distance from ray to point
+        best_t = 0.0
+
+        for path, M in transforms:
+            pos_usd = Gf.Vec3d(M[3][0], M[3][1], M[3][2])
             v = pos_usd - ray_o
             t = Gf.Dot(v, ray_d)
             if t < 0:
-                continue  # behind the camera
-            closest_on_ray = ray_o + ray_d * t
-            dist = (pos_usd - closest_on_ray).GetLength()
-            
+                continue
+            closest = ray_o + ray_d * t
+            dist = (pos_usd - closest).GetLength()
             if dist < best_dist:
                 best_dist = dist
-                best_idx = idx
+                best_idx = self._body_map[path]
                 best_path = path
-        
-        # Threshold: must be within grab_threshold of the ray
+                best_t = t
+
         if best_dist > self._grab_threshold or best_idx < 0:
-            _log.info(f"No body hit (closest dist={best_dist:.2f})")
+            _log.info(f"No body hit (closest={best_dist:.2f})")
             return False
-        
-        # Store grab state — initialize target to body's ACTUAL position
-        # (not the ray hit point) to avoid a force spike on the first frame.
+
+        # Initialize grab state
         self._grab_body_idx = best_idx
         self._grab_body_path = best_path
-        
-        tf = body_q[best_idx]
-        pos_n = Gf.Vec3d(float(tf[0]), float(tf[1]), float(tf[2]))
+        self._grab_depth = best_t
+
+        # Start target at body's current position in USD space
+        for path, M in transforms:
+            if path == best_path:
+                self._grab_target_usd = Gf.Vec3d(M[3][0], M[3][1], M[3][2])
+                break
+
+        # Convert to sim space and notify provider
         if self._swap_yz:
-            pos_usd = self._q_undo.Transform(pos_n)
+            target_sim = self._q_to_newton.Transform(self._grab_target_usd)
         else:
-            pos_usd = pos_n
-        
-        # Grab depth = distance from camera to body along ray
-        v = pos_usd - ray_o
-        t = Gf.Dot(v, ray_d)
-        self._grab_depth = t
-        # Offset = zero (target starts at body center)
-        self._grab_offset = Gf.Vec3d(0, 0, 0)
-        # Target starts at body's current position
-        self._grab_target_usd = pos_usd
-        
-        _log.info(f"Grabbed body {best_path} (idx={best_idx}, dist={best_dist:.2f}, depth={t:.2f})")
+            target_sim = self._grab_target_usd
+        self._provider.begin_grab(
+            best_idx, (target_sim[0], target_sim[1], target_sim[2]))
+
+        _log.info(f"Grabbed {best_path} (idx={best_idx}, "
+                  f"dist={best_dist:.2f}, depth={best_t:.2f})")
         return True
 
     def updateGrab(self, usdviewApi, x, y):
-        """Update grab target during drag."""
         if not hasattr(self, '_grab_body_idx') or self._grab_body_idx < 0:
             return
         origin, direction = self._screenToRay(usdviewApi, x, y)
-        
         ray_o = Gf.Vec3d(origin[0], origin[1], origin[2])
         ray_d = Gf.Vec3d(direction[0], direction[1], direction[2]).GetNormalized()
-        
-        # Project at the same depth along the new ray
-        self._grab_target_usd = ray_o + ray_d * self._grab_depth + self._grab_offset
+        self._grab_target_usd = ray_o + ray_d * self._grab_depth
 
     def endGrab(self):
-        """Release the grabbed body."""
-        if hasattr(self, '_grab_body_idx'):
-            _log.info(f"Released body {self._grab_body_path}.")
+        if hasattr(self, '_grab_body_idx') and self._grab_body_idx >= 0:
+            _log.info(f"Released {self._grab_body_path}")
             self._grab_body_idx = -1
             self._grab_body_path = None
+            if self._provider:
+                self._provider.end_grab()
 
 
-# Qt event filter
+# ======================================================================
+# Qt Event Filter for Grab
+# ======================================================================
+
 try:
     from PySide6 import QtCore
 except ImportError:
@@ -564,10 +789,8 @@ except ImportError:
 
 
 class _GrabEventFilter(QtCore.QObject):
-    """Intercepts mouse events for physics grabbing when grab mode is on.
-
-    Uses Shift+left-click to match Omniverse convention. Falls back to
-    middle-click if Shift+left is consumed by UsdView's multi-select.
+    """Intercepts mouse events for physics grabbing.
+    Shift+left-click or middle-click to grab.
     """
 
     def __init__(self, stageView, plugin, usdviewApi):
@@ -575,7 +798,6 @@ class _GrabEventFilter(QtCore.QObject):
         self._plugin = plugin
         self._api = usdviewApi
         self._grabbing = False
-        _log.info(f"Event filter installed on {stageView.__class__.__name__}")
 
     def eventFilter(self, obj, event):
         etype = event.type()
@@ -583,7 +805,6 @@ class _GrabEventFilter(QtCore.QObject):
         if etype == QtCore.QEvent.MouseButtonPress:
             btn = event.button()
             mods = event.modifiers()
-            # Shift+left or plain middle-click
             grab = False
             if btn == QtCore.Qt.LeftButton and (mods & QtCore.Qt.ShiftModifier):
                 grab = True
@@ -593,12 +814,9 @@ class _GrabEventFilter(QtCore.QObject):
             if grab:
                 x = event.x() * obj.devicePixelRatioF()
                 y = event.y() * obj.devicePixelRatioF()
-                _log.info(f"Grab attempt at ({x:.0f}, {y:.0f})")
                 if self._plugin.beginGrab(self._api, x, y):
                     self._grabbing = True
                     return True
-                else:
-                    _log.info("No body hit")
 
         elif etype == QtCore.QEvent.MouseMove:
             if self._grabbing:
