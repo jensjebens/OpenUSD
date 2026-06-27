@@ -435,44 +435,63 @@ class NewtonPhysicsPlugin(PluginContainer):
         _log.info("configureView called!")
 
         try:
-            from PySide6.QtWidgets import QActionGroup
-            from PySide6.QtGui import QKeySequence
+            from PySide6.QtGui import QActionGroup, QKeySequence
+            from PySide6.QtWidgets import QMenuBar, QMenu
         except ImportError:
-            from PySide2.QtWidgets import QActionGroup
+            from PySide2.QtWidgets import QActionGroup, QMenuBar, QMenu
             from PySide2.QtGui import QKeySequence
 
-        menu = plugUIBuilder.findOrCreateMenu("Physics")
+        # Find the render menu bar (above the viewport, next to "Lights")
+        # rather than the top-level window menu bar.
+        mainWindow = plugUIBuilder._mainWindow
+        renderMenuBar = mainWindow.findChild(QMenuBar, "renderMenuBar")
+
+        if renderMenuBar:
+            # Add our Physics menu to the render menu bar (next to Lights)
+            physicsQMenu = QMenu("Physics", renderMenuBar)
+            physicsQMenu.setToolTipsVisible(True)
+            renderMenuBar.addMenu(physicsQMenu)
+        else:
+            # Fallback: use the top-level menu bar
+            _log.info("  renderMenuBar not found, using top-level menu bar")
+            physicsQMenu = mainWindow.menuBar().addMenu("Physics")
+            physicsQMenu.setToolTipsVisible(True)
 
         # Simulate toggle (checkable)
-        self._toggle_action = menu.addItem(self._toggle_cmd)
+        self._toggle_action = physicsQMenu.addAction(
+            "Simulate", lambda: self._toggle_cmd.run())
         self._toggle_action.setCheckable(True)
         self._toggle_action.setChecked(False)
 
         # Grab mode toggle (checkable)
-        self._grab_action = menu.addItem(self._grab_cmd)
+        self._grab_action = physicsQMenu.addAction(
+            "Grab Mode", lambda: self._grab_cmd.run())
         self._grab_action.setCheckable(True)
         self._grab_action.setChecked(False)
 
-        menu.addSeparator()
+        physicsQMenu.addSeparator()
 
         # Reset (plain action)
-        self._reset_action = menu.addItem(self._reset_cmd)
+        self._reset_action = physicsQMenu.addAction(
+            "Reset", lambda: self._reset_cmd.run())
 
-        menu.addSeparator()
+        physicsQMenu.addSeparator()
 
         # Engine submenu with radio buttons
-        engine_submenu = menu.findOrCreateSubmenu("Engine")
-        self._engine_group = QActionGroup(engine_submenu._qMenu)
+        engineQMenu = physicsQMenu.addMenu("Engine")
+        self._engine_group = QActionGroup(engineQMenu)
         self._engine_group.setExclusive(True)
 
         if HAS_NEWTON:
-            self._newton_action = engine_submenu.addItem(self._newton_cmd)
+            self._newton_action = engineQMenu.addAction(
+                "Newton GPU", lambda: self._newton_cmd.run())
             self._newton_action.setCheckable(True)
             self._newton_action.setChecked(self._selected_engine == "newton")
             self._engine_group.addAction(self._newton_action)
 
         if HAS_PHYSX:
-            self._physx_action = engine_submenu.addItem(self._physx_cmd)
+            self._physx_action = engineQMenu.addAction(
+                "PhysX 5", lambda: self._physx_cmd.run())
             self._physx_action.setCheckable(True)
             self._physx_action.setChecked(self._selected_engine == "physx")
             self._engine_group.addAction(self._physx_action)
