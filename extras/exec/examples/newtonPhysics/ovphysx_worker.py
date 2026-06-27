@@ -57,7 +57,7 @@ def main():
     is_articulated = False
 
     # Substeps for solver stability (configured on init)
-    num_substeps = 4
+    num_substeps = 2
 
     def respond(msg):
         original_stdout.write(json.dumps(msg) + "\n")
