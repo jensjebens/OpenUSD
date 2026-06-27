@@ -132,25 +132,26 @@ def main():
             try:
                 sub_dt = dt / num_substeps
 
+                # Apply grab velocity once (read current pose, compute vel)
+                if grab_body_idx >= 0 and grab_target is not None:
+                    pose_binding.read(poses_buf)  # blocking read
+                    body_pos = poses_buf[grab_body_idx, :3].astype(np.float64)
+                    target = np.array(grab_target, dtype=np.float64)
+                    delta = target - body_pos
+                    vel = delta * grab_stiffness
+                    speed = np.linalg.norm(vel)
+                    if speed > 20.0:
+                        vel *= 20.0 / speed
+
+                    vel_buf[:] = 0
+                    vel_buf[grab_body_idx, 0] = float(vel[0])
+                    vel_buf[grab_body_idx, 1] = float(vel[1])
+                    vel_buf[grab_body_idx, 2] = float(vel[2])
+                    vel_binding.write(vel_buf)
+
+                # Fire all substeps without blocking between them
+                # (PhysX step() is async / stream-ordered)
                 for s in range(num_substeps):
-                    # Apply grab velocity before each substep
-                    if grab_body_idx >= 0 and grab_target is not None:
-                        pose_binding.read(poses_buf)
-                        body_pos = poses_buf[grab_body_idx, :3].astype(np.float64)
-                        target = np.array(grab_target, dtype=np.float64)
-                        delta = target - body_pos
-                        vel = delta * grab_stiffness
-                        speed = np.linalg.norm(vel)
-                        if speed > 20.0:
-                            vel *= 20.0 / speed
-
-                        # Write velocity for the grabbed body via the all-body binding
-                        vel_buf[:] = 0
-                        vel_buf[grab_body_idx, 0] = float(vel[0])
-                        vel_buf[grab_body_idx, 1] = float(vel[1])
-                        vel_buf[grab_body_idx, 2] = float(vel[2])
-                        vel_binding.write(vel_buf)
-
                     physx.step(sub_dt, sim_time + s * sub_dt)
 
                 # Read poses and write to mmap
