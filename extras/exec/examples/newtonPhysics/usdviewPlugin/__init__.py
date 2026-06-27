@@ -219,13 +219,32 @@ class NewtonProvider(PhysicsProvider):
 
 
 # ======================================================================
-# PhysX 5 Provider (ovphysx)
+# PhysX 5 Provider (ovphysx) — shared-memory decoupled architecture
 # ======================================================================
 
 class PhysXProvider(PhysicsProvider):
-    """NVIDIA PhysX 5 via ovphysx — runs in a subprocess to avoid
-    dual-USD-runtime crashes with the from-source OpenUSD in this process.
+    """NVIDIA PhysX 5 via ovphysx — runs in a subprocess communicating
+    through shared memory for zero-copy, non-blocking pose transfer.
+
+    Architecture:
+      - Init: synchronous pipe handshake (stdout JSON line)
+      - Hot loop: parent sets kick flag in shm, worker steps & writes poses,
+        sets done flag. Parent reads poses non-blocking (1-frame latency).
+      - Grab: parent writes body_idx + target to shm control segment.
+      - Shutdown: parent sets quit flag.
     """
+
+    # Control struct offsets (must match worker)
+    _OFF_KICK = 0
+    _OFF_DONE = 1
+    _OFF_QUIT = 2
+    _OFF_GRAB_IDX = 4
+    _OFF_GRAB_X = 8
+    _OFF_GRAB_Y = 12
+    _OFF_GRAB_Z = 16
+    _OFF_DT = 20
+    _OFF_SIM_TIME = 24
+    _CTRL_SIZE = 28
 
     @property
     def name(self):
@@ -233,8 +252,13 @@ class PhysXProvider(PhysicsProvider):
 
     def initialize(self, scene_path, stage, device='gpu'):
         import subprocess
+        import struct as _struct
+        from multiprocessing import shared_memory
 
-        _log.info("[PhysX] Launching subprocess worker...")
+        self._struct = _struct
+        self._shm_module = shared_memory
+
+        _log.info("[PhysX] Launching subprocess worker (shm mode)...")
 
         # Find the worker script (sibling of the usdviewPlugin package)
         worker_path = os.path.join(
@@ -244,13 +268,12 @@ class PhysXProvider(PhysicsProvider):
         # Launch with clean PYTHONPATH so ovphysx uses its bundled USD
         env = os.environ.copy()
         env["PYTHONPATH"] = ""
-        # Keep LD_LIBRARY_PATH clean too
         env.pop("LD_PRELOAD", None)
 
         python = sys.executable  # same venv python (has ovphysx)
         self._proc = subprocess.Popen(
-            [python, worker_path],
-            stdin=subprocess.PIPE,
+            [python, worker_path, scene_path, device],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
@@ -258,68 +281,61 @@ class PhysXProvider(PhysicsProvider):
             bufsize=1,
         )
 
-        # Wait for ready
-        resp = self._recv()
-        if resp.get("status") != "ready":
-            raise RuntimeError(f"Worker failed to start: {resp}")
-
-        # Send init command
-        self._send({"action": "init", "scene_path": scene_path, "device": device})
-        resp = self._recv()
+        # Synchronous init handshake — read single JSON line from stdout
+        line = self._proc.stdout.readline()
+        if not line:
+            stderr = self._proc.stderr.read() if self._proc.stderr else ""
+            raise RuntimeError(f"Worker died during init: {stderr[:500]}")
+        resp = json.loads(line)
         if "error" in resp:
             raise RuntimeError(f"PhysX init failed: {resp['error']}")
 
         prim_paths = resp["prim_paths"]
         self._n_bodies = resp["n_bodies"]
-        self._mmap_path = resp["mmap_path"]
-        self._mmap_size = resp["mmap_size"]
+        pose_shm_size = resp["pose_shm_size"]
 
-        # Open mmap for reading poses
-        self._mmap_fd = open(self._mmap_path, "rb")
+        # Attach to shared memory segments created by worker
+        self._ctrl_shm = shared_memory.SharedMemory(
+            name="ovphysx_ctrl", create=False)
+        self._pose_shm = shared_memory.SharedMemory(
+            name="ovphysx_poses", create=False)
+
+        # Numpy view over pose buffer (zero-copy reads)
+        self._poses_view = np.ndarray(
+            (self._n_bodies, 7), dtype=np.float32,
+            buffer=self._pose_shm.buf)
 
         # Build body map
         self._body_map = {}
         for idx, path_str in enumerate(prim_paths):
             self._body_map[Sdf.Path(path_str)] = idx
 
-        _log.info(f"[PhysX] {len(self._body_map)} bodies ready (subprocess)")
+        _log.info(f"[PhysX] {len(self._body_map)} bodies ready (shm decoupled)")
         return self._body_map
 
-    def _send(self, msg):
-        self._proc.stdin.write(json.dumps(msg) + "\n")
-        self._proc.stdin.flush()
-
-    def _recv(self):
-        line = self._proc.stdout.readline()
-        if not line:
-            stderr = self._proc.stderr.read() if self._proc.stderr else ""
-            raise RuntimeError(f"Worker died: {stderr[:500]}")
-        return json.loads(line)
-
     def step(self, dt, sim_time):
-        # Drain any pending update_grab response before sending step.
-        # update_grab is fire-and-forget, so the worker may have sent
-        # a response we haven't consumed yet.
-        import select
-        while True:
-            # Non-blocking check if there's data to read
-            rlist, _, _ = select.select([self._proc.stdout], [], [], 0)
-            if rlist:
-                self._proc.stdout.readline()  # discard stale response
-            else:
-                break
-
-        self._send({"action": "step", "dt": dt, "sim_time": sim_time})
-        resp = self._recv()
-        if "error" in resp:
-            _log.error(f"[PhysX] step error: {resp['error']}")
+        """Non-blocking: write dt/sim_time to control shm and set kick flag.
+        The worker will step asynchronously; poses appear in shm when done.
+        """
+        buf = self._ctrl_shm.buf
+        # Write dt and sim_time
+        self._struct.pack_into('<f', buf, self._OFF_DT, dt)
+        self._struct.pack_into('<f', buf, self._OFF_SIM_TIME, sim_time)
+        # Set kick flag (worker is spinning on this)
+        buf[self._OFF_KICK] = 1
 
     def get_body_transforms(self, swap_yz):
-        # Read poses from mmap (written by worker after each step)
-        self._mmap_fd.seek(0)
-        data = self._mmap_fd.read(self._mmap_size)
-        poses_buf = np.frombuffer(data, dtype=np.float32).reshape(
-            self._n_bodies, 7)
+        """Read poses directly from shared memory numpy view.
+        Non-blocking — returns last available poses even if worker
+        hasn't finished the current step yet (graceful 1-frame latency).
+        """
+        # Optionally clear done flag so we know when *next* frame lands
+        buf = self._ctrl_shm.buf
+        if buf[self._OFF_DONE]:
+            buf[self._OFF_DONE] = 0
+
+        # Read poses (numpy view — no copy needed for iteration)
+        poses_buf = self._poses_view
 
         if swap_yz:
             q_undo = Gf.Quatd(math.cos(-math.pi/4), math.sin(-math.pi/4), 0, 0)
@@ -347,37 +363,59 @@ class PhysXProvider(PhysicsProvider):
         return transforms
 
     def begin_grab(self, body_idx, target_pos):
-        self._send({
-            "action": "grab",
-            "body_idx": body_idx,
-            "target": list(target_pos),
-        })
-        self._recv()
+        """Write grab body index and target to shm control segment."""
+        buf = self._ctrl_shm.buf
+        self._struct.pack_into('<i', buf, self._OFF_GRAB_IDX, body_idx)
+        self._struct.pack_into('<f', buf, self._OFF_GRAB_X, float(target_pos[0]))
+        self._struct.pack_into('<f', buf, self._OFF_GRAB_Y, float(target_pos[1]))
+        self._struct.pack_into('<f', buf, self._OFF_GRAB_Z, float(target_pos[2]))
         _log.info(f"[PhysX] Grab body {body_idx}")
 
     def update_grab(self, target_pos):
-        # Fire-and-forget — don't block Qt event loop waiting for ack.
-        # The worker will process this before the next step.
-        self._send({"action": "update_grab", "target": list(target_pos)})
-        # Don't recv here — we'll drain any pending response on next step
+        """Update grab target position in shm — non-blocking."""
+        buf = self._ctrl_shm.buf
+        self._struct.pack_into('<f', buf, self._OFF_GRAB_X, float(target_pos[0]))
+        self._struct.pack_into('<f', buf, self._OFF_GRAB_Y, float(target_pos[1]))
+        self._struct.pack_into('<f', buf, self._OFF_GRAB_Z, float(target_pos[2]))
 
     def end_grab(self):
-        self._send({"action": "end_grab"})
-        self._recv()
+        """Clear grab by setting body_idx to -1."""
+        buf = self._ctrl_shm.buf
+        self._struct.pack_into('<i', buf, self._OFF_GRAB_IDX, -1)
 
     def release(self):
+        """Signal worker to quit and clean up shared memory."""
         try:
-            self._send({"action": "release"})
-            self._recv()
+            if hasattr(self, '_ctrl_shm') and self._ctrl_shm:
+                self._ctrl_shm.buf[self._OFF_QUIT] = 1
         except Exception:
             pass
+
+        # Wait for worker to exit gracefully
         if hasattr(self, '_proc') and self._proc:
-            self._proc.terminate()
-            self._proc.wait(timeout=5)
+            try:
+                self._proc.wait(timeout=3)
+            except Exception:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=2)
+                except Exception:
+                    self._proc.kill()
             self._proc = None
-        if hasattr(self, '_mmap_fd') and self._mmap_fd:
-            self._mmap_fd.close()
-            self._mmap_fd = None
+
+        # Close shm handles (worker unlinks them on exit)
+        if hasattr(self, '_ctrl_shm') and self._ctrl_shm:
+            try:
+                self._ctrl_shm.close()
+            except Exception:
+                pass
+            self._ctrl_shm = None
+        if hasattr(self, '_pose_shm') and self._pose_shm:
+            try:
+                self._pose_shm.close()
+            except Exception:
+                pass
+            self._pose_shm = None
 
 
 # ======================================================================
