@@ -434,11 +434,11 @@ class NewtonPhysicsPlugin(PluginContainer):
         self._stageView = None
         self._sim_timer = None
 
-        # Default engine selection
-        if HAS_NEWTON:
-            self._selected_engine = "newton"
-        elif HAS_PHYSX:
+        # Default engine selection — prefer PhysX (faster interactive performance)
+        if HAS_PHYSX:
             self._selected_engine = "physx"
+        elif HAS_NEWTON:
+            self._selected_engine = "newton"
         else:
             self._selected_engine = None
 
