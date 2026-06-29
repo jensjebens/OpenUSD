@@ -20,6 +20,8 @@
 #include "pxr/usdImaging/usdExecImaging/stageSceneIndexFactory.h"
 #include "pxr/usdImaging/usdExecImaging/stageSceneIndexInterface.h"
 
+#include "pxr/imaging/hdExec/execComputedTransformSceneIndex.h"
+
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdGeom/camera.h"
 #include "pxr/usd/usdRender/tokens.h"
@@ -521,11 +523,19 @@ UsdImagingGLEngine::PrepareBatch(
         _PreSetTime(params);
         // SetTime will only react if time actually changes.
         if (UseUsdImagingSceneIndex()) {
-            _usdImagingSceneIndex->SetTime(params.frame);
+            _stageSceneIndex->SetTime(params.frame);
             if (_execStageSceneIndex) {
                 _execStageSceneIndex->SetTime(params.frame);
                 _noticeBatchingStageSceneIndex->Flush();
             }
+
+            // Advance the HdExec scene index filter's time so that
+            // exec computations (e.g., physics) re-evaluate at the
+            // new frame. This is necessary because physics prims may
+            // not have time-sampled attributes, so the stage scene
+            // index won't dirty them on time change.
+            HdExecComputedTransformSceneIndex::AdvanceGlobalTime(
+                params.frame);
         } else {
             _sceneDelegate->SetTime(params.frame);
         }
@@ -582,6 +592,10 @@ UsdImagingGLEngine::PrepareBatch(
             if (_execStageSceneIndex) {
                 _execStageSceneIndex->SetStage(stage);
             }
+
+            // Notify HdExec scene index filter of the stage for
+            // auto-bootstrapping (e.g., physics simulation).
+            HdExecComputedTransformSceneIndex::SetGlobalStage(stage);
 
         } else {
             TF_VERIFY(_sceneDelegate);
