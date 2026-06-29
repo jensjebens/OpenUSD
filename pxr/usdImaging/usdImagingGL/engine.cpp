@@ -523,7 +523,7 @@ UsdImagingGLEngine::PrepareBatch(
         _PreSetTime(params);
         // SetTime will only react if time actually changes.
         if (UseUsdImagingSceneIndex()) {
-            _stageSceneIndex->SetTime(params.frame);
+            _usdImagingSceneIndex->SetTime(params.frame);
             if (_execStageSceneIndex) {
                 _execStageSceneIndex->SetTime(params.frame);
                 _noticeBatchingStageSceneIndex->Flush();
