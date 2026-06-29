@@ -20,6 +20,7 @@ pxr_library(usdImagingGL
         garch
         glf
         hd
+        hdExec
         hdsi
         hdx
         pxOsd
@@ -80,14 +81,6 @@ pxr_build_test(testUsdImagingGLBasicDrawing
     CPPFILES
         unitTestGLDrawing.cpp
         testenv/testUsdImagingGLBasicDrawing.cpp
-)
-
-pxr_build_test(testUsdImagingGLBatchedDrawing
-    LIBRARIES
-        ${TEST_LIBS}
-    CPPFILES
-        unitTestGLDrawing.cpp
-        testenv/testUsdImagingGLBatchedDrawing.cpp
 )
 
 pxr_build_test(testUsdImagingGLHighlight
@@ -611,6 +604,107 @@ pxr_register_test(testUsdImagingGLImplicits_refined
     PERCEPTUAL
     EXPECTED_RETURN_CODE 0
     TESTENV testenv/testUsdImagingGLImplicits
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_simpleSphere
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -offscreen -lighting -stage simpleSphere.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_simpleSphere.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_simpleSphere.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_transformedSphere
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -offscreen -lighting -stage transformedSphere.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_transformedSphere.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_transformedSphere.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_intersectingSpheres
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -offscreen -lighting -stage intersectingSpheres.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_intersectingSpheres.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_intersectingSpheres.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_piSpheres
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -offscreen -lighting -stage piSpheres.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_piSpheres.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_piSpheres.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_niSpheres
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -offscreen -lighting -stage niSpheres.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_niSpheres.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_niSpheres.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_sphereInsideSphere
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -offscreen -lighting -stage sphereInsideSphere.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_sphereInsideSphere.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_sphereInsideSphere.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_backfaceCull
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -cullStyle back -offscreen -lighting -stage sphereInsideSphere.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_backfaceCull.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_backfaceCull.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_frontfaceCull
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -cullStyle front -offscreen -lighting -stage sphereInsideSphere.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_frontfaceCull.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_frontfaceCull.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
+)
+
+pxr_register_test(testUsdImagingGLNativeImplicits_animatedSphere
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -offscreen -lighting -times 1 2 3 -stage animatedSphere.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_animatedSphere.png"
+    IMAGE_DIFF_COMPARE
+        testUsdImagingGLNativeImplicits_animatedSphere_001.png
+        testUsdImagingGLNativeImplicits_animatedSphere_002.png
+        testUsdImagingGLNativeImplicits_animatedSphere_003.png
+    FAIL_PERCENT 0.05
+    FAIL 0.2
+    TESTENV testenv/testUsdImagingGLNativeImplicits
+    ENV
+        HDST_ENABLE_NATIVE_SPHERES=1
 )
 
 pxr_register_test(testUsdImagingGLHoleFaces
@@ -5104,6 +5198,18 @@ if (MaterialX_FOUND AND ${PXR_ENABLE_MATERIALX_SUPPORT})
         PERCEPTUAL
         EXPECTED_RETURN_CODE 0
         TESTENV testenv/testUsdImagingGLGeomSubsets
+    )
+
+    # Not a MaterialX test as such, but requires MaterialX support
+    pxr_register_test(testUsdImagingGLNativeImplicits_spheresWithMaterials
+        COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testUsdImagingGLBasicDrawing -offscreen -lighting -sceneLights -stage spheresWithMaterials.usda -camera /main_cam -write testUsdImagingGLNativeImplicits_spheresWithMaterials.png"
+        IMAGE_DIFF_COMPARE
+            testUsdImagingGLNativeImplicits_spheresWithMaterials.png
+        FAIL_PERCENT 0.05
+        FAIL 0.2
+        TESTENV testenv/testUsdImagingGLNativeImplicits
+        ENV
+            HDST_ENABLE_NATIVE_SPHERES=1
     )
 
 endif() # MaterialX tests

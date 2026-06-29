@@ -2278,6 +2278,323 @@ static void testVtCheapToCopy() {
     static_assert(!VtValueTypeHasCheapCopy<VtArray<TfToken>>::value, "");
 }
 
+struct _MoveCounter {
+    int copies = 0;
+    int moves = 0;
+    int value = 0;
+
+    _MoveCounter() = default;
+    explicit _MoveCounter(int v) : value(v) {}
+    _MoveCounter(const _MoveCounter &o)
+        : copies(o.copies + 1), moves(o.moves), value(o.value) {}
+    _MoveCounter(_MoveCounter &&o) noexcept
+        : copies(o.copies), moves(o.moves + 1), value(o.value) {}
+    _MoveCounter &operator=(const _MoveCounter &o) {
+        copies = o.copies + 1; moves = o.moves; value = o.value;
+        return *this;
+    }
+    _MoveCounter &operator=(_MoveCounter &&o) noexcept {
+        copies = o.copies; moves = o.moves + 1; value = o.value;
+        return *this;
+    }
+    bool operator==(const _MoveCounter &o) const { return value == o.value; }
+};
+
+static void testVtValueForwarding()
+{
+    // _MoveCounter is larger than a pointer (remote storage) and tracks copies
+    // vs moves through the VtValue forwarding chain.
+
+    // Ctor from rvalue should move, not copy.
+    {
+        _MoveCounter obj(42);
+        VtValue v(std::move(obj));
+        TF_AXIOM(v.IsHolding<_MoveCounter>());
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().value == 42);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().copies == 0);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().moves > 0);
+    }
+
+    // Ctor from lvalue should copy, not move.
+    {
+        _MoveCounter obj(7);
+        VtValue v(obj);
+        TF_AXIOM(v.IsHolding<_MoveCounter>());
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().value == 7);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().copies > 0);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().moves == 0);
+    }
+
+    // Assignment from rvalue should move, not copy.
+    {
+        VtValue v;
+        _MoveCounter obj(99);
+        v = std::move(obj);
+        TF_AXIOM(v.IsHolding<_MoveCounter>());
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().value == 99);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().copies == 0);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().moves > 0);
+    }
+
+    // Assignment from lvalue should copy, not move.
+    {
+        VtValue v;
+        _MoveCounter obj(55);
+        v = obj;
+        TF_AXIOM(v.IsHolding<_MoveCounter>());
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().value == 55);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().copies > 0);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().moves == 0);
+    }
+
+    // Reassignment from rvalue over existing held value.
+    {
+        VtValue v(_MoveCounter(1));
+        _MoveCounter obj(2);
+        v = std::move(obj);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().value == 2);
+        TF_AXIOM(v.UncheckedGet<_MoveCounter>().copies == 0);
+    }
+
+    // Local-storage type (int fits locally): rvalue and lvalue both work.
+    {
+        int x = 123;
+        VtValue v1(std::move(x));
+        TF_AXIOM(v1.IsHolding<int>() && v1.UncheckedGet<int>() == 123);
+
+        int y = 456;
+        VtValue v2(y);
+        TF_AXIOM(v2.IsHolding<int>() && v2.UncheckedGet<int>() == 456);
+    }
+
+    // String from rvalue should move.
+    {
+        std::string s(200, 'x');
+        const char *ptr = s.data();
+        VtValue v(std::move(s));
+        TF_AXIOM(v.IsHolding<std::string>());
+        // If the string was moved, the internal buffer pointer is preserved.
+        TF_AXIOM(v.UncheckedGet<std::string>().data() == ptr);
+    }
+
+    // String from lvalue should copy.
+    {
+        std::string s(200, 'y');
+        const char *ptr = s.data();
+        VtValue v(s);
+        TF_AXIOM(v.IsHolding<std::string>());
+        // Copy means different buffer.
+        TF_AXIOM(v.UncheckedGet<std::string>().data() != ptr);
+        // Original is intact.
+        TF_AXIOM(s == std::string(200, 'y'));
+    }
+
+    // char* still maps to std::string (Vt_ValueGetStored).
+    {
+        const char *lit = "hello";
+        VtValue v(lit);
+        TF_AXIOM(v.IsHolding<std::string>());
+        TF_AXIOM(v.UncheckedGet<std::string>() == "hello");
+    }
+
+    // VtValue copy/move ctors still work correctly for all value categories.
+    // The non-template VtValue overloads must beat the forwarding templates
+    // for every cv/ref combination, otherwise infinite recursion results
+    // from the template trying to store a VtValue inside a VtValue.
+    {
+        VtValue v1(42);
+
+        // Non-const lvalue (VtValue &).
+        VtValue v2(v1);
+        TF_AXIOM(v2.IsHolding<int>() && v2.UncheckedGet<int>() == 42);
+
+        // Const lvalue (VtValue const &).
+        const VtValue &cv1 = v1;
+        VtValue v3(cv1);
+        TF_AXIOM(v3.IsHolding<int>() && v3.UncheckedGet<int>() == 42);
+
+        // Non-const rvalue (VtValue &&).
+        VtValue v4(std::move(v1));
+        TF_AXIOM(v4.IsHolding<int>() && v4.UncheckedGet<int>() == 42);
+        TF_AXIOM(v1.IsEmpty());
+
+        // Const rvalue (VtValue const &&).
+        const VtValue cv2(99);
+        VtValue v5(std::move(cv2));
+        TF_AXIOM(v5.IsHolding<int>() && v5.UncheckedGet<int>() == 99);
+    }
+
+    // VtValue assignment for all value categories.
+    {
+        VtValue v1(42);
+        VtValue v;
+
+        // Non-const lvalue.
+        v = v1;
+        TF_AXIOM(v.IsHolding<int>() && v.UncheckedGet<int>() == 42);
+
+        // Const lvalue.
+        const VtValue &cv1 = v1;
+        v = cv1;
+        TF_AXIOM(v.IsHolding<int>() && v.UncheckedGet<int>() == 42);
+
+        // Non-const rvalue.
+        v = std::move(v1);
+        TF_AXIOM(v.IsHolding<int>() && v.UncheckedGet<int>() == 42);
+        TF_AXIOM(v1.IsEmpty());
+
+        // Const rvalue.
+        const VtValue cv2(77);
+        v = std::move(cv2);
+        TF_AXIOM(v.IsHolding<int>() && v.UncheckedGet<int>() == 77);
+    }
+
+    // VtValue through template forwarding - the common real-world path where
+    // const VtValue&& can appear.
+    {
+        auto forward_construct = [](auto &&val) {
+            return VtValue(std::forward<decltype(val)>(val));
+        };
+        auto forward_assign = [](VtValue &dst, auto &&val) {
+            dst = std::forward<decltype(val)>(val);
+        };
+
+        VtValue v1(42);
+        const VtValue cv(55);
+
+        // Forward non-const lvalue.
+        VtValue r1 = forward_construct(v1);
+        TF_AXIOM(r1.IsHolding<int>() && r1.UncheckedGet<int>() == 42);
+
+        // Forward const lvalue.
+        VtValue r2 = forward_construct(cv);
+        TF_AXIOM(r2.IsHolding<int>() && r2.UncheckedGet<int>() == 55);
+
+        // Forward non-const rvalue.
+        VtValue r3 = forward_construct(VtValue(66));
+        TF_AXIOM(r3.IsHolding<int>() && r3.UncheckedGet<int>() == 66);
+
+        // Forward const rvalue (the tricky case).
+        VtValue r4 = forward_construct(std::move(cv));
+        TF_AXIOM(r4.IsHolding<int>() && r4.UncheckedGet<int>() == 55);
+
+        // Same via assignment.
+        VtValue dst;
+        forward_assign(dst, v1);
+        TF_AXIOM(dst.UncheckedGet<int>() == 42);
+        forward_assign(dst, cv);
+        TF_AXIOM(dst.UncheckedGet<int>() == 55);
+        forward_assign(dst, VtValue(88));
+        TF_AXIOM(dst.UncheckedGet<int>() == 88);
+        forward_assign(dst, std::move(cv));
+        TF_AXIOM(dst.UncheckedGet<int>() == 55);
+    }
+
+    // Cv-qualified arguments: VtValue always holds the unqualified type.
+    {
+        const int ci = 10;
+        VtValue v1(ci);
+        TF_AXIOM(v1.IsHolding<int>());
+        TF_AXIOM(v1.UncheckedGet<int>() == 10);
+
+        // const rvalue (int const &&).
+        VtValue v2(std::move(ci));
+        TF_AXIOM(v2.IsHolding<int>());
+        TF_AXIOM(v2.UncheckedGet<int>() == 10);
+
+        // volatile int.
+        volatile int vi = 20;
+        VtValue v3(vi);
+        TF_AXIOM(v3.IsHolding<int>());
+        TF_AXIOM(v3.UncheckedGet<int>() == 20);
+
+        // const volatile.
+        const volatile int cvi = 30;
+        VtValue v4(cvi);
+        TF_AXIOM(v4.IsHolding<int>());
+        TF_AXIOM(v4.UncheckedGet<int>() == 30);
+
+        // Assignment from const rvalue string -- can't steal the buffer (move
+        // from const falls back to copy), but stores as std::string.
+        const std::string cs(200, 'z');
+        const char *origPtr = cs.data();
+        VtValue v5;
+        v5 = std::move(cs);
+        TF_AXIOM(v5.IsHolding<std::string>());
+        TF_AXIOM(v5.UncheckedGet<std::string>() == std::string(200, 'z'));
+        // Move from const can't steal the buffer -- it's a copy.
+        TF_AXIOM(v5.UncheckedGet<std::string>().data() != origPtr);
+    }
+
+    // Bitfield construction and assignment - the T const& overload handles
+    // bitfields via implicit materialization to a temporary.
+    {
+        struct Bits {
+            unsigned u1 : 1;
+            unsigned u4 : 4;
+            int s3 : 3;
+            bool b : 1;
+        };
+        Bits bits{};
+        bits.u1 = 1;
+        bits.u4 = 13;
+        bits.s3 = -2;
+        bits.b = true;
+
+        // Construction from bitfields preserves the declared type.
+        VtValue vu1(bits.u1);
+        TF_AXIOM(vu1.IsHolding<unsigned>());
+        TF_AXIOM(vu1.UncheckedGet<unsigned>() == 1);
+
+        VtValue vu4(bits.u4);
+        TF_AXIOM(vu4.IsHolding<unsigned>());
+        TF_AXIOM(vu4.UncheckedGet<unsigned>() == 13);
+
+        VtValue vs3(bits.s3);
+        TF_AXIOM(vs3.IsHolding<int>());
+        TF_AXIOM(vs3.UncheckedGet<int>() == -2);
+
+        VtValue vb(bits.b);
+        TF_AXIOM(vb.IsHolding<bool>());
+        TF_AXIOM(vb.UncheckedGet<bool>() == true);
+
+        // Assignment from bitfields.
+        VtValue v;
+        v = bits.u4;
+        TF_AXIOM(v.IsHolding<unsigned>());
+        TF_AXIOM(v.UncheckedGet<unsigned>() == 13);
+
+        v = bits.s3;
+        TF_AXIOM(v.IsHolding<int>());
+        TF_AXIOM(v.UncheckedGet<int>() == -2);
+
+        // Reassignment over existing value from a bitfield.
+        VtValue v2(std::string("replace me"));
+        v2 = bits.u1;
+        TF_AXIOM(v2.IsHolding<unsigned>());
+        TF_AXIOM(v2.UncheckedGet<unsigned>() == 1);
+    }
+
+    // Enum-typed bitfields.
+    {
+        enum Color : unsigned { Red, Green, Blue };
+        struct Flags {
+            Color c : 2;
+        };
+        Flags f{};
+        f.c = Blue;
+
+        VtValue vc(f.c);
+        TF_AXIOM(vc.IsHolding<Color>());
+        TF_AXIOM(vc.UncheckedGet<Color>() == Blue);
+
+        VtValue v2;
+        v2 = f.c;
+        TF_AXIOM(v2.IsHolding<Color>());
+        TF_AXIOM(v2.UncheckedGet<Color>() == Blue);
+    }
+}
+
 static void testVtValueRef()
 {
     VtValueRef ref;
@@ -2348,6 +2665,92 @@ static void testVtValueRef()
         VtValue explicitRef(ref);
         TF_AXIOM(!explicitRef.IsEmpty() && explicitRef.IsHolding<int>());
         TF_AXIOM(explicitRef.Get<int>() == 321);
+    }
+
+    // VtValueRef -> VtValue construction and assignment for all value
+    // categories.  The non-template VtValueRef overloads must beat the
+    // forwarding templates for every cv/ref combination.
+    {
+        int x = 42;
+        VtValueRef ref(x);
+
+        // Non-const lvalue (VtValueRef &).
+        VtValue v1(ref);
+        TF_AXIOM(v1.IsHolding<int>() && v1.UncheckedGet<int>() == 42);
+
+        // Const lvalue (VtValueRef const &).
+        const VtValueRef &cref = ref;
+        VtValue v2(cref);
+        TF_AXIOM(v2.IsHolding<int>() && v2.UncheckedGet<int>() == 42);
+
+        // Non-const rvalue (VtValueRef &&).
+        VtValue v3 { VtValueRef(x) };
+        TF_AXIOM(v3.IsHolding<int>() && v3.UncheckedGet<int>() == 42);
+
+        // Const rvalue (VtValueRef const &&).
+        const VtValueRef cref2(x);
+        VtValue v4 { std::move(cref2) };
+        TF_AXIOM(v4.IsHolding<int>() && v4.UncheckedGet<int>() == 42);
+    }
+
+    {
+        int x = 99;
+        VtValueRef ref(x);
+        VtValue v;
+
+        // Assignment from non-const lvalue.
+        v = ref;
+        TF_AXIOM(v.IsHolding<int>() && v.UncheckedGet<int>() == 99);
+
+        // Assignment from const lvalue.
+        const VtValueRef &cref = ref;
+        v = cref;
+        TF_AXIOM(v.IsHolding<int>() && v.UncheckedGet<int>() == 99);
+
+        // Assignment from non-const rvalue.
+        v = VtValueRef(x);
+        TF_AXIOM(v.IsHolding<int>() && v.UncheckedGet<int>() == 99);
+
+        // Assignment from const rvalue.
+        const VtValueRef cref2(x);
+        v = std::move(cref2);
+        TF_AXIOM(v.IsHolding<int>() && v.UncheckedGet<int>() == 99);
+    }
+
+    // VtValueRef through template forwarding.
+    {
+        int x = 77;
+        VtValueRef ref(x);
+        const VtValueRef cref(x);
+
+        auto forwardConstruct = [](auto &&val) {
+            return VtValue(std::forward<decltype(val)>(val));
+        };
+        auto forwardAssign = [](VtValue &dst, auto &&val) {
+            dst = std::forward<decltype(val)>(val);
+        };
+
+        VtValue r1 = forwardConstruct(ref);
+        TF_AXIOM(r1.IsHolding<int>() && r1.UncheckedGet<int>() == 77);
+
+        VtValue r2 = forwardConstruct(cref);
+        TF_AXIOM(r2.IsHolding<int>() && r2.UncheckedGet<int>() == 77);
+
+        VtValue r3 = forwardConstruct(VtValueRef(x));
+        TF_AXIOM(r3.IsHolding<int>() && r3.UncheckedGet<int>() == 77);
+
+        VtValue r4 = forwardConstruct(std::move(cref));
+        TF_AXIOM(r4.IsHolding<int>() && r4.UncheckedGet<int>() == 77);
+
+        VtValue dst;
+        forwardAssign(dst, ref);
+        TF_AXIOM(dst.UncheckedGet<int>() == 77);
+        forwardAssign(dst, cref);
+        TF_AXIOM(dst.UncheckedGet<int>() == 77);
+        forwardAssign(dst, VtValueRef(x));
+        TF_AXIOM(dst.UncheckedGet<int>() == 77);
+        forwardAssign(dst, std::move(cref));
+        TF_AXIOM(dst.UncheckedGet<int>() == 77);
     }
 
     {
@@ -2683,6 +3086,7 @@ int main(int argc, char *argv[])
     testExtVisitValueHashDispatch();
     testKnownValueTypeIndex();
     testVtCheapToCopy();
+    testVtValueForwarding();
     testVtValueRef();
     testVtValueComposeOver();
     testVtValueTransform();

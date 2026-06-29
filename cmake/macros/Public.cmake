@@ -478,7 +478,7 @@ function(pxr_setup_python)
     string(REPLACE ";" ", " pyModulesStr "${converted}")
 
     # Install a pxr __init__.py with an appropriate __all__
-    _get_install_dir(lib/python/pxr installPrefix)
+    _get_install_dir(${PXR_PYTHON_INSTALL_DIR}/pxr installPrefix)
 
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated_modules_init.py"
          "__all__ = [${pyModulesStr}]\n")
@@ -1027,7 +1027,11 @@ function(pxr_register_test TEST_NAME)
     # Ensure that Python imports the Python files built by this build.
     # On Windows convert backslash to slash and don't change semicolons
     # to colons.
-    set(_testPythonPath "${CMAKE_INSTALL_PREFIX}/lib/python;$ENV{PYTHONPATH}")
+    if(IS_ABSOLUTE "${PXR_PYTHON_INSTALL_DIR}")
+        set(_testPythonPath "${PXR_PYTHON_INSTALL_DIR};$ENV{PYTHONPATH}")
+    else()
+        set(_testPythonPath "${CMAKE_INSTALL_PREFIX}/${PXR_PYTHON_INSTALL_DIR};$ENV{PYTHONPATH}")
+    endif()
     if(WIN32)
         string(REGEX REPLACE "\\\\" "/" _testPythonPath "${_testPythonPath}")
     else()
@@ -1354,15 +1358,22 @@ endfunction() # pxr_tests_prologue
 
 function(pxr_build_python_documentation)
     set(BUILT_XML_DOCS "${PROJECT_BINARY_DIR}/docs/doxy_xml")
-    set(CONVERT_DOXYGEN_TO_PYTHON_DOCS_SCRIPT 
+    set(CONVERT_DOXYGEN_TO_PYTHON_DOCS_SCRIPT
        "${PROJECT_SOURCE_DIR}/docs/python/convertDoxygen.py")
-    set(INSTALL_PYTHON_PXR_ROOT "${CMAKE_INSTALL_PREFIX}/lib/python/pxr")
+
+    # Compute the absolute path to the Python bindings install directory.
+    if(IS_ABSOLUTE "${PXR_PYTHON_INSTALL_DIR}")
+        set(_pythonInstallDirAbs "${PXR_PYTHON_INSTALL_DIR}")
+    else()
+        set(_pythonInstallDirAbs "${CMAKE_INSTALL_PREFIX}/${PXR_PYTHON_INSTALL_DIR}")
+    endif()
+    set(INSTALL_PYTHON_PXR_ROOT "${_pythonInstallDirAbs}/pxr")
 
     # Get the list of pxr python modules and run a install command for each
     get_property(pxrPythonModules GLOBAL PROPERTY PXR_PYTHON_MODULES)
     # Create string of module names, joined with ","
     string(REPLACE ";" "," pxrPythonModulesStr "${pxrPythonModules}")
-    # Run convertDoxygen on the module list, setting PYTHONPATH 
+    # Run convertDoxygen on the module list, setting PYTHONPATH
     # to the install path for the USD Python modules
     if (WIN32)
         set(DLL_PATH_FLAG "--dllPath \"${CMAKE_INSTALL_PREFIX}/lib;${CMAKE_INSTALL_PREFIX}/bin;${CMAKE_INSTALL_PREFIX}/plugin/usd;${CMAKE_INSTALL_PREFIX}/share/usd/examples/plugin\"")
@@ -1376,7 +1387,7 @@ function(pxr_build_python_documentation)
             COMMAND ${PYTHON_EXECUTABLE} ${CONVERT_DOXYGEN_TO_PYTHON_DOCS_SCRIPT} \
                 --package pxr --module ${pxrPythonModulesStr} \
                 --inputIndex ${BUILT_XML_DOCS}/index.xml \
-                --pythonPath ${CMAKE_INSTALL_PREFIX}/lib/python \
+                --pythonPath ${_pythonInstallDirAbs} \
                 ${DLL_PATH_FLAG} \
                 --output ${INSTALL_PYTHON_PXR_ROOT})
         if (NOT \${convert_doxygen_return_code} EQUAL \"0\")

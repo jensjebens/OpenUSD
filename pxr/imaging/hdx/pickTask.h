@@ -282,6 +282,11 @@ struct HdxPickTaskContextParams
         , depthMaskCallback(nullptr)
         , collection()
         , alphaThreshold(0.0001f)
+        , pointSize(3.0f)
+        , pointSelectedSize(5.0f)
+        , depthBiasEnable(false)
+        , depthBiasConstantFactor(0.0f)
+        , depthBiasSlopeFactor(0.0f)
         , outHits(nullptr)
     {}
 
@@ -296,6 +301,11 @@ struct HdxPickTaskContextParams
     DepthMaskCallback depthMaskCallback;
     HdRprimCollection collection;
     float alphaThreshold;
+    float pointSize;
+    float pointSelectedSize;
+    bool depthBiasEnable;
+    float depthBiasConstantFactor;
+    float depthBiasSlopeFactor;
     HdxPickHitVector *outHits;
 };
 

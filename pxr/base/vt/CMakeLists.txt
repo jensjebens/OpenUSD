@@ -51,6 +51,7 @@ pxr_library(vt
         wrapArrayQuaternion.cpp
         wrapArrayRange.cpp
         wrapArrayString.cpp
+        wrapArrayTimeCode.cpp
         wrapArrayToken.cpp
         wrapArrayVec.cpp
         wrapDictionary.cpp

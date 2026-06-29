@@ -63,6 +63,15 @@ HDPRMAN_API
 SdfPath
 GetPathFromVtValue(VtValue const& val);
 
+/// Map an Sdr shader property type token (e.g. SdrPropertyTypes->Color)
+/// to the corresponding HdPrimvarRoleTokens role token (e.g.
+/// HdPrimvarRoleTokens->color), suitable for passing to
+/// SetParamFromVtValue.  Returns an empty TfToken for property types
+/// that have no corresponding primvar role.
+HDPRMAN_API
+TfToken
+GetRoleForSdrPropertyType(TfToken const& propType);
+
 /// Helper to convert matrix types, handling double->float conversion.
 inline RtMatrix4x4
 GfMatrixToRtMatrix(const GfMatrix4d &m)

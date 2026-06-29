@@ -216,7 +216,7 @@ TestUsdGeomSubsetFamilies()
             "does not match the element count 6.",
 
             "Imageable prim </SubsetsTest/Geom/Cube> has invalid subset family "
-            "'invalidElementType': Invalid geom type for elementType segment.",
+            "'invalidElementType': Invalid geom type Mesh for elementType segment.",
 
             "Imageable prim </SubsetsTest/Geom/Cube> has invalid subset family "
             "'mixedElementTypes': GeomSubset at path "

@@ -23,6 +23,7 @@ if (use_tbb)
         workTBB/loops_impl.h
         workTBB/reduce_impl.h
         workTBB/sort_impl.h
+        workTBB/tbb_version.h
         workTBB/withScopedParallelism_impl.h
     )   
 

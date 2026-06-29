@@ -400,7 +400,7 @@ class TestUsdValueClips(unittest.TestCase):
 
         # Default value should come through regardless of clip timing.
         self.CheckValue(attr, expected=1.0)
-        self.CheckValue(attr2, expected=Sdf.TimeCodeArray([1.0,2.0]))
+        self.CheckValue(attr2, expected=Vt.TimeCodeArray([1.0,2.0]))
 
         stage.SetInterpolationType(Usd.InterpolationTypeLinear)
 
@@ -425,27 +425,27 @@ class TestUsdValueClips(unittest.TestCase):
         self.CheckValue(attr, time=-1, expected=5.0)
         self.CheckValue(attr, time=41, expected=25.0)
 
-        # Repeat getting values at the same times for the SdfTimeCodeArray 
+        # Repeat getting values at the same times for the Vt.TimeCodeArray 
         # valued attribute.
-        self.CheckValue(attr2, time=0, expected=Sdf.TimeCodeArray([0.0, 5.0]))
-        self.CheckValue(attr2, time=5, expected=Sdf.TimeCodeArray([5.0, 5.0]))
-        self.CheckValue(attr2, time=10, expected=Sdf.TimeCodeArray([10.0, 5.0]))
-        self.CheckValue(attr2, time=15, expected=Sdf.TimeCodeArray([15.0, 5.0]))
+        self.CheckValue(attr2, time=0, expected=Vt.TimeCodeArray([0.0, 5.0]))
+        self.CheckValue(attr2, time=5, expected=Vt.TimeCodeArray([5.0, 5.0]))
+        self.CheckValue(attr2, time=10, expected=Vt.TimeCodeArray([10.0, 5.0]))
+        self.CheckValue(attr2, time=15, expected=Vt.TimeCodeArray([15.0, 5.0]))
         # @20 we should get the jump discontinuity time sample as the pre-time
         # that means we should get first time mapping @20, with appropriate time
         # offset (0 in this case as both external and internal times at
         # this jump discontinuity are the same, so external-internal time zeros
         # out) applied to the results.
         self.CheckValue(attr2, time=Usd.TimeCode.PreTime(20),
-                        expected=Sdf.TimeCodeArray([20.0, 5.0]))
-        self.CheckValue(attr2, time=20, expected=Sdf.TimeCodeArray([20.0, 45.0]))
-        self.CheckValue(attr2, time=25, expected=Sdf.TimeCodeArray([25.0, 40.0]))
-        self.CheckValue(attr2, time=30, expected=Sdf.TimeCodeArray([30.0, 35.0]))
-        self.CheckValue(attr2, time=35, expected=Sdf.TimeCodeArray([35.0, 30.0]))
-        self.CheckValue(attr2, time=40, expected=Sdf.TimeCodeArray([40.0, 25.0]))
+                        expected=Vt.TimeCodeArray([20.0, 5.0]))
+        self.CheckValue(attr2, time=20, expected=Vt.TimeCodeArray([20.0, 45.0]))
+        self.CheckValue(attr2, time=25, expected=Vt.TimeCodeArray([25.0, 40.0]))
+        self.CheckValue(attr2, time=30, expected=Vt.TimeCodeArray([30.0, 35.0]))
+        self.CheckValue(attr2, time=35, expected=Vt.TimeCodeArray([35.0, 30.0]))
+        self.CheckValue(attr2, time=40, expected=Vt.TimeCodeArray([40.0, 25.0]))
 
-        self.CheckValue(attr2, time=-1, expected=Sdf.TimeCodeArray([0.0, 5.0]))
-        self.CheckValue(attr2, time=41, expected=Sdf.TimeCodeArray([40.0, 25.0]))
+        self.CheckValue(attr2, time=-1, expected=Vt.TimeCodeArray([0.0, 5.0]))
+        self.CheckValue(attr2, time=41, expected=Vt.TimeCodeArray([40.0, 25.0]))
 
         # Repeat the test over again with held interpolation.
         stage.SetInterpolationType(Usd.InterpolationTypeHeld)
@@ -476,28 +476,28 @@ class TestUsdValueClips(unittest.TestCase):
         self.CheckValue(attr, time=-1, expected=5.0)
         self.CheckValue(attr, time=41, expected=25.0)
 
-        # Repeat getting values at the same times for the SdfTimeCodeArray 
+        # Repeat getting values at the same times for the Vt.TimeCodeArray 
         # valued attribute.
-        self.CheckValue(attr2, time=0, expected=Sdf.TimeCodeArray([0.0, 5.0]))
-        self.CheckValue(attr2, time=5, expected=Sdf.TimeCodeArray([0.0, 5.0]))
-        self.CheckValue(attr2, time=10, expected=Sdf.TimeCodeArray([10.0, 5.0]))
-        self.CheckValue(attr2, time=15, expected=Sdf.TimeCodeArray([10.0, 5.0]))
+        self.CheckValue(attr2, time=0, expected=Vt.TimeCodeArray([0.0, 5.0]))
+        self.CheckValue(attr2, time=5, expected=Vt.TimeCodeArray([0.0, 5.0]))
+        self.CheckValue(attr2, time=10, expected=Vt.TimeCodeArray([10.0, 5.0]))
+        self.CheckValue(attr2, time=15, expected=Vt.TimeCodeArray([10.0, 5.0]))
         # @20 we should get the jump discontinuity time sample as the pre-time,
         # that means we should get first time mapping @20, with appropriate time
         # offset (0 in this case as both external and internal times at
         # this jump discontinuity are the same, so external-internal time zeros
         # out) applied to the results.
         self.CheckValue(attr2, time=Usd.TimeCode.PreTime(20), 
-                        expected=Sdf.TimeCodeArray([20.0, 5.0]))
+                        expected=Vt.TimeCodeArray([20.0, 5.0]))
         self.CheckValue(attr2, time=20, 
-                        expected=Sdf.TimeCodeArray([20.0, 45.0]))
-        self.CheckValue(attr2, time=25, expected=Sdf.TimeCodeArray([25.0, 40.0]))
-        self.CheckValue(attr2, time=30, expected=Sdf.TimeCodeArray([30.0, 35.0]))
-        self.CheckValue(attr2, time=35, expected=Sdf.TimeCodeArray([35.0, 30.0]))
-        self.CheckValue(attr2, time=40, expected=Sdf.TimeCodeArray([40.0, 25.0]))
+                        expected=Vt.TimeCodeArray([20.0, 45.0]))
+        self.CheckValue(attr2, time=25, expected=Vt.TimeCodeArray([25.0, 40.0]))
+        self.CheckValue(attr2, time=30, expected=Vt.TimeCodeArray([30.0, 35.0]))
+        self.CheckValue(attr2, time=35, expected=Vt.TimeCodeArray([35.0, 30.0]))
+        self.CheckValue(attr2, time=40, expected=Vt.TimeCodeArray([40.0, 25.0]))
 
-        self.CheckValue(attr2, time=-1, expected=Sdf.TimeCodeArray([0.0, 5.0]))
-        self.CheckValue(attr2, time=41, expected=Sdf.TimeCodeArray([40.0, 25.0]))
+        self.CheckValue(attr2, time=-1, expected=Vt.TimeCodeArray([0.0, 5.0]))
+        self.CheckValue(attr2, time=41, expected=Vt.TimeCodeArray([40.0, 25.0]))
 
         # The clip has time samples authored every 5 frames, but
         # since we've scaled everything by 50%, we should have samples
@@ -586,7 +586,7 @@ class TestUsdValueClips(unittest.TestCase):
 
     def test_TimeCodeClipsWithLayerOffsets(self):
         """Tests behavior of clips when layer offsets are involved and the
-        attributes are SdfTimeCode values. This test is almost identical to 
+        attributes are GfTimeCode values. This test is almost identical to 
         test_ClipsWithLayerOffsets except that values returned themselves are
         also offset by the layer offsets."""
         stage = Usd.Stage.Open('layerOffsets/root.usda')

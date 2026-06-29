@@ -652,6 +652,14 @@ HdStResourceRegistry::RegisterBasisCurvesIndexRange(
 }
 
 HdInstance<HdBufferArrayRangeSharedPtr>
+HdStResourceRegistry::RegisterImplicitPrimsIndexRange(
+        HdInstance<HdBufferArrayRangeSharedPtr>::ID id, TfToken const &name)
+{
+    return _Register(id, _implicitPrimsTopologyIndexRangeRegistry[name],
+                     HdPerfTokens->instImplicitPrimsTopologyRange);
+}
+
+HdInstance<HdBufferArrayRangeSharedPtr>
 HdStResourceRegistry::RegisterPrimvarRange(
         HdInstance<HdBufferArrayRangeSharedPtr>::ID id)
 {
@@ -1143,6 +1151,15 @@ HdStResourceRegistry::_GarbageCollect()
             count += it.second.GarbageCollect();
         }
         HD_PERF_COUNTER_SET(HdPerfTokens->instBasisCurvesTopologyRange, count);
+    }
+
+    {
+        size_t count = 0;
+        for (auto & it: _implicitPrimsTopologyIndexRangeRegistry) {
+            count += it.second.GarbageCollect();
+        }
+
+        HD_PERF_COUNTER_SET(HdPerfTokens->instImplicitPrimsTopologyRange, count);
     }
 
     {

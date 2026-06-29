@@ -176,6 +176,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     (gpuMemoryUsed)                             \
     (instBasisCurvesTopology)                   \
     (instBasisCurvesTopologyRange)              \
+    (instImplicitPrimsTopologyRange)            \
     (instExtComputationDataRange)               \
     (instGlslProgram)                           \
     (instMeshTopology)                          \
@@ -221,6 +222,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     (overrideColor)                             \
     (maskColor)                                 \
     (projectionMatrix)                          \
+    (projectionInverseMatrix)                   \
     (pointColor)                                \
     (pointSize)                                 \
     (pointSelectedSize)                         \

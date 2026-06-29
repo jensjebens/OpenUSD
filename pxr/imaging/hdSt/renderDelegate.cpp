@@ -23,8 +23,9 @@
 #include "pxr/imaging/hdSt/renderPass.h"
 #include "pxr/imaging/hdSt/renderPassState.h"
 #include "pxr/imaging/hdSt/renderParam.h"
-#include "pxr/imaging/hdSt/tokens.h"
 #include "pxr/imaging/hdSt/resourceRegistry.h"
+#include "pxr/imaging/hdSt/sphere.h"
+#include "pxr/imaging/hdSt/tokens.h"
 #include "pxr/imaging/hdSt/volume.h"
 
 #include "pxr/imaging/hd/aov.h"
@@ -59,13 +60,31 @@ TF_DEFINE_ENV_SETTING(HDST_DOME_LIGHT_CUBEMAP_TARGET_MEMORY_MB, 0,
                       "Maximum memory target in MB for the cubemap computed "
                       "from the latlong texture for the dome light.");
 
-const TfTokenVector HdStRenderDelegate::SUPPORTED_RPRIM_TYPES =
+TF_DEFINE_ENV_SETTING(HDST_ENABLE_NATIVE_SPHERES, false,
+    "Enable native rendering of sphere primitives in Storm instead of "
+    "converting them to meshes via the implicit surface scene index.");
+
+namespace {
+const TfTokenVector _SupportedRprimTypes()
 {
-    HdPrimTypeTokens->mesh,
-    HdPrimTypeTokens->basisCurves,
-    HdPrimTypeTokens->points,
-    HdPrimTypeTokens->volume
-};
+    TfTokenVector supportedTypes = {
+        HdPrimTypeTokens->mesh,
+        HdPrimTypeTokens->basisCurves,
+        HdPrimTypeTokens->points,
+        HdPrimTypeTokens->volume
+    };
+
+    if (TfGetEnvSetting(HDST_ENABLE_NATIVE_SPHERES)) {
+        supportedTypes.emplace_back(HdPrimTypeTokens->sphere);
+    }
+
+    return supportedTypes;
+}
+}
+
+const TfTokenVector
+HdStRenderDelegate::SUPPORTED_RPRIM_TYPES = _SupportedRprimTypes();
+
 
 const TfTokenVector HdStRenderDelegate::SUPPORTED_SPRIM_TYPES =
 {
@@ -403,6 +422,8 @@ HdStRenderDelegate::CreateRprim(TfToken const& typeId,
         return new HdStPoints(rprimId);
     } else  if (typeId == HdPrimTypeTokens->volume) {
         return new HdStVolume(rprimId);
+    } else  if (typeId == HdPrimTypeTokens->sphere) {
+        return new HdStSphere(rprimId);
     } else {
         TF_CODING_ERROR("Unknown Rprim Type %s", typeId.GetText());
     }
@@ -645,6 +666,12 @@ HdStRenderDelegate::GetRenderDelegateInfo()
 {
     static const HdRenderDelegateInfo info = _RenderDelegateInfo();
     return info;
+}
+
+bool
+HdStRenderDelegate::IsEnabledNativeSphereRenderingSupport()
+{
+    return TfGetEnvSetting(HDST_ENABLE_NATIVE_SPHERES);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

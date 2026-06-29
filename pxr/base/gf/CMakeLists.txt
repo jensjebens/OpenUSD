@@ -52,6 +52,7 @@ pxr_library(gf
         rotation
         size2
         size3
+        timeCode
         traits
         transform
         vec2d
@@ -130,6 +131,7 @@ pxr_library(gf
         wrapRotation.cpp
         wrapSize2.cpp
         wrapSize3.cpp
+        wrapTimeCode.cpp
         wrapTraits.cpp
         wrapTransform.cpp
         wrapVec2d.cpp
@@ -216,6 +218,7 @@ pxr_test_scripts(
     testenv/testGfRect2i.py
     testenv/testGfRotation.py
     testenv/testGfSize.py
+    testenv/testGfTimeCode.py
     testenv/testGfTraits.py
     testenv/testGfTransform.py
     testenv/testGfVec.py
@@ -311,6 +314,10 @@ pxr_register_test(testGfRotation
 pxr_register_test(testGfSize
     PYTHON
     COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testGfSize"
+)
+pxr_register_test(testGfTimeCode
+    PYTHON
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testGfTimeCode"
 )
 pxr_register_test(testGfTraits
     PYTHON

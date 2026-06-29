@@ -299,6 +299,13 @@ MAT4  GetProjectionMatrix() {
     return MAT4(1);
 #endif
 }
+MAT4  GetProjectionInverseMatrix() {
+#if defined(HD_HAS_projectionInverseMatrix)
+    return MAT4(HdGet_projectionInverseMatrix());
+#else
+    return MAT4(1);
+#endif
+}
 vec3 GetPositionInWorldSpace(vec3 windowRelativeCoord)
 {
 #if defined(HD_HAS_imageToWorldMatrix)
@@ -1281,6 +1288,13 @@ MAT4  GetProjectionMatrix() {
     return MAT4(1);
 #endif
 }
+MAT4  GetProjectionInverseMatrix() {
+#if defined(HD_HAS_projectionInverseMatrix)
+    return MAT4(HdGet_projectionInverseMatrix());
+#else
+    return MAT4(1);
+#endif
+}
 vec3 GetPositionInWorldSpace(vec3 windowRelativeCoord)
 {
 #if defined(HD_HAS_imageToWorldMatrix)
@@ -1857,6 +1871,13 @@ MAT4  GetWorldToViewInverseMatrix() {
 MAT4  GetProjectionMatrix() {
 #if defined(HD_HAS_projectionMatrix)
     return MAT4(HdGet_projectionMatrix());
+#else
+    return MAT4(1);
+#endif
+}
+MAT4  GetProjectionInverseMatrix() {
+#if defined(HD_HAS_projectionInverseMatrix)
+    return MAT4(HdGet_projectionInverseMatrix());
 #else
     return MAT4(1);
 #endif
@@ -2614,6 +2635,13 @@ MAT4  GetWorldToViewInverseMatrix() {
 MAT4  GetProjectionMatrix() {
 #if defined(HD_HAS_projectionMatrix)
     return MAT4(HdGet_projectionMatrix());
+#else
+    return MAT4(1);
+#endif
+}
+MAT4  GetProjectionInverseMatrix() {
+#if defined(HD_HAS_projectionInverseMatrix)
+    return MAT4(HdGet_projectionInverseMatrix());
 #else
     return MAT4(1);
 #endif

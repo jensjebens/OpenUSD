@@ -2383,7 +2383,7 @@ struct TextParserAction<KeywordSpline>
         const TfType valueType =
             SdfGetTypeForValueTypeName(
                 TfToken(context.values.valueTypeName));
-        if (valueType == TfType::Find<SdfTimeCode>()) {
+        if (valueType == TfType::Find<GfTimeCode>()) {
           // Special case for timecode-valued attributes: physically use double,
           // but set the flag that causes layer offsets to be applied to values
           // as well as times.

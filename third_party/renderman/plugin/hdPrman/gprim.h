@@ -286,11 +286,11 @@ HdPrman_Gprim<BASE>::Sync(HdSceneDelegate* sceneDelegate,
 
         // identifier:object is useful for cryptomatte
         primvars.SetString(RixStr.k_identifier_object,
-                           RtUString(id.GetName().c_str()));
+                           RtUString(id.GetText()));
         for (size_t i=0, n=geomSubsets.size(); i<n; ++i) {
             geomSubsetPrimvars[i]
                 .SetString(RixStr.k_identifier_object,
-                           RtUString(geomSubsets[i].id.GetName().c_str()));
+                           RtUString(geomSubsets[i].id.GetText()));
         }
 
 // In 2311 and beyond, we can use

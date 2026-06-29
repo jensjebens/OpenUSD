@@ -1201,8 +1201,8 @@ public:
                            std::is_same_v<T, SdfPathExpression>) {
             return T(Read<string>());
         }
-        else if constexpr (std::is_same_v<T, SdfTimeCode>) {
-            return SdfTimeCode(Read<double>());
+        else if constexpr (std::is_same_v<T, GfTimeCode>) {
+            return GfTimeCode(Read<double>());
         }
         else if constexpr (std::is_same_v<T, SdfUnregisteredValue>) {
             VtValue val = Read<VtValue>();
@@ -1445,7 +1445,7 @@ public:
     void Write(SdfPath const &path) { Write(crate->_AddPath(path)); }
     void Write(VtDictionary const &dict) { WriteMap(dict); }
     void Write(SdfAssetPath const &ap) { Write(ap.GetAssetPath()); }
-    void Write(SdfTimeCode const &tc) { 
+    void Write(GfTimeCode const &tc) { 
         crate->_packCtx->RequestWriteVersionUpgrade(
             Version(0, 9, 0),
             "A timecode or timecode[] value type was detected which requires "

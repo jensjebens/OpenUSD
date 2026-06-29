@@ -154,8 +154,11 @@
 // 100 -> 101: HdRendererPlugin::GetSceneIndexInputArgs renamed to
 //             GetSceneIndexCreateArgs. HdSceneIndexInputArgsSchema renamed
 //             to HdSceneIndexCreateArgsSchema accordingly.
+// 101 -> 102: Contiguous data source handle allocation via allocate_shared in
+//             ::New(), added by HD_DECLARE_DATASOURCE. Change is forward- and
+//             backward-compatible with existing data source implementations.
 
-#define HD_API_VERSION 101
+#define HD_API_VERSION 102
 
 // 1  ->  2: SimpleLighting -> FallbackLighting
 // 2  ->  3: Use GetLightCount() instead of NUM_LIGHTS to get light count.

@@ -105,6 +105,14 @@ set(PXR_INSTALL_LOCATION ""
     "Intended final location for plugin resource files."
 )
 
+set(PXR_PYTHON_INSTALL_DIR ""
+    CACHE
+    STRING
+    "Directory for installing Python bindings (relative to \
+    CMAKE_INSTALL_PREFIX or absolute). Defaults to the Python \
+    site-packages directory."
+)
+
 set(PXR_OVERRIDE_PLUGINPATH_NAME ""
     CACHE
     STRING

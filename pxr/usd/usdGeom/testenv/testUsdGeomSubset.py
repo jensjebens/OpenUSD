@@ -113,6 +113,14 @@ class testUsdGeomSubset(unittest.TestCase):
     def test_SubsetRetrievalAndValidity(self):
         testFile = "Sphere.usda"
         stage = Usd.Stage.Open(testFile)
+
+        # Do a basic check to ensure "point" is a valid element type for any 
+        # UsdGeomPointBased and "segment" is valid for any UsdGeomBasisCurves.
+        geom = UsdGeom.Imageable(stage.GetPrimAtPath("/Sphere/SimpleCurves"))
+        self._ValidateFamily(geom, "point", "points", True)
+        self._ValidateFamily(geom, "segment", "segments", True)
+
+        # Test specific subset validity
         sphere = stage.GetPrimAtPath("/Sphere/pSphere1")
         geom = UsdGeom.Imageable(sphere)
         self.assertTrue(geom)
@@ -136,7 +144,7 @@ class testUsdGeomSubset(unittest.TestCase):
 
         # Test an invalid case where the elementType is not valid for the geom
         self._ValidateFamily(geom, "tetrahedron", "tetrahedron_invalidElementType", 
-                             False, ["Invalid geom type for elementType"])
+                             False, ["Invalid geom type"])
 
         sphere = stage.GetPrimAtPath("/Sphere/TetMesh")
         geom = UsdGeom.Imageable(sphere)
@@ -158,7 +166,7 @@ class testUsdGeomSubset(unittest.TestCase):
 
         # Test an invalid case where the elementType is not valid for the geom
         self._ValidateFamily(geom, "segment", "segment_invalidElementType", 
-                             False, ["Invalid geom type for elementType"])
+                             False, ["Invalid geom type"])
 
         sphere = stage.GetPrimAtPath("/Sphere/BasisCurves")
         geom = UsdGeom.Imageable(sphere)
@@ -177,7 +185,7 @@ class testUsdGeomSubset(unittest.TestCase):
 
         # Test an invalid case where the elementType is not valid for the geom
         self._ValidateFamily(geom, "face", "face_invalidElementType", 
-                             False, ["Invalid geom type for elementType"])
+                             False, ["Invalid geom type"])
 
 
     def test_GetUnassignedIndicesForEdges(self):

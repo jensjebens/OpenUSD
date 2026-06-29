@@ -311,14 +311,23 @@ def Run(cmd, logCommandOutput = True, env = None):
             p = subprocess.Popen(shlex.split(cmd), env=env)
             p.wait()
 
+        logfile.write("\n")
+        logfile.write(datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+        logfile.write("\n")
+        logfile.write("{cmd} exited with returncode {returncode}"
+                      .format(cmd=cmd, returncode=p.returncode))
+        logfile.write("\n\n")
+            
     if p.returncode != 0:
         # If verbosity >= 3, we'll have already been printing out command output
         # so no reason to print the log file again.
         if verbosity < 3:
             with open("log.txt", "r") as logfile:
                 Print(logfile.read())
-        raise RuntimeError("Failed to run '{cmd}' in {path}.\nSee {log} for more details."
-                           .format(cmd=cmd, path=os.getcwd(), log=os.path.abspath("log.txt")))
+        raise RuntimeError(
+            f"Failed to run '{cmd}' in {os.getcwd()} "
+            f"(exited with returncode {p.returncode}).\n\n"
+            f"See {os.path.abspath('log.txt')} for more details.")
 
 @contextlib.contextmanager
 def CurrentWorkingDirectory(dir):
@@ -390,8 +399,21 @@ def AppendCXX11ABIArg(buildFlag, context, buildArgs):
     buildArgs.append('{flag}="{flags}"'.format(
         flag=buildFlag, flags=" ".join(cxxFlags)))
 
+def GetCMakeCacheValue(buildDir, variable):
+    """Return the value of a CMake cache variable by querying the build
+    directory with 'cmake -N -LA <buildDir>', or None on failure."""
+    output = GetCommandOutput(
+        "cmake -N -LA {}".format(shlex.quote(buildDir)))
+    if output is None:
+        return None
+    for line in output.splitlines():
+        m = re.match(r"{}(?::[A-Z]+)?=(.*)".format(re.escape(variable)), line)
+        if m:
+            return m.group(1).strip()
+    return None
+
 def RunCMake(context, force, extraArgs = None, installDir = None):
-    """Invoke CMake to configure, build, and install a library whose 
+    """Invoke CMake to configure, build, and install a library whose
     source code is located in the current working directory."""
     # Create a directory for out-of-source builds in the build directory
     # using the name of the current working directory.
@@ -1630,6 +1652,21 @@ def GetPySideInstructions():
 PYSIDE = PythonDependency("PySide", GetPySideInstructions,
                           moduleNames=["PySide2", "PySide6"])
 
+############################################################
+# Newton GPU Physics
+
+def GetNewtonInstructions():
+    return ('Newton GPU is not installed. If you have pip '
+            'installed, run "pip install newton" to '
+            'install it, then re-run this script.\n'
+            'Newton GPU requires an NVIDIA GPU with CUDA 12+ drivers.\n'
+            'If Newton is already installed, you may need to '
+            'update your PYTHONPATH to indicate where it is '
+            'located.\n'
+            'See https://github.com/newton-physics/newton for details.')
+
+NEWTON = PythonDependency("Newton", GetNewtonInstructions,
+                          moduleNames=["newton"])
 
 ############################################################
 # Alembic
@@ -1730,6 +1767,31 @@ EMBREE = Dependency("Embree", InstallEmbree,
                     "include/embree4/rtcore.h")
 
 ############################################################
+# AnimX
+
+# This GitHub project has no releases, so we fixed on the latest commit as of
+# 2024-02-06 - 5db8ee4, which was committed on 2018-11-05
+ANIMX_URL = "https://github.com/Autodesk/animx/archive/5db8ee416d5fa7050357f498d4dcfaa6ff3f7738.zip"
+
+def InstallAnimX(context, force, buildArgs):
+    with CurrentWorkingDirectory(DownloadURL(ANIMX_URL, context, force)):
+        # AnimX strangely installs its output to the inst root, rather than the
+        # lib subdirectory.  Fix.
+        PatchFile("src/CMakeLists.txt",
+                  [("LIBRARY DESTINATION .", "LIBRARY DESTINATION lib")])
+
+        extraArgs = [
+            '-DANIMX_BUILD_MAYA_TESTSUITE=OFF',
+            '-DMAYA_64BIT_TIME_PRECISION=ON',
+            '-DANIMX_BUILD_SHARED=ON',
+            '-DANIMX_BUILD_STATIC=OFF'
+        ]
+        RunCMake(context, force, extraArgs)
+
+ANIMX = Dependency("AnimX", InstallAnimX, "include/animx.h")
+
+
+############################################################
 # USD
 
 def InstallUSD(context, force, buildArgs):
@@ -1747,6 +1809,10 @@ def InstallUSD(context, force, buildArgs):
 
         if context.buildPython:
             extraArgs.append('-DPXR_ENABLE_PYTHON_SUPPORT=ON')
+
+            if context.pythonInstallDir is not None:
+                extraArgs.append('-DPXR_PYTHON_INSTALL_DIR={}'
+                                 .format(context.pythonInstallDir))
 
             # Many people on Windows may not have Python libraries with debug
             # symbols (denoted by a '_d') installed. This is the common
@@ -1948,6 +2014,67 @@ def InstallUSD(context, force, buildArgs):
             extraArgs.append('-DCMAKE_EXE_LINKER_FLAGS="{}"'.format(linkFlags))
 
         RunCMake(context, force, extraArgs, context.usdInstDir)
+
+        # Install Newton GPU physics plugin if requested.
+        # Newton is a Python plugin, so we copy the plugin files into the
+        # USD install tree where they'll be discoverable by UsdView's
+        # Plug.Registry without manual PXR_PLUGINPATH_NAME configuration.
+        if context.buildNewton:
+            newtonPluginSrc = os.path.join(
+                context.usdSrcDir,
+                "extras", "exec", "examples", "newtonPhysics")
+            newtonPythonSrc = os.path.join(newtonPluginSrc, "python")
+            newtonUsdviewSrc = os.path.join(newtonPluginSrc, "usdviewPlugin")
+
+            # Locate where USD installed its Python "pxr" package. This is
+            # lib/python/pxr on most builds but lib/site-packages/pxr on others
+            # (depends on platform/Python config), so detect it rather than
+            # hardcoding -- otherwise the Newton plugin lands in a sibling
+            # directory that is not on the same package path as the rest of
+            # pxr and "import pxr.newtonPhysics" fails.
+            pxrInstallDir = next(
+                (d for d in (
+                    os.path.join(context.usdInstDir, "lib", "python", "pxr"),
+                    os.path.join(context.usdInstDir, "lib", "site-packages",
+                                 "pxr"))
+                 if os.path.isdir(d)),
+                os.path.join(context.usdInstDir, "lib", "python", "pxr"))
+
+            # Install UsdView plugin (plugInfo.json + container)
+            newtonUsdviewDest = os.path.join(
+                pxrInstallDir, "newtonPhysics", "usdviewPlugin")
+            if os.path.isdir(newtonUsdviewDest):
+                shutil.rmtree(newtonUsdviewDest)
+            os.makedirs(newtonUsdviewDest, exist_ok=True)
+            for f in glob.glob(os.path.join(newtonUsdviewSrc, "*.py")) + \
+                     glob.glob(os.path.join(newtonUsdviewSrc, "*.json")):
+                PrintCommandOutput("Installing Newton plugin: {}\n".format(
+                    os.path.basename(f)))
+                shutil.copy(f, newtonUsdviewDest)
+
+            # Install Newton Python module
+            newtonPythonDest = os.path.join(
+                pxrInstallDir, "newtonPhysics", "python")
+            if os.path.isdir(newtonPythonDest):
+                shutil.rmtree(newtonPythonDest)
+            os.makedirs(newtonPythonDest, exist_ok=True)
+            for f in glob.glob(os.path.join(newtonPythonSrc, "*.py")):
+                PrintCommandOutput("Installing Newton module: {}\n".format(
+                    os.path.basename(f)))
+                shutil.copy(f, newtonPythonDest)
+
+            # Install top-level Newton scripts (e.g. ovphysx_worker.py). The
+            # usdview plugin launches these as subprocesses via a path relative
+            # to the installed package, so they must be installed alongside the
+            # usdviewPlugin -- otherwise the PhysX engine cannot start.
+            newtonTopDest = os.path.join(pxrInstallDir, "newtonPhysics")
+            os.makedirs(newtonTopDest, exist_ok=True)
+            for f in glob.glob(os.path.join(newtonPluginSrc, "*.py")):
+                PrintCommandOutput("Installing Newton script: {}\n".format(
+                    os.path.basename(f)))
+                shutil.copy(f, newtonTopDest)
+
+            PrintCommandOutput("Newton GPU physics plugin installed.\n")
 
 USD = Dependency("USD", InstallUSD, "include/pxr/pxr.h")
 
@@ -2203,6 +2330,12 @@ subgroup.add_argument("--no-debug-python", dest="debug_python",
                       "Don't define Boost Python Debug if your Python "
                       "library comes with Debugging symbols.")
 
+group.add_argument("--python-install-dir", type=str,
+                   dest="python_install_dir", default=None,
+                   help=("Directory to install USD Python bindings, relative "
+                         "to the install prefix or absolute. Defaults to the "
+                         "Python site-packages directory."))
+
 (NO_IMAGING, IMAGING, USD_IMAGING) = (0, 1, 2)
 
 group = parser.add_argument_group(title="Imaging and USD Imaging Options")
@@ -2283,6 +2416,12 @@ subgroup.add_argument("--opencolorio", dest="build_ocio", action="store_true",
                       help="Build OpenColorIO plugin for USD")
 subgroup.add_argument("--no-opencolorio", dest="build_ocio", action="store_false",
                       help="Do not build OpenColorIO plugin for USD (default)")
+subgroup = group.add_mutually_exclusive_group()
+subgroup.add_argument("--newton", dest="build_newton", action="store_true",
+                      default=False,
+                      help="Build Newton GPU physics plugin for USD")
+subgroup.add_argument("--no-newton", dest="build_newton", action="store_false",
+                      help="Do not build Newton GPU physics plugin (default)")
 
 group = parser.add_argument_group(title="Alembic Plugin Options")
 subgroup = group.add_mutually_exclusive_group()
@@ -2427,9 +2566,11 @@ class InstallContext:
 
         # Optional components
         self.buildTests = (args.build_tests and not embedded)
-        self.buildPython = (args.build_python and 
-                            not embedded and 
+        self.buildPython = (args.build_python and
+                            not embedded and
                             not self.targetWasm)
+
+        self.pythonInstallDir = args.python_install_dir
         self.buildExamples = (args.build_examples and 
                               not embedded)
         self.buildTutorials = (args.build_tutorials and 
@@ -2474,6 +2615,8 @@ class InstallContext:
         # - Imaging plugins
         self.buildEmbree = self.buildImaging and args.build_embree
         self.buildPrman = self.buildImaging and args.build_prman
+        self.buildNewton = (self.buildImaging and self.buildPython
+                            and args.build_newton)
         self.prmanLocation = (os.path.abspath(args.prman_location)
                                if args.prman_location else None)
         self.buildOIIO = ((args.build_oiio or (self.buildUsdImaging
@@ -2567,6 +2710,9 @@ if context.buildImaging:
 
     if context.buildEmbree:
         requiredDependencies += [TBB, EMBREE]
+
+    if context.buildNewton:
+        requiredDependencies += [NEWTON]
                              
 if context.buildUsdview:
     requiredDependencies += [PYOPENGL, PYSIDE]
@@ -2804,6 +2950,7 @@ summaryMsg += """\
       OpenColorIO support:      {buildOCIO} 
       Embree support:           {buildEmbree}
       PRMan support:            {buildPrman}
+      Newton support:           {buildNewton}
       Vulkan support:           {enableVulkan}
     UsdImaging                  {buildUsdImaging}
       usdview:                  {buildUsdview}
@@ -2883,6 +3030,7 @@ summaryMsg = summaryMsg.format(
     buildOCIO=("On" if context.buildOCIO else "Off"),
     buildEmbree=("On" if context.buildEmbree else "Off"),
     buildPrman=("On" if context.buildPrman else "Off"),
+    buildNewton=("On" if context.buildNewton else "Off"),
     buildUsdImaging=("On" if context.buildUsdImaging else "Off"),
     buildUsdview=("On" if context.buildUsdview else "Off"),
     buildPython=("On" if context.buildPython else "Off"),
@@ -2942,8 +3090,13 @@ except Exception as e:
     sys.exit(1)
 
 # Done. Print out a final status message.
+usdCMakeBuildDir = os.path.join(context.buildDir,
+                                os.path.basename(context.usdSrcDir))
+pythonInstallDir = GetCMakeCacheValue(usdCMakeBuildDir, "PXR_PYTHON_INSTALL_DIR")
 requiredInPythonPath = set([
-    os.path.join(context.usdInstDir, "lib", "python")
+    os.path.join(context.usdInstDir, pythonInstallDir)
+    if pythonInstallDir is not None else
+    "<unknown: could not read PXR_PYTHON_INSTALL_DIR from CMake cache>"
 ])
 requiredInPythonPath.update(extraPythonPaths)
 

@@ -14,6 +14,7 @@
 
 #include "pxr/imaging/hd/collectionExpressionEvaluator.h"
 #include "pxr/imaging/hd/collectionsSchema.h"
+#include "pxr/imaging/hd/instancerTopologySchema.h"
 #include "pxr/imaging/hd/containerDataSourceEditor.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
 #include "pxr/imaging/hd/dataSourceTypeDefs.h"
@@ -127,6 +128,59 @@ _IsVisibleToCamera(const HdContainerDataSourceHandle& primSource)
     return true;
 }
 
+VtArray<int>
+_GetInstancerMattePrimvar(const HdContainerDataSourceHandle& primSource)
+{
+    if (const HdPrimvarsSchema primvarsSchema =
+            HdPrimvarsSchema::GetFromParent(primSource)) {
+        if (HdPrimvarSchema primvarSchema =
+                primvarsSchema.GetPrimvar(_tokens->riAttributesRiMatte)) {
+            if (const auto sampledDataSource =
+                    primvarSchema.GetPrimvarValue()) {
+                const VtValue value = sampledDataSource->GetValue(0);
+                if (value.IsHolding<VtArray<int>>()) {
+                    return value.UncheckedGet<VtArray<int>>();
+                }
+            }
+        }
+    }
+    return {};
+}
+
+VtArray<int>
+_GetInstancerCameraVisPrimvar(const HdContainerDataSourceHandle& primSource)
+{
+    if (const HdPrimvarsSchema primvarsSchema =
+            HdPrimvarsSchema::GetFromParent(primSource)) {
+        if (HdPrimvarSchema primvarSchema =
+                primvarsSchema.GetPrimvar(
+                    _tokens->riAttributesVisibilityCamera)) {
+            if (const auto sampledDataSource =
+                    primvarSchema.GetPrimvarValue()) {
+                const VtValue value = sampledDataSource->GetValue(0);
+                if (value.IsHolding<VtArray<int>>()) {
+                    return value.UncheckedGet<VtArray<int>>();
+                }
+            }
+        }
+    }
+    return {};
+}
+
+VtArray<bool>
+_GetInstancerMask(const HdContainerDataSourceHandle& primSource)
+{
+    const HdInstancerTopologySchema topoSchema =
+        HdInstancerTopologySchema::GetFromParent(primSource);
+    if (!topoSchema) {
+        return {};
+    }
+    if (const HdBoolArrayDataSourceHandle maskDs = topoSchema.GetMask()) {
+        return maskDs->GetTypedValue(0.0f);
+    }
+    return {};
+}
+
 ////////////////////////////////////////////
 // Render Pass Visibility And Matte State //
 ////////////////////////////////////////////
@@ -139,7 +193,7 @@ struct _RenderPassVisibilityAndMatteState {
     SdfPathExpression renderVisExpr;
     SdfPathExpression cameraVisExpr;
 
-    // Evalulators for each pattern expression.
+    // Evaluators for each pattern expression.
     std::optional<HdCollectionExpressionEvaluator> matteEval;
     std::optional<HdCollectionExpressionEvaluator> renderVisEval;
     std::optional<HdCollectionExpressionEvaluator> cameraVisEval;
@@ -171,6 +225,138 @@ struct _RenderPassVisibilityAndMatteState {
             && _ShouldApplyPassVisibility(prim.primType)
             && !cameraVisEval->Match(primPath)
             && _IsVisibleToCamera(prim.dataSource);
+    }
+
+    // Returns per-instance matte values for instancer prims that use implicit
+    // instancing (i.e., have instanceLocations set). Entry i is 1 if
+    // instanceLocations[i] matches the matte collection, 0 otherwise.
+    // Returns an empty array if not applicable or if no instances match.
+    VtArray<int> GetMattePerInstance(
+        HdSceneIndexPrim const& prim) const
+    {
+        if (!matteEval || prim.primType != HdPrimTypeTokens->instancer) {
+            return {};
+        }
+        const HdInstancerTopologySchema topoSchema =
+            HdInstancerTopologySchema::GetFromParent(prim.dataSource);
+        if (!topoSchema) {
+            return {};
+        }
+        const HdPathArrayDataSourceHandle instanceLocationsDs =
+            topoSchema.GetInstanceLocations();
+        if (!instanceLocationsDs) {
+            return {};
+        }
+        const VtArray<SdfPath> instanceLocations =
+            instanceLocationsDs->GetTypedValue(0.0f);
+        if (instanceLocations.empty()) {
+            return {};
+        }
+        TRACE_FUNCTION();
+        const VtArray<int> existingMask =
+            _GetInstancerMattePrimvar(prim.dataSource);
+        VtArray<int> mask =
+            (!existingMask.empty() &&
+             existingMask.size() == instanceLocations.size())
+            ? existingMask
+            : VtArray<int>(instanceLocations.size(), 0);
+        bool modified = false;
+        for (size_t i = 0; i < instanceLocations.size(); ++i) {
+            if (matteEval->Match(instanceLocations[i]) && !mask[i]) {
+                mask[i] = 1;
+                modified = true;
+            }
+        }
+        return modified ? mask : existingMask;
+    }
+
+    // Returns per-instance render visibility mask values for instancer prims
+    // that use implicit instancing (i.e., have instanceLocations set). Entry i
+    // is true if instanceLocations[i] matches the renderVisibility collection,
+    // false otherwise (instance is masked out). Returns an empty array if not
+    // applicable or if all instances match (no override needed).
+    VtArray<bool> GetRenderVisPerInstance(
+        HdSceneIndexPrim const& prim) const
+    {
+        if (!renderVisEval || prim.primType != HdPrimTypeTokens->instancer) {
+            return {};
+        }
+        const HdInstancerTopologySchema topoSchema =
+            HdInstancerTopologySchema::GetFromParent(prim.dataSource);
+        if (!topoSchema) {
+            return {};
+        }
+        const HdPathArrayDataSourceHandle instanceLocationsDs =
+            topoSchema.GetInstanceLocations();
+        if (!instanceLocationsDs) {
+            return {};
+        }
+        const VtArray<SdfPath> instanceLocations =
+            instanceLocationsDs->GetTypedValue(0.0f);
+        if (instanceLocations.empty()) {
+            return {};
+        }
+        TRACE_FUNCTION();
+        const VtArray<bool> existingMask =
+            _GetInstancerMask(prim.dataSource);
+        VtArray<bool> mask =
+            (!existingMask.empty() &&
+             existingMask.size() == instanceLocations.size())
+            ? existingMask
+            : VtArray<bool>(instanceLocations.size(), true);
+        bool modified = false;
+        for (size_t i = 0; i < instanceLocations.size(); ++i) {
+            if (!renderVisEval->Match(instanceLocations[i]) && mask[i]) {
+                mask[i] = false;
+                modified = true;
+            }
+        }
+        return modified ? mask : existingMask;
+    }
+
+    // Returns per-instance camera visibility values for instancer prims that
+    // use implicit instancing (i.e., have instanceLocations set). Entry i is 1
+    // if instanceLocations[i] matches the cameraVisibility collection
+    // (instance remains visible to camera), 0 otherwise (instance is hidden).
+    // Returns an empty array if not applicable or if all instances match
+    // (no override needed).
+    VtArray<int> GetCameraVisPerInstance(
+        HdSceneIndexPrim const& prim) const
+    {
+        if (!cameraVisEval || prim.primType != HdPrimTypeTokens->instancer) {
+            return {};
+        }
+        const HdInstancerTopologySchema topoSchema =
+            HdInstancerTopologySchema::GetFromParent(prim.dataSource);
+        if (!topoSchema) {
+            return {};
+        }
+        const HdPathArrayDataSourceHandle instanceLocationsDs =
+            topoSchema.GetInstanceLocations();
+        if (!instanceLocationsDs) {
+            return {};
+        }
+        const VtArray<SdfPath> instanceLocations =
+            instanceLocationsDs->GetTypedValue(0.0f);
+        if (instanceLocations.empty()) {
+            return {};
+        }
+        TRACE_FUNCTION();
+        const VtArray<int> existingMask =
+            _GetInstancerCameraVisPrimvar(prim.dataSource);
+        VtArray<int> mask =
+            (!existingMask.empty() &&
+             existingMask.size() == instanceLocations.size())
+            ? existingMask
+            : VtArray<int>(instanceLocations.size(), 1);
+        bool modified = false;
+        for (size_t i = 0; i < instanceLocations.size(); ++i) {
+            if (!cameraVisEval->Match(instanceLocations[i]) && mask[i]) {
+                mask[i] = 0;
+                modified = true;
+            }
+        }
+        return modified ? mask : existingMask;
     }
 };
 
@@ -295,6 +481,28 @@ _RenderPassVisibilityAndMatteDataSource::Get(const TfToken &name)
                 invisDs);
         }
 
+        // Instancer Camera Visibility -> ri:visibility:camera (per-instance)
+        //
+        // For instancer prims using implicit instancing (instanceLocations
+        // present), evaluate the cameraVisibility pattern against each instance
+        // location and set ri:visibility:camera using instance-indexed
+        // interpolation: 1 for matching instances, 0 for non-matching.
+        //
+        const VtArray<int> cameraVisPerInstance =
+            renderPass.GetCameraVisPerInstance(_prim);
+        if (!cameraVisPerInstance.empty()) {
+            primvarEditor.Overlay(
+                HdDataSourceLocator(_tokens->riAttributesVisibilityCamera),
+                HdPrimvarSchema::Builder()
+                    .SetPrimvarValue(
+                        HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                            cameraVisPerInstance))
+                    .SetInterpolation(HdPrimvarSchema::
+                        BuildInterpolationDataSource(
+                            HdPrimvarSchemaTokens->instance))
+                    .Build());
+        }
+
         // Matte -> ri:Matte
         //
         // If the matte pattern matches this prim, set ri:Matte=1.
@@ -316,6 +524,27 @@ _RenderPassVisibilityAndMatteDataSource::Get(const TfToken &name)
                 matteDs);
         }
 
+        // Instancer Matte -> ri:Matte (per-instance)
+        //
+        // For instancer prims using implicit instancing (instanceLocations
+        // present), evaluate the matte pattern against each instance location
+        // and set ri:Matte using instance-indexed interpolation.
+        //
+        const VtArray<int> mattePerInstance =
+            renderPass.GetMattePerInstance(_prim);
+        if (!mattePerInstance.empty()) {
+            primvarEditor.Overlay(
+                HdDataSourceLocator(_tokens->riAttributesRiMatte),
+                HdPrimvarSchema::Builder()
+                    .SetPrimvarValue(
+                        HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                            mattePerInstance))
+                    .SetInterpolation(HdPrimvarSchema::
+                        BuildInterpolationDataSource(
+                            HdPrimvarSchemaTokens->instance))
+                    .Build());
+        }
+
         return primvarEditor.Finish();
     }
 
@@ -331,6 +560,28 @@ _RenderPassVisibilityAndMatteDataSource::Get(const TfToken &name)
                 .SetVisibility(
                     HdRetainedTypedSampledDataSource<bool>::New(false))
                 .Build();
+        }
+    }
+
+    // Instancer Render Visibility -> instancerTopology.mask
+    //
+    // For instancer prims using implicit instancing (instanceLocations
+    // present), evaluate the renderVisibility pattern against each instance
+    // location and set the instancer mask to false for non-matching instances.
+    //
+    if (name == HdInstancerTopologySchema::GetSchemaToken()) {
+        const VtArray<bool> renderVisPerInstance =
+            renderPass.GetRenderVisPerInstance(_prim);
+        if (!renderVisPerInstance.empty()) {
+            HdContainerDataSourceHandle existingTopoDs =
+                HdContainerDataSource::Cast(_prim.dataSource->Get(name));
+            return HdOverlayContainerDataSource::New(
+                HdInstancerTopologySchema::Builder()
+                    .SetMask(
+                        HdRetainedTypedSampledDataSource<VtArray<bool>>::New(
+                            renderVisPerInstance))
+                    .Build(),
+                existingTopoDs);
         }
     }
 
@@ -530,14 +781,24 @@ _RenderPassVisibilityAndMatteSceneIndex::_UpdateActiveRenderPassState(
             (priorState.DoesOverrideCameraVis(path, prim)
              != state.DoesOverrideCameraVis(path, prim)) ||
             (priorState.DoesOverrideMatte(path, prim)
-             != state.DoesOverrideMatte(path, prim));
-        if (primvarsDidChange || visibilityDidChange) {
+             != state.DoesOverrideMatte(path, prim)) ||
+            (priorState.GetMattePerInstance(prim)
+             != state.GetMattePerInstance(prim)) ||
+            (priorState.GetCameraVisPerInstance(prim)
+             != state.GetCameraVisPerInstance(prim));
+        const bool instancerTopologyDidChange =
+            (priorState.GetRenderVisPerInstance(prim)
+             != state.GetRenderVisPerInstance(prim));
+        if (primvarsDidChange || visibilityDidChange || instancerTopologyDidChange) {
             HdDataSourceLocatorSet locators;
             if (primvarsDidChange) {
                 locators.insert(HdPrimvarsSchema::GetDefaultLocator());
             }
             if (visibilityDidChange) {
                 locators.insert(HdVisibilitySchema::GetDefaultLocator());
+            }
+            if (instancerTopologyDidChange) {
+                locators.insert(HdInstancerTopologySchema::GetDefaultLocator());
             }
             dirtyEntries->push_back({path, locators});
         }

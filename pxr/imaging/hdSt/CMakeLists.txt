@@ -120,6 +120,7 @@ pxr_library(hdSt
         shaderCode
         simpleLightingShader
         smoothNormals
+        sphere
         stagingBuffer
         strategyBase
         subtextureIdentifier
@@ -178,6 +179,7 @@ pxr_library(hdSt
         renderPassShaderKey
         resourceBinder
         shaderKey
+        sphereShaderKey
         subdivision
         triangulate
         unitTestHelper
@@ -213,6 +215,9 @@ pxr_library(hdSt
         shaders/renderPassShader.glslfx
         shaders/simpleLightingShader.glslfx
         shaders/skinning.glslfx
+        shaders/sphere.glslfx
+        shaders/sphereFaceCull.glslfx
+        shaders/sphereNormal.glslfx
         shaders/surfaceHelpers.glslfx
         shaders/terminals.glslfx
         shaders/visibility.glslfx

@@ -57,6 +57,10 @@ public:
         const TfToken &GetInputPrimType() const {
             return _inputPrim.primType;
         }
+        // Returns the prim path.
+        const SdfPath &GetPrimPath() const {
+            return _primPath;
+        }
 
     private:
         const HdSceneIndexBase &_flatteningSceneIndex;

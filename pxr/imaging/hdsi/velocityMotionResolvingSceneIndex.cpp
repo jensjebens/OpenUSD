@@ -556,16 +556,7 @@ class _TypedValueDataSource final
 public:
     using Time = HdSampledDataSource::Time;
 
-    HD_DECLARE_DATASOURCE_ABSTRACT(_TypedValueDataSource<T>);
-
-    _TypedValueDataSource(
-        const TfToken& name,
-        const HdSampledDataSourceHandle& source,
-        const SdfPath& primPath,
-        const HdContainerDataSourceHandle& primSource,
-        const HdSceneIndexBasePtr& inputSceneIndex)
-      : _VelocityHelper(name, source, primPath, primSource, inputSceneIndex)
-    { }
+    HD_DECLARE_DATASOURCE(_TypedValueDataSource<T>);
 
     VtValue
     GetValue(Time shutterOffset) override
@@ -592,18 +583,15 @@ public:
         return T();
     }
 
-    static typename
-    _TypedValueDataSource<T>::Handle New(
+private:
+    _TypedValueDataSource(
         const TfToken& name,
         const HdSampledDataSourceHandle& source,
         const SdfPath& primPath,
         const HdContainerDataSourceHandle& primSource,
         const HdSceneIndexBasePtr& inputSceneIndex)
-    {
-        return _TypedValueDataSource<T>::Handle(
-            new _TypedValueDataSource<T>(
-                name, source, primPath, primSource, inputSceneIndex));
-    }
+      : _VelocityHelper(name, source, primPath, primSource, inputSceneIndex)
+    { }
 };
 
 // -----------------------------------------------------------------------------

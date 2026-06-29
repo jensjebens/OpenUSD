@@ -16,6 +16,7 @@
 #include "pxr/base/arch/inttypes.h"
 #include "pxr/base/gf/declare.h"
 #include "pxr/base/gf/half.h"
+#include "pxr/base/gf/timeCode.h"
 #include "pxr/base/tf/meta.h"
 #include "pxr/base/tf/preprocessorUtilsLite.h"
 #include "pxr/base/tf/token.h"
@@ -30,12 +31,18 @@ PXR_NAMESPACE_OPEN_SCOPE
 // cheap to copy (just refcount operations).
 VT_TYPE_IS_CHEAP_TO_COPY(TfToken);
 
+// GfTimeCode supports value transformations.
+VT_VALUE_TYPE_CAN_TRANSFORM(GfTimeCode);
+
 // Value types.
 
 #define VT_FLOATING_POINT_BUILTIN_VALUE_TYPES \
 ((      double,                Double )) \
 ((      float,                 Float  )) \
 ((      GfHalf,                Half   ))
+
+#define VT_TIMECODE_VALUE_TYPES \
+((      GfTimeCode,            TimeCode ))
 
 #define VT_INTEGRAL_BUILTIN_VALUE_TYPES     \
 ((      bool,                  Bool   ))    \
@@ -129,7 +136,8 @@ TF_PP_TUPLE_ELEM(1, elem)
 
 // Composite groups of types.
 #define VT_BUILTIN_NUMERIC_VALUE_TYPES \
-VT_INTEGRAL_BUILTIN_VALUE_TYPES VT_FLOATING_POINT_BUILTIN_VALUE_TYPES 
+VT_INTEGRAL_BUILTIN_VALUE_TYPES VT_FLOATING_POINT_BUILTIN_VALUE_TYPES \
+VT_TIMECODE_VALUE_TYPES
 
 #define VT_BUILTIN_VALUE_TYPES \
 VT_BUILTIN_NUMERIC_VALUE_TYPES VT_STRING_VALUE_TYPES
@@ -310,7 +318,7 @@ constexpr bool
 Vt_IsTypeAllowedToRegisterTransforms()
 {
     return !VtIsKnownValueType<T>()
-        // || std::is_same_v<T, GfTimeCode>
+        || std::is_same_v<T, GfTimeCode>
         // || std::is_same_v<T, GfDuration>
         ; 
 }

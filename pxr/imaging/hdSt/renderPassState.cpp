@@ -275,6 +275,9 @@ HdStRenderPassState::Prepare(
             HdShaderTokens->projectionMatrix,
             HdTupleType{matType, 1});
         bufferSpecs.emplace_back(
+            HdShaderTokens->projectionInverseMatrix,
+            HdTupleType{matType, 1});
+        bufferSpecs.emplace_back(
             HdShaderTokens->imageToWorldMatrix,
             HdTupleType{matType, 1});
         bufferSpecs.emplace_back(
@@ -399,6 +402,10 @@ HdStRenderPassState::Prepare(
         std::make_shared<HdVtBufferSource>(
             HdShaderTokens->projectionMatrix,
             projMatrix,
+            doublesSupported),
+        std::make_shared<HdVtBufferSource>(
+            HdShaderTokens->projectionInverseMatrix,
+            projMatrix.GetInverse(),
             doublesSupported),
         std::make_shared<HdVtBufferSource>(
             HdShaderTokens->imageToWorldMatrix,

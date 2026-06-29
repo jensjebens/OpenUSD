@@ -43,6 +43,8 @@
 #include "pxr/usd/ndr/declare.h"
 #endif
 
+#include "pxr/usd/sdr/shaderProperty.h"
+
 #include "pxr/usd/sdf/assetPath.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -222,6 +224,10 @@ struct _VtValueToRtParamList
     //
     // Scalars
     //
+    bool operator()(const bool &v) {
+        // RixParamList does not have a bool type.  We map to Integer instead.
+        return params->SetInteger(name, v ? 1 : 0);
+    }
     bool operator()(const int &v) {
         return params->SetInteger(name, v);
     }
@@ -332,14 +338,9 @@ struct _VtValueToRtParamList
         }
         return (*this)(v);
     }
-    bool operator()(const VtArray<GfVec2i> &vi) {
-        // Convert int->float
-        VtArray<GfVec2f> v;
-        v.resize(vi.size());
-        for (size_t i=0,n=vi.size(); i<n; ++i) {
-            v[i] = GfVec2f(vi[i]);
-        }
-        return (*this)(v);
+    bool operator()(const VtArray<GfVec2i> &v) {
+        return params->SetIntegerArray(name,
+            reinterpret_cast<const int*>(v.cdata()), 2*v.size());
     }
     bool operator()(const VtArray<GfVec3f> &v) {
         if (role == HdPrimvarRoleTokens->color) {
@@ -373,14 +374,9 @@ struct _VtValueToRtParamList
         }
         return (*this)(v);
     }
-    bool operator()(const VtArray<GfVec3i> &vi) {
-        // int->float
-        VtArray<GfVec3f> v;
-        v.resize(vi.size());
-        for (size_t i=0,n=vi.size(); i<n; ++i) {
-            v[i] = GfVec3f(vi[i]);
-        }
-        return (*this)(v);
+    bool operator()(const VtArray<GfVec3i> &v) {
+        return params->SetIntegerArray(name,
+            reinterpret_cast<const int*>(v.cdata()), 3*v.size());
     }
     bool operator()(const VtArray<GfVec4f> &v) {
         return params->SetFloatArray(
@@ -395,14 +391,9 @@ struct _VtValueToRtParamList
         }
         return (*this)(v);
     }
-    bool operator()(const VtArray<GfVec4i> &vi) {
-        // int->float
-        VtArray<GfVec4f> v;
-        v.resize(vi.size());
-        for (size_t i=0,n=vi.size(); i<n; ++i) {
-            v[i] = GfVec4f(vi[i]);
-        }
-        return (*this)(v);
+    bool operator()(const VtArray<GfVec4i> &v) {
+        return params->SetIntegerArray(name,
+            reinterpret_cast<const int*>(v.cdata()), 4*v.size());
     }
 
     //
@@ -888,6 +879,21 @@ SetPrimVarFromVtValue(
     }
     return VtVisitValue(val, _VtValueToRtPrimVar(
         name, detail, role, params));
+}
+
+TfToken
+GetRoleForSdrPropertyType(TfToken const& propType)
+{
+    if (propType == SdrPropertyTypes->Color) {
+        return HdPrimvarRoleTokens->color;
+    } else if (propType == SdrPropertyTypes->Point) {
+        return HdPrimvarRoleTokens->point;
+    } else if (propType == SdrPropertyTypes->Normal) {
+        return HdPrimvarRoleTokens->normal;
+    } else if (propType == SdrPropertyTypes->Vector) {
+        return HdPrimvarRoleTokens->vector;
+    }
+    return TfToken();
 }
 
 SdfPath

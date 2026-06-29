@@ -1050,7 +1050,7 @@ HdPrmanLight::Sync(HdSceneDelegate *sceneDelegate,
             if (domeOffset.IsHolding<GfMatrix4d>()) {
                 orientMat = orientMat * domeOffset.UncheckedGet<GfMatrix4d>();
             }
-#ifdef HD_PRMAN_HIDE_DEFAULT_DOMELIGHT_TEXTURE
+#ifdef HDPRMAN_HIDE_DEFAULT_DOMELIGHT_TEXTURE
             // XXX: For Solaris compatability, we expect any default domelight
             // added to the scene to be camera-invisible. Until Solaris is
             // updated to use renderSettings + domeLightCameraVisibility, builds

@@ -429,6 +429,14 @@ pxr_register_test(testPcpMuseum_BasicSpecializesAndVariants
     DIFF_COMPARE compositionResults_BasicSpecializesAndVariants.txt 
 )
 
+pxr_register_test(testPcpMuseum_EdgeCaseLocalAndGlobalClassCombination
+    PYTHON
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testPcpCompositionResults --usd EdgeCaseLocalAndGlobalClassCombination/root.usda" 
+    TESTENV testenv/testPcpMuseum_EdgeCaseLocalAndGlobalClassCombination.testenv
+    STDOUT_REDIRECT compositionResults_EdgeCaseLocalAndGlobalClassCombination.txt
+    DIFF_COMPARE compositionResults_EdgeCaseLocalAndGlobalClassCombination.txt 
+)
+
 pxr_register_test(testPcpMuseum_ElidedAncestralRelocates
     PYTHON
     COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testPcpCompositionResults --usd ElidedAncestralRelocates/root.usda" 
@@ -1270,6 +1278,14 @@ pxr_register_test(testPcpMuseum_TrickyNonLocalVariantSelection
     TESTENV testenv/testPcpMuseum_TrickyNonLocalVariantSelection.testenv
     STDOUT_REDIRECT compositionResults_TrickyNonLocalVariantSelection.txt
     DIFF_COMPARE compositionResults_TrickyNonLocalVariantSelection.txt 
+)
+
+pxr_register_test(testPcpMuseum_UnmappableImpliedInherit
+    PYTHON
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testPcpCompositionResults --usd UnmappableImpliedInherit/root.usda" 
+    TESTENV testenv/testPcpMuseum_UnmappableImpliedInherit.testenv
+    STDOUT_REDIRECT compositionResults_UnmappableImpliedInherit.txt
+    DIFF_COMPARE compositionResults_UnmappableImpliedInherit.txt 
 )
 
 pxr_register_test(testPcpMuseum_ErrorOpinionAtRelocationSource

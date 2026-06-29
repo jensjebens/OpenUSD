@@ -476,11 +476,12 @@ HdPrmanInstancer::Finalize(HdRenderParam *renderParam)
 
     // Release retained conversions of coordSys bindings.
     param->ReleaseCoordSysBindings(GetId());
-
+    SdfPathSet prototypePaths;
     // Delete all my riley instances
     if (riley) {
-        _protoMap.citerate([riley](const SdfPath& /* path */,
+        _protoMap.citerate([&](const SdfPath& prototypePath,
             const _ProtoMapEntry& entry) {
+            prototypePaths.insert(prototypePath);
             for (const auto& rp : entry.map) {
                 const _InstanceIdVec& ids = rp.second;
                 _ParallelFor(ids.size(), [&](size_t i) {
@@ -507,12 +508,16 @@ HdPrmanInstancer::Finalize(HdRenderParam *renderParam)
     // Clear my proto map
     _protoMap.clear();
 
-    // Depopulate instances of my groups
+    // Depopulate instances of my groups & any flattened instances
     HdPrmanInstancer* parent = _GetParentInstancer();
     if (parent) {
         const SdfPath& instancerId = GetId();
         parent->_DepopulateInstancesForChild(
             renderParam, instancerId, instancerId);
+        for (const SdfPath& path : prototypePaths) {
+            parent->_DepopulateInstancesForChild(
+                renderParam, instancerId, path);
+        }
     }
 
     // Delete my prototype groups
@@ -1277,9 +1282,15 @@ HdPrmanInstancer::_PopulateInstances(
     // The parent instancer will then duplicate each instance in the bag once
     // for each instance it's expected to generate, effectively multiplying this
     // instancer's instances by its own.
+    //
+    // XXX: Prman does not handle lights in prototype groups well. They get
+    // flattened in a way that makes it impossible to delete or modify them
+    // without an intervening call to Render(). So we will flatten them out
+    // here so they never end up inside a group.
     if (parentInstancer &&
         (TfGetEnvSetting(HD_PRMAN_DISABLE_NESTED_INSTANCING) ||
-            depth > HDPRMAN_MAX_SUPPORTED_NESTING_DEPTH)) {
+            depth > HDPRMAN_MAX_SUPPORTED_NESTING_DEPTH ||
+            isLight)) {
         // Ensure the protoMap is clear of ANY instances. If this instancer's
         // depth increased beyond the supported level, it may own some
         // previously created instances that now need to be removed.
@@ -1742,6 +1753,14 @@ HdPrmanInstancer::_DepopulateInstances(
         protoMapEntry, protoIdsToKeep, newProtoIds, deadProtoIds);
     if (!deadProtoIds.empty()) {
         _ResizeProtoMap(riley, prototypePrimPath, deadProtoIds, 0);
+    }
+    // If we sent instances up to the parent for this prototype,
+    // we need to depopulate them there. This is safe to do even
+    // when we didn't flatten this prototype.
+    HdPrmanInstancer* parent = _GetParentInstancer();
+    if (parent) {
+        parent->_DepopulateInstancesForChild(
+            renderParam, GetId(), prototypePrimPath, protoIdsToKeep);
     }
     _CleanDisusedGroupIds(param);
 }

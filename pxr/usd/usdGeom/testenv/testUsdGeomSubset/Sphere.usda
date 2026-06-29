@@ -9,6 +9,28 @@ def Xform "Sphere" (
     kind = "component"
 )
 {
+    # Verify that any prim that is a BasisCurves can have subsets with the 
+    # elementType point (from PointBased) or segment (from Curves).
+    def BasisCurves "SimpleCurves"
+    {
+        PointFloat[] points = [(0, 0, 0),(0, 0, 0)]
+        int[] curveVertexCounts = [2]
+
+        def GeomSubset "points"
+        {
+            uniform token elementType = "point"
+            uniform token familyName = "points"
+            int[] indices = [0, 0]
+        }
+
+        def GeomSubset "segments"
+        {
+            uniform token elementType = "segment"
+            uniform token familyName = "segments"
+            int[] indices = [0, 0]
+        }
+    }
+
     def BasisCurves "SimpleSegments"
     {
         uniform token type = "linear"

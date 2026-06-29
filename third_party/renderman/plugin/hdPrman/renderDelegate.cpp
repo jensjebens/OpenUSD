@@ -1002,16 +1002,17 @@ HdPrmanRenderDelegate::IsParallelSyncEnabled(const TfToken &primType) const
     // The prim types below have been reviewed for Sync thread safety.
     //
     // Notable exceptions include integrator, renderSettings,
-    // volume, and lights.  These exceptions are generally due
-    // to interaction with HdChangeTracker state.
+    // volume, lights, displayFilters, and sampleFilters.
+    //
+    // These exceptions are generally due to interaction with
+    // HdChangeTracker state.  Display and sample filters are
+    // excluded due to interaction with HdPrmanRenderParam.
     return
         _enableParallelPrimSync && (
         primType == HdPrimTypeTokens->camera ||
         primType == HdPrimTypeTokens->coordSys ||
-        primType == HdPrimTypeTokens->displayFilter ||
         primType == HdPrimTypeTokens->lightFilter ||
-        primType == HdPrimTypeTokens->material ||
-        primType == HdPrimTypeTokens->sampleFilter);
+        primType == HdPrimTypeTokens->material);
 }
 #endif
 

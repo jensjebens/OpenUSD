@@ -149,7 +149,6 @@ pxr_library(sdf
         wrapArrayAssetPath.cpp
         wrapArrayPath.cpp
         wrapArrayPathExpression.cpp
-        wrapArrayTimeCode.cpp
         wrapAssetPath.cpp
         wrapAttributeSpec.cpp
         wrapChangeBlock.cpp
@@ -177,7 +176,6 @@ pxr_library(sdf
         wrapSpec.cpp
         wrapVariableExpression.cpp
         wrapVariableExpressionAST.cpp
-        wrapTimeCode.cpp
         wrapTypes.cpp
         wrapUsdFileFormat.cpp
         wrapValueTypeName.cpp
@@ -210,6 +208,7 @@ pxr_test_scripts(
     testenv/testSdfFileFormat.py
     testenv/testSdfLayer.py
     testenv/testSdfLayerMuting.py
+    testenv/testSdfLayerOffset.py
     testenv/testSdfLegacyFileFormat.py
     testenv/testSdfListOp.py
     testenv/testSdfParsing.py
@@ -225,7 +224,6 @@ pxr_test_scripts(
     testenv/testSdfSpecHash.py
     testenv/testSdfSplineVersioning.py
     testenv/testSdfTargetFileFormat.py
-    testenv/testSdfTimeCode.py
     testenv/testSdfTypes.py
     testenv/testSdfVariableExpression.py
     testenv/testSdfVariableExpressionAST.py
@@ -574,6 +572,11 @@ pxr_register_test(testSdfLayerMuting
     TESTENV_DEST testSdfLayerMuting/testSdfLayerMuting.testenv
 )
 
+pxr_register_test(testSdfLayerOffset
+    PYTHON
+    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testSdfLayerOffset"
+)
+
 pxr_register_test(testSdfLegacyFileFormat
     PYTHON
     ENV
@@ -696,10 +699,6 @@ pxr_register_test(testSdfTextFile_1_1
     EXPECTED_RETURN_CODE 0
     ENV
         USD_WRITE_NEW_USDA_FILES_AS_VERSION=1.1
-)
-pxr_register_test(testSdfTimeCode
-    PYTHON
-    COMMAND "${CMAKE_INSTALL_PREFIX}/tests/testSdfTimeCode"
 )
 pxr_register_test(testSdfTypes
     PYTHON

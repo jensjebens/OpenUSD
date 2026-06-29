@@ -553,6 +553,15 @@ HdxPickTask::Sync(HdSceneDelegate* delegate,
         state->SetCullStyle(_params.cullStyle);
         state->SetLightingEnabled(false);
 
+        state->SetPointSize(_contextParams.pointSize);
+        state->SetPointSelectedSize(_contextParams.pointSelectedSize);
+
+        // Match depth bias from visual pass so surface depth is consistent.
+        state->SetDepthBiasUseDefault(false);
+        state->SetDepthBiasEnabled(_contextParams.depthBiasEnable);
+        state->SetDepthBias(_contextParams.depthBiasConstantFactor,
+                            _contextParams.depthBiasSlopeFactor);
+
         state->SetVolumeRenderingConstants(stepSize, stepSizeLighting);
         
         // Enable conservative rasterization, if available.
