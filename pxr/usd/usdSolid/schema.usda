@@ -114,7 +114,7 @@ class BrepArray  "BrepArray" (
     uniform int2[]    edge:vertexIndices         ( doc = """ Edge_ii's vertexIndices = {startVertexIndex, endVertexIndex}.
                                                               where Vertex_startVertexIndex:position = Edge_ii:Curve(Edge:Range(0)).
                                                                     Vertex_endVertexIndex:position   = Edge_ii:Curve(Edge:Range(1)).
-                                                              edge:vertexIndices are required because vertices can be shared with loopVertices and wireEdgeVertices.
+                                                              When a Brep has edges, edge:vertexIndices are required because vertices can be shared with loopVertices and wireEdgeVertices.
                                                               (note: edge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
                                                               size() = number of Edges. """ )
                                                  
@@ -130,7 +130,7 @@ class BrepArray  "BrepArray" (
     uniform int2[]    wireEdge:vertexIndices     ( doc = """ WireEdge_ii's vertexIndices = {startVertexIndex, EndVertexIndex}.
                                                               where Vertex_startVertexIndex:position = Edge_ii:Curve(Edge:Range(0)).
                                                                     Vertex_EndVertexIndex:position   = Edge_ii:Curve(Edge:Range(1)).
-                                                              wireEdge:vertexIndices are required because vertices can be shared with loopVertices and edgeVertices.
+                                                              When a Brep has wireEdges, wireEdge:vertexIndices are required because vertices can be shared with loopVertices and edgeVertices (a Brep with no wireEdges authors no wireEdge:* arrays).
                                                               (note: wireEdge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
                                                               size() = number of Edges. """ )
                                                  

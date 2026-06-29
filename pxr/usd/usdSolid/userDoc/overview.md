@@ -85,7 +85,7 @@ A `UsdSolidBrepArray` prim has two clearly separated tiers of attributes:
 1. **Topology arrays** — un-prefixed, named by topology stratum (`region:*`, `shell:*`, `face:*`, …). These are arrays of indices and tokens describing how the Brep is wired together.
 2. **`brep:`-prefixed geometry** — authored by the applied geometry API schemas. These hold the actual NURBS control vertices, knots, weights, point positions, per-Brep counts, and extents.
 
-This separation lets a Brep author only the geometry types it actually uses (a NURBS-only model omits analytic-surface attributes), minimizing default-valued data.
+This separation lets a Brep author only the geometry types it actually uses (a NURBS-only model omits analytic-surface attributes), minimizing default-valued data. The same holds for topology: a Brep authors only the strata it needs. A face-only solid omits the `wireEdge:*` arrays, a pure wire body omits the face strata, and a point body omits both. The absence of a family means "no elements of that kind," not an incomplete file.
 
 ### Topology arrays
 
@@ -296,11 +296,16 @@ mesh = tessellate(brep, chord_height_tolerance=0.01, angle_tolerance_deg=15.0)
 
 ## Rules and restrictions
 
-A valid Brep must satisfy a set of topological and geometric rules. Within OpenUSD, only the **topological** rules and NURBS-coherence rules are verifiable; full geometric validation (self-intersection, tangency, true tolerance enforcement) requires an external geometry kernel and is out of scope for in-stage validation. The proposal notes that these rules will be migrated into the schema doc strings once the AOUSD Geometry Working Group aligns on a design.
+A valid Brep must satisfy a set of topological and geometric rules. Within OpenUSD, the **topological** rules and NURBS-coherence rules are verifiable by a native `UsdValidation` plugin, `usdSolidValidators`, so any tool that loads USD can check a Brep without a CAD kernel. Full geometric validation (self-intersection, tangency, true tolerance enforcement) requires an external geometry kernel and is out of scope for in-stage validation. The proposal notes that these rules will be migrated into the schema doc strings once the AOUSD Geometry Working Group aligns on a design.
+
+**Authoring validity is the producer's responsibility.** A valid Brep carries authored topological connectivity — shared edges joined by a real radial-edgeuse ring — not merely coincident geometry. A consumer (a renderer or simulator) should not infer or reconstruct that topology from geometry as a matter of course: recovering connectivity from geometry is underdetermined, because the smallest intentional gap and the largest unintentional gap can overlap, so design intent cannot always be recovered. Independent trimmed surfaces, or geometrically adjacent faces that share no edges, are not a Brep. Turning such data into one is a kernel's best-effort stitch performed upstream, not something a consumer silently repairs; missing or inconsistent topology is an authoring problem to surface to the producer.
+
+**Model type is computed, not declared.** The schema deliberately omits a model-type attribute. A Brep may be a point set, a wireframe, an open sheet, a closed solid, a non-manifold body, or a combination of these, and which one it is follows from the authored topology — a kernel determines it. A sheet body (open or disconnected surfaces) is a valid Brep, not a lesser form to reject. *Brep*, *watertight*, and *manifold* are independent properties: a Brep need not be watertight or manifold, and a consumer must not assume it is.
 
 Highlights (see the full mapping in the migration table):
 
 - **Watertight regions.** All regions are separated by closed shells. All self-intersections must be marked with topology — face-face intersections need an edge and/or vertex; edge-edge intersections need a vertex.
+- **Closed solids.** A region typed `solidRegion` bounds a finite volume, so each of its shells must be closed: every non-degenerate edge on a solid shell is shared by at least two faceuses whose radial edgeuse ring links them into a complete cycle. A single-use (free or laminar) boundary edge is legal only on a `voidRegion`-only sheet, where open boundaries are expected; on a solid it signals an open surface — surface soup, or a sheet mislabeled as a solid. Degenerate pole or apex edges, where the start and end vertex coincide, are exempt.
 - **Single tolerance.** A valid Brep conforms to one tolerance number: any two connected entities must have a gap smaller than tolerance, all unconnected entities must be farther apart than tolerance, and degenerate geometry (measured against tolerance) is forbidden.
 - **No slivers or degenerates.** No sliver faces or surfaces (contained in a pipe of radius = tolerance), no face/surface with area below tolerance², and no edge/curve contained in a sphere of radius = tolerance.
 - **Ranges.** A face's range must be a subset of its surface's range; an edge's range must be a subset of its curve's range. For any range [a, b], b > a, and a periodic range must not exceed the period.
