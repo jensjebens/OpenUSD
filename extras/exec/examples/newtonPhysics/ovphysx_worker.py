@@ -76,7 +76,7 @@ def main():
         physx = PhysX(device=device)
         physx.add_usd(scene_path)
         pose_binding = physx.create_tensor_binding(
-            pattern='/World/**',
+            pattern='/**',
             tensor_type=TensorType.RIGID_BODY_POSE
         )
         prim_paths = list(pose_binding.prim_paths)
@@ -85,7 +85,7 @@ def main():
 
         # Velocity binding for grab
         vel_binding = physx.create_tensor_binding(
-            pattern='/World/**',
+            pattern='/**',
             tensor_type=TensorType.RIGID_BODY_VELOCITY
         )
         vel_buf = np.zeros(vel_binding.shape, dtype=np.float32)
