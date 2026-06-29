@@ -1,0 +1,16 @@
+{
+    "Plugins": [
+        {
+            "Type": "python",
+            "Name": "usdviewPlugin",
+            "Info": {
+                "Types": {
+                    "usdviewPlugin.NewtonPhysicsPlugin": {
+                        "bases": ["pxr.Usdviewq.plugin.PluginContainer"],
+                        "displayName": "Newton GPU Physics"
+                    }
+                }
+            }
+        }
+    ]
+}
