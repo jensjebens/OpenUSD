@@ -2026,10 +2026,23 @@ def InstallUSD(context, force, buildArgs):
             newtonPythonSrc = os.path.join(newtonPluginSrc, "python")
             newtonUsdviewSrc = os.path.join(newtonPluginSrc, "usdviewPlugin")
 
+            # Locate where USD installed its Python "pxr" package. This is
+            # lib/python/pxr on most builds but lib/site-packages/pxr on others
+            # (depends on platform/Python config), so detect it rather than
+            # hardcoding -- otherwise the Newton plugin lands in a sibling
+            # directory that is not on the same package path as the rest of
+            # pxr and "import pxr.newtonPhysics" fails.
+            pxrInstallDir = next(
+                (d for d in (
+                    os.path.join(context.usdInstDir, "lib", "python", "pxr"),
+                    os.path.join(context.usdInstDir, "lib", "site-packages",
+                                 "pxr"))
+                 if os.path.isdir(d)),
+                os.path.join(context.usdInstDir, "lib", "python", "pxr"))
+
             # Install UsdView plugin (plugInfo.json + container)
             newtonUsdviewDest = os.path.join(
-                context.usdInstDir, "lib", "python", "pxr",
-                "newtonPhysics", "usdviewPlugin")
+                pxrInstallDir, "newtonPhysics", "usdviewPlugin")
             if os.path.isdir(newtonUsdviewDest):
                 shutil.rmtree(newtonUsdviewDest)
             os.makedirs(newtonUsdviewDest, exist_ok=True)
@@ -2041,8 +2054,7 @@ def InstallUSD(context, force, buildArgs):
 
             # Install Newton Python module
             newtonPythonDest = os.path.join(
-                context.usdInstDir, "lib", "python", "pxr",
-                "newtonPhysics", "python")
+                pxrInstallDir, "newtonPhysics", "python")
             if os.path.isdir(newtonPythonDest):
                 shutil.rmtree(newtonPythonDest)
             os.makedirs(newtonPythonDest, exist_ok=True)
