@@ -2063,6 +2063,17 @@ def InstallUSD(context, force, buildArgs):
                     os.path.basename(f)))
                 shutil.copy(f, newtonPythonDest)
 
+            # Install top-level Newton scripts (e.g. ovphysx_worker.py). The
+            # usdview plugin launches these as subprocesses via a path relative
+            # to the installed package, so they must be installed alongside the
+            # usdviewPlugin -- otherwise the PhysX engine cannot start.
+            newtonTopDest = os.path.join(pxrInstallDir, "newtonPhysics")
+            os.makedirs(newtonTopDest, exist_ok=True)
+            for f in glob.glob(os.path.join(newtonPluginSrc, "*.py")):
+                PrintCommandOutput("Installing Newton script: {}\n".format(
+                    os.path.basename(f)))
+                shutil.copy(f, newtonTopDest)
+
             PrintCommandOutput("Newton GPU physics plugin installed.\n")
 
 USD = Dependency("USD", InstallUSD, "include/pxr/pxr.h")
