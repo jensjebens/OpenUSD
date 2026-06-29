@@ -14,6 +14,7 @@ def Xform "World"
         uniform point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0)]
         uniform double[] brep:edge3dCircle:curve3d:circle:radius = [2]
         uniform vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(0, 0, 1)]
+        uniform double3[] brep:extent = [(0, 0, -2), (0, 0, 2)]
         uniform double[] brep:intersectTol3d = [0.000001]
         uniform uint[] brep:regionCount = [2]
         uniform vector3d[] brep:surface:sphere:axis = [(0, 0, 1)]
@@ -39,7 +40,7 @@ def Xform "World"
         uniform uint[] region:shellCount = [1, 1]
         uniform token[] region:type = ["voidRegion", "solidRegion"]
         uniform uint[] shell:faceuseCount = [1, 1]
-        uniform token[] shell:pointType = ["none"]
+        uniform token[] shell:pointType = ["none", "none"]
         uniform uint[] shell:wireEdgeCount = [0, 0]
         uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI"]
     }
