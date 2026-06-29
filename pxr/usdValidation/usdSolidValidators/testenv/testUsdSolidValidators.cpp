@@ -164,6 +164,68 @@ def Xform "World"
         vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0)]
         double[] brep:edge3dCircle:curve3d:circle:radius = [-1.0]
     }
+
+    # A single planar patch with four single-use (identity-ring) boundary edges
+    # that LABELS itself a closed solid (regionCount = [void, solid]). The solid
+    # shell is not closed -> BrepArraySolidClosure must flag SolidShellOpenEdge.
+    def BrepArray "OpenSolidPatch"
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 0)]
+        uniform uint[] brep:regionCount = [2]
+        uniform uint[] region:shellCount = [1, 1]
+        uniform token[] region:type = ["voidRegion", "solidRegion"]
+        uniform uint[] shell:faceuseCount = [1, 1]
+        uniform uint[] shell:wireEdgeCount = [0, 0]
+        uniform token[] shell:pointType = ["none", "none"]
+        uniform uint[] faceuse:faceIndex = [0, 0]
+        uniform token[] faceuse:orientationType = ["same", "opposite"]
+        uniform uint[] face:loopCount = [1]
+        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI"]
+        uniform token[] face:trimType = ["general"]
+        uniform double2[] face:range = [(0, 0), (1, 1)]
+        uniform uint[] loop:edgeuseCount = [4]
+        uniform uint[] loop:vertexIndex = [0]
+        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3]
+        uniform token[] edgeuse:orientationType = ["same", "same", "same", "same"]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 1, 2, 3]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry"]
+        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI"]
+        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        uniform double[] edge:range = [0, 1, 0, 1, 0, 1, 0, 1]
+        uniform token[] vertex:pointType = ["none", "none", "none", "none"]
+    }
+
+    # The SAME single open patch authored honestly as a sheet: one voidRegion,
+    # no solidRegion. Its single-use boundary edges are legal on a sheet, so
+    # BrepArraySolidClosure must NOT flag it (valid sheets pass).
+    def BrepArray "OpenSheetPatch"
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 0)]
+        uniform uint[] brep:regionCount = [1]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["voidRegion"]
+        uniform uint[] shell:faceuseCount = [2]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] shell:pointType = ["none"]
+        uniform uint[] faceuse:faceIndex = [0, 0]
+        uniform token[] faceuse:orientationType = ["same", "opposite"]
+        uniform uint[] face:loopCount = [1]
+        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI"]
+        uniform token[] face:trimType = ["general"]
+        uniform double2[] face:range = [(0, 0), (1, 1)]
+        uniform uint[] loop:edgeuseCount = [4]
+        uniform uint[] loop:vertexIndex = [0]
+        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3]
+        uniform token[] edgeuse:orientationType = ["same", "same", "same", "same"]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 1, 2, 3]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry"]
+        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI"]
+        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        uniform double[] edge:range = [0, 1, 0, 1, 0, 1, 0, 1]
+        uniform token[] vertex:pointType = ["none", "none", "none", "none"]
+    }
 }
 )usda";
 
@@ -188,12 +250,13 @@ TestRegistration()
         UsdSolidValidatorNameTokens->brepArraySpans,
         UsdSolidValidatorNameTokens->brepArrayAnalyticCurves,
         UsdSolidValidatorNameTokens->brepArrayNurbs,
+        UsdSolidValidatorNameTokens->brepArraySolidClosure,
     };
 
     const UsdValidationValidatorMetadataVector metadata
         = registry.GetValidatorMetadataForPlugin(
             _tokens->usdSolidValidatorsPlugin);
-    TF_AXIOM(metadata.size() == 14);
+    TF_AXIOM(metadata.size() == 15);
 
     std::set<TfToken> validatorNames;
     for (const UsdValidationValidatorMetadata &m : metadata) {
@@ -328,6 +391,9 @@ TestBrepArrayAuthorship()
         = stage->GetPrimAtPath(SdfPath("/World/MissingFamilies"));
     TF_AXIOM(prim);
     const UsdValidationErrorVector errors = validator->Validate(prim);
+    // MissingFamilies authors only brep:regionCount, so the always-required
+    // region and shell families (region:type, region:shellCount, shell:*) are
+    // unauthored even under lenient family gating.
     TF_AXIOM(_HasError(errors, ".AttributeNotAuthored"));
 }
 
@@ -378,6 +444,38 @@ TestBrepArrayAnalyticCurves()
     TF_AXIOM(_HasError(errors, ".AnalyticCurveNonPositiveRadius"));
 }
 
+static void
+TestBrepArraySolidClosure()
+{
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArraySolidClosure);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+
+    {
+        // A single open patch labeled solidRegion: every boundary edge is
+        // single-use, so the solid shell is not closed.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/OpenSolidPatch"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_HasError(errors, ".SolidShellOpenEdge"));
+    }
+
+    {
+        // The same open patch authored honestly as a voidRegion-only sheet:
+        // single-use edges are legal on a sheet, so it must NOT be flagged.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/OpenSheetPatch"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(!_HasError(errors, ".SolidShellOpenEdge"));
+        TF_AXIOM(errors.empty());
+    }
+}
+
 int
 main()
 {
@@ -391,6 +489,7 @@ main()
     TestBrepArrayReferences();
     TestBrepArrayNurbs();
     TestBrepArrayAnalyticCurves();
+    TestBrepArraySolidClosure();
 
     std::cout << "OK\n";
     return EXIT_SUCCESS;

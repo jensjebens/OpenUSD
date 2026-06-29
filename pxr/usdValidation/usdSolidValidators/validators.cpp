@@ -1358,9 +1358,62 @@ _BrepArrayAuthorship(const UsdPrim &usdPrim,
         { "wireEdge:range", "wireEdge", "BA.255" },
         { "vertex:pointType", "vertex", "BA.300" },
     };
+    // Lenient authorship: require a family's attributes only when that family's
+    // entities actually exist (derived from the structural count arrays). A
+    // face-only solid need not author the wireEdge:* / point families, a wire
+    // body need not author the face families, and so on -- matching the schema's
+    // support for point/wire/sheet/solid bodies and USD's "author what you use"
+    // idiom. region and shell always apply to a BrepArray.
+    const UsdSolidBrepArray brep(usdPrim);
+    const auto sumU = [](const VtArray<unsigned int> &a) {
+        size_t s = 0;
+        for (unsigned int v : a) {
+            s += v;
+        }
+        return s;
+    };
+    const VtArray<unsigned int> shellFaceuseCount
+        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
+    const VtArray<unsigned int> shellWireEdgeCount
+        = _Read<unsigned int>(brep.GetShellWireEdgeCountAttr());
+    const VtArray<unsigned int> loopEdgeuseCount
+        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
+    const size_t numFaceuses = sumU(shellFaceuseCount);
+    const size_t numWireEdges = sumU(shellWireEdgeCount);
+    const size_t numEdgeuses = sumU(loopEdgeuseCount);
+    size_t numPointShells = 0;
+    {
+        const size_t ns
+            = std::min(shellFaceuseCount.size(), shellWireEdgeCount.size());
+        for (size_t s = 0; s < ns; ++s) {
+            if (shellFaceuseCount[s] == 0u && shellWireEdgeCount[s] == 0u) {
+                ++numPointShells;
+            }
+        }
+    }
+    const bool hasFaces = numFaceuses > 0;
+    const bool hasEdgeuses = numEdgeuses > 0;
+    const bool hasWire = numWireEdges > 0;
+    const bool hasVerts = hasEdgeuses || hasWire || numPointShells > 0;
+    const auto familyRequired = [&](const char *fam) -> bool {
+        const std::string f(fam);
+        if (f == "faceuse" || f == "face" || f == "loop") {
+            return hasFaces;
+        }
+        if (f == "edgeuse" || f == "edge") {
+            return hasEdgeuses;
+        }
+        if (f == "wireEdge") {
+            return hasWire;
+        }
+        if (f == "vertex") {
+            return hasVerts;
+        }
+        return true; // region, shell: always present on a BrepArray.
+    };
     UsdValidationErrorVector errors;
     for (const Item &it : items) {
-        if (!_IsAuthored(usdPrim, it.attr)) {
+        if (familyRequired(it.family) && !_IsAuthored(usdPrim, it.attr)) {
             _Err(&errors, UsdSolidValidationErrorNameTokens->attributeNotAuthored,
                  usdPrim,
                  TfStringPrintf("[%s] BrepArray <%s>: %s attribute %s is not "
@@ -1759,6 +1812,174 @@ _BrepArrayCompleteness(const UsdPrim &usdPrim,
                      TfStringPrintf("[BA.582] BrepArray <%s>: edge %zu is not "
                                     "referenced by any edgeuse (orphan edge).",
                                     usdPrim.GetPath().GetText(), e));
+            }
+        }
+    }
+
+    return errors;
+}
+
+// -------------------------------------------------------------------------- //
+// BrepArraySolidClosure                                                      //
+// -------------------------------------------------------------------------- //
+// A region declared "solidRegion" bounds a finite volume, so its shell(s) must
+// be CLOSED: every non-degenerate edge on a solid shell must be shared by at
+// least two edgeuses whose radial ring actually links them. A single-use
+// (laminar / identity-ring) boundary edge on a solid shell means the surface is
+// open -- surface soup or an open sheet mislabeled as a solid. The same
+// single-use edges on a voidRegion-only (sheet/wire/point) model are legal and
+// are NOT flagged. Degenerate pole/apex edges (start vertex == end vertex),
+// e.g. the corner singularities of a filleted solid, are exempt.
+// (BA.590/BA.591 are new checks; reconcile numbering with brep_validator.py.)
+UsdValidationErrorVector
+_BrepArraySolidClosure(const UsdPrim &usdPrim,
+                       const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
+    }
+    const UsdSolidBrepArray brep(usdPrim);
+    const _BrepOffsets off = _ComputeOffsets(brep);
+    if (!off.ok) {
+        return {};
+    }
+    const size_t n = off.numBreps;
+    UsdValidationErrorVector errors;
+
+    const VtArray<TfToken> regionType
+        = _Read<TfToken>(brep.GetRegionTypeAttr());
+    const VtArray<unsigned int> regionShellCount
+        = _Read<unsigned int>(brep.GetRegionShellCountAttr());
+    const VtArray<unsigned int> shellFaceuseCount
+        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
+    const VtArray<unsigned int> faceuseFaceIndex
+        = _Read<unsigned int>(brep.GetFaceuseFaceIndexAttr());
+    const VtArray<unsigned int> faceLoopCount
+        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
+    const VtArray<unsigned int> loopEdgeuseCount
+        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
+    const VtArray<unsigned int> edgeuseEdgeIndex
+        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
+    const VtArray<unsigned int> nextRadial
+        = _Read<unsigned int>(brep.GetEdgeuseNextRadialEUIndexAttr());
+    const VtArray<GfVec2i> edgeVtx
+        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr());
+
+    static const TfToken solidRegionTok("solidRegion");
+
+    for (size_t b = 0; b < n; ++b) {
+        // 1. Which faces of this Brep lie on a solidRegion shell?
+        std::unordered_set<unsigned int> solidFaces;
+        size_t shellCursor = off.shell[b];
+        size_t faceuseCursor = off.faceuse[b];
+        for (size_t r = off.region[b]; r < off.region[b + 1]; ++r) {
+            const bool isSolid
+                = r < regionType.size() && regionType[r] == solidRegionTok;
+            const unsigned int nsh
+                = r < regionShellCount.size() ? regionShellCount[r] : 0u;
+            for (unsigned int s = 0; s < nsh; ++s) {
+                const size_t shellIdx = shellCursor + s;
+                const unsigned int nfu = shellIdx < shellFaceuseCount.size()
+                    ? shellFaceuseCount[shellIdx] : 0u;
+                for (unsigned int k = 0; k < nfu; ++k) {
+                    const size_t fu = faceuseCursor + k;
+                    if (isSolid && fu < faceuseFaceIndex.size()) {
+                        solidFaces.insert(faceuseFaceIndex[fu]);
+                    }
+                }
+                faceuseCursor += nfu;
+            }
+            shellCursor += nsh;
+        }
+        if (solidFaces.empty()) {
+            continue;   // pure sheet / wire / point body: nothing to enforce.
+        }
+
+        // 2. Map each edgeuse of this Brep to its owning face; accumulate, per
+        //    edge, its referencing edgeuses and whether any belongs to a solid
+        //    face. edgeuse -> loop (loop:edgeuseCount) -> face (face:loopCount).
+        std::unordered_map<unsigned int, std::vector<size_t>> edgeToEUs;
+        std::unordered_set<unsigned int> solidEdges;
+        size_t loopCursor = off.loop[b];
+        size_t euCursor = off.edgeuse[b];
+        for (size_t f = off.face[b]; f < off.face[b + 1]; ++f) {
+            const bool faceIsSolid
+                = solidFaces.count(static_cast<unsigned int>(f)) > 0;
+            const unsigned int nlp
+                = f < faceLoopCount.size() ? faceLoopCount[f] : 0u;
+            for (unsigned int lk = 0; lk < nlp; ++lk) {
+                const size_t lp = loopCursor + lk;
+                const unsigned int neu
+                    = lp < loopEdgeuseCount.size() ? loopEdgeuseCount[lp] : 0u;
+                for (unsigned int ek = 0; ek < neu; ++ek) {
+                    const size_t eu = euCursor + ek;
+                    if (eu >= edgeuseEdgeIndex.size()) {
+                        continue;
+                    }
+                    const unsigned int e = edgeuseEdgeIndex[eu];
+                    edgeToEUs[e].push_back(eu);
+                    if (faceIsSolid) {
+                        solidEdges.insert(e);
+                    }
+                }
+                euCursor += neu;
+            }
+            loopCursor += nlp;
+        }
+
+        // 3. Enforce closure on every solid edge.
+        const bool ringAuthored = nextRadial.size() >= off.edgeuse[b + 1];
+        for (const unsigned int e : solidEdges) {
+            // Degenerate pole/apex edge (start vertex == end vertex) is a legal
+            // single-use seam on a closed analytic patch; exempt it.
+            if (e < edgeVtx.size() && edgeVtx[e][0] == edgeVtx[e][1]) {
+                continue;
+            }
+            const std::vector<size_t> &eus = edgeToEUs[e];
+
+            // BA.590: a solid edge must be shared (>= 2 edgeuses). A single-use
+            // edge is an open boundary -> the solid shell is not closed.
+            if (eus.size() < 2) {
+                _Err(&errors,
+                     UsdSolidValidationErrorNameTokens->solidShellOpenEdge,
+                     usdPrim,
+                     TfStringPrintf(
+                         "[BA.590] BrepArray <%s>: edge %u on a solidRegion "
+                         "shell of Brep %zu is referenced by %zu edgeuse(s) "
+                         "(expected >= 2); a solid shell must be closed (no "
+                         "single-use boundary edges). This is an open surface "
+                         "or sheet mislabeled as a solid.",
+                         usdPrim.GetPath().GetText(), e, b, eus.size()));
+                continue;
+            }
+
+            // BA.591: the radial ring of a solid edge must form one cycle that
+            // visits exactly the edgeuses referencing that edge. Only checked
+            // when the ring is authored; an absent ring is reported by
+            // BrepArrayAuthorship.
+            if (!ringAuthored) {
+                continue;
+            }
+            std::unordered_set<size_t> expected(eus.begin(), eus.end());
+            std::unordered_set<size_t> visited;
+            size_t cur = eus.front();
+            for (size_t step = 0; step < expected.size() + 1; ++step) {
+                if (cur >= nextRadial.size() || !visited.insert(cur).second) {
+                    break;
+                }
+                cur = nextRadial[cur];
+            }
+            if (visited != expected) {
+                _Err(&errors,
+                     UsdSolidValidationErrorNameTokens
+                         ->solidShellBrokenRadialRing,
+                     usdPrim,
+                     TfStringPrintf(
+                         "[BA.591] BrepArray <%s>: the radial ring of edge %u "
+                         "on a solidRegion shell of Brep %zu does not link its "
+                         "%zu edgeuses into a single cycle (an identity/self "
+                         "ring leaves the shared faces unconnected).",
+                         usdPrim.GetPath().GetText(), e, b, eus.size()));
             }
         }
     }
@@ -2484,6 +2705,10 @@ TF_REGISTRY_FUNCTION(UsdValidationRegistry)
 
     registry.RegisterPluginValidator(
         UsdSolidValidatorNameTokens->brepArrayNurbs, _BrepArrayNurbs);
+
+    registry.RegisterPluginValidator(
+        UsdSolidValidatorNameTokens->brepArraySolidClosure,
+        _BrepArraySolidClosure);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

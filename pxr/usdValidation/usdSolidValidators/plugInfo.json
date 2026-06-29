@@ -129,6 +129,15 @@
                             "UsdSolidBrepArray"
                         ]
                     },
+                    "BrepArraySolidClosure": {
+                        "doc": "Validates that a UsdSolid BrepArray region declared solidRegion has a closed bounding shell: every non-degenerate edge on a solid shell is shared by at least two edgeuses whose radial ring links them. Single-use (laminar/identity-ring) boundary edges are legal only on a voidRegion-only sheet/wire model, not on a solid. Degenerate pole/apex edges (start vertex == end vertex) are exempt.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
                     "keywords": [
                         "UsdSolidValidators"
                     ]
