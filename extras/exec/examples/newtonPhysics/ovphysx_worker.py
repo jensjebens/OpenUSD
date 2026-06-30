@@ -70,6 +70,7 @@ def main():
 
     scene_path = sys.argv[1]
     device = sys.argv[2] if len(sys.argv) > 2 else "gpu"
+    meters_per_unit = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
 
     # ---- Initialize PhysX ----
     try:
@@ -134,6 +135,7 @@ def main():
 
     # ---- Grab state ----
     grab_stiffness = 20.0
+    grab_max_speed = 20.0 / meters_per_unit   # 20 m/s, expressed in stage units
     num_substeps = 2
 
     # ---- Hot loop: watch kick flag, step physics, write poses ----
@@ -172,8 +174,8 @@ def main():
                 delta = target - body_pos
                 vel = delta * grab_stiffness
                 speed = np.linalg.norm(vel)
-                if speed > 20.0:
-                    vel *= 20.0 / speed
+                if speed > grab_max_speed:
+                    vel *= grab_max_speed / speed
 
                 vel_buf[:] = 0
                 vel_buf[grab_body_idx, 0] = float(vel[0])

@@ -142,6 +142,8 @@ class NewtonProvider(PhysicsProvider):
         self._current = 0
         self._grab_body_idx = -1
         self._grab_target = None
+        mpu = UsdGeom.GetStageMetersPerUnit(stage) or 1.0
+        self._grab_max_speed = 20.0 / mpu   # 20 m/s, expressed in stage units
 
         _log.info(f"[Newton] {len(self._body_map)} bodies ready")
         return self._body_map
@@ -158,10 +160,10 @@ class NewtonProvider(PhysicsProvider):
             pos = np.array([tf[0], tf[1], tf[2]], dtype=np.float64)
             target = np.array(self._grab_target, dtype=np.float64)
             delta = target - pos
-            vel = delta * 5.0  # gain
+            vel = delta * 5.0  # gain (1/s, scale-free)
             speed = np.linalg.norm(vel)
-            if speed > 20.0:
-                vel *= 20.0 / speed
+            if speed > self._grab_max_speed:
+                vel *= self._grab_max_speed / speed
             body_qd[self._grab_body_idx][0] = vel[0]
             body_qd[self._grab_body_idx][1] = vel[1]
             body_qd[self._grab_body_idx][2] = vel[2]
@@ -274,8 +276,9 @@ class PhysXProvider(PhysicsProvider):
         env.pop("LD_PRELOAD", None)
 
         python = sys.executable  # same venv python (has ovphysx)
+        mpu = UsdGeom.GetStageMetersPerUnit(stage) or 1.0
         self._proc = subprocess.Popen(
-            [python, worker_path, scene_path, device],
+            [python, worker_path, scene_path, device, str(mpu)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
