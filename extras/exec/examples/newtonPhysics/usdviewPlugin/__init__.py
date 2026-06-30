@@ -111,8 +111,11 @@ class NewtonProvider(PhysicsProvider):
 
     @property
     def needs_axis_swap(self):
-        """Newton always simulates in Z-up."""
-        return True
+        """No manual swap: newton.ModelBuilder.add_usd honors the stage's
+        up-axis and the authored UsdPhysicsScene gravity, so body_q comes back
+        in the stage's coordinate frame. A manual Y<->Z swap double-transforms
+        Y-up scenes (bodies appear to fall through)."""
+        return False
 
     def initialize(self, scene_path, stage, device='gpu'):
         newton_device = 'cuda:0' if wp.is_cuda_available() else 'cpu'
@@ -897,16 +900,18 @@ class _GrabEventFilter(QtCore.QObject):
                 grab = True
 
             if grab:
-                x = event.x() * obj.devicePixelRatioF()
-                y = event.y() * obj.devicePixelRatioF()
+                pos = event.position() if hasattr(event, "position") else event.localPos()
+                x = pos.x() * obj.devicePixelRatioF()
+                y = pos.y() * obj.devicePixelRatioF()
                 if self._plugin.beginGrab(self._api, x, y):
                     self._grabbing = True
                     return True
 
         elif etype == QtCore.QEvent.MouseMove:
             if self._grabbing:
-                x = event.x() * obj.devicePixelRatioF()
-                y = event.y() * obj.devicePixelRatioF()
+                pos = event.position() if hasattr(event, "position") else event.localPos()
+                x = pos.x() * obj.devicePixelRatioF()
+                y = pos.y() * obj.devicePixelRatioF()
                 self._plugin.updateGrab(self._api, x, y)
                 return True
 
