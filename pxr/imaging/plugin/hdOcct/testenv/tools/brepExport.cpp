@@ -19,6 +19,8 @@
 
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepBuilderAPI_NurbsConvert.hxx>
@@ -45,14 +47,27 @@
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Geom_SphericalSurface.hxx>
+#include <Geom_ToroidalSurface.hxx>
 #include <Standard_Failure.hxx>
 #include <Geom2dConvert.hxx>
 #include <GeomConvert.hxx>
+#include <GeomProjLib.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Cone.hxx>
+#include <gp_Sphere.hxx>
+#include <gp_Torus.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 
 #include <TColStd_Array1OfReal.hxx>
@@ -84,7 +99,20 @@ struct Out {
     struct Surf { int uo,vo,un,vn; std::vector<double> uk,vk,w; std::vector<std::array<double,3>> cp; };
     struct Crv3 { int order,n; std::vector<double> k,w; std::vector<std::array<double,3>> cp; };
     struct Crv2 { int order,n; std::vector<double> k,w; std::vector<std::array<double,2>> cp; };
-    std::vector<Surf> surfaces;            // per face
+    // Analytic surface (native plane/cylinder/cone/sphere/torus). kind is the
+    // BrepSurface*API token; params filled per kind.
+    struct AnalSurf {
+        std::string kind;                    // "BrepSurface{Plane,Cylinder,Cone,Sphere,Torus}API" or "" (NURBS)
+        std::array<double,3> origin{{0,0,0}}; // plane/cyl/cone origin, sphere/torus center
+        std::array<double,3> axis{{0,0,1}};
+        std::array<double,3> refDir{{1,0,0}};
+        double radius = 0.0;                  // cyl/cone/sphere radius
+        double semiAngle = 0.0;              // cone only
+        double majorRadius = 0.0, minorRadius = 0.0; // torus only
+        bool reproject = false;              // reproject pcurves onto canonical frame
+    };
+    std::vector<Surf> surfaces;            // per NURBS face (packed over NURBS faces)
+    std::vector<AnalSurf> faceSurf;        // per face (kind + analytic params); kind=="" -> NURBS (index into surfaces in face order)
     std::vector<Crv3> edge3d;              // per UNIQUE edge
     std::vector<Crv2> curveUv;             // per EDGEUSE
     std::vector<std::array<double,3>> verts; // per UNIQUE vertex
@@ -92,6 +120,127 @@ struct Out {
     std::vector<std::array<double,2>> edgeRange; // per UNIQUE edge
     std::vector<bool> edgeDegenerate;      // per UNIQUE edge (placeholder line)
 };
+
+// Normalize a gp_Dir-derived vector to a unit std::array (validator requires
+// unit-length axis/refDirection).
+static std::array<double,3> unitv(const gp_Dir& d) {
+    return { d.X(), d.Y(), d.Z() };   // gp_Dir is already unit length
+}
+
+// Detect a face's analytic surface type and extract schema params. Returns an
+// AnalSurf with kind=="" when the surface is not one of the analytic primitives
+// (caller then falls back to NURBS extraction).
+static Out::AnalSurf detectAnalytic(const TopoDS_Face& face) {
+    Out::AnalSurf a{};
+    Handle(Geom_Surface) gs = BRep_Tool::Surface(face);
+    if (gs.IsNull()) return a;
+    // ShapeDivideClosed wraps a split periodic face in a
+    // Geom_RectangularTrimmedSurface; unwrap to the analytic basis surface (the
+    // trim range is carried by the face's UVBounds / edges, so params are the
+    // basis surface's global frame).
+    Handle(Geom_RectangularTrimmedSurface) rt =
+        Handle(Geom_RectangularTrimmedSurface)::DownCast(gs);
+    if (!rt.IsNull()) gs = rt->BasisSurface();
+    const Handle(Standard_Type)& ty = gs->DynamicType();
+    if (ty == STANDARD_TYPE(Geom_Plane)) {
+        gp_Pln pln = Handle(Geom_Plane)::DownCast(gs)->Pln();
+        const gp_Ax3& ax = pln.Position();
+        gp_Pnt o = ax.Location();
+        a.kind = "BrepSurfacePlaneAPI";
+        a.origin = {o.X(),o.Y(),o.Z()};
+        a.axis = unitv(ax.Direction());
+        a.refDir = unitv(ax.XDirection());
+    } else if (ty == STANDARD_TYPE(Geom_CylindricalSurface)) {
+        gp_Cylinder cy = Handle(Geom_CylindricalSurface)::DownCast(gs)->Cylinder();
+        const gp_Ax3& ax = cy.Position();
+        gp_Pnt o = ax.Location();
+        a.kind = "BrepSurfaceCylinderAPI";
+        a.origin = {o.X(),o.Y(),o.Z()};
+        a.axis = unitv(ax.Direction());
+        a.refDir = unitv(ax.XDirection());
+        a.radius = cy.Radius();
+    } else if (ty == STANDARD_TYPE(Geom_ConicalSurface)) {
+        gp_Cone co = Handle(Geom_ConicalSurface)::DownCast(gs)->Cone();
+        const gp_Ax3& ax = co.Position();
+        gp_Pnt o = ax.Location();
+        // Author OCCT's native cone frame + SIGNED semiAngle so the builder
+        // reconstructs the exact same Geom_ConicalSurface the native pcurves and
+        // face:range were parametrized against. NOTE: for an apex-up cone OCCT
+        // reports a NEGATIVE semiAngle (the cone narrows along +axis). The
+        // schema/validator convention wants semiAngle in (0, pi/2), so this one
+        // fixture trips BrepArrayAnalyticSurfaces:InvalidConeSemiAngle. Emitting
+        // a positive semiAngle instead (apex-canonical frame) requires
+        // reprojecting the pcurves + face:range, which OCCT's GeomProjLib does
+        // not do reliably for periodic analytic curves; keeping the native
+        // signed value preserves correct tessellation geometry.
+        gp_Dir axd = ax.Direction();
+        double refR = co.RefRadius();
+        double semi = co.SemiAngle();
+        // Canonicalize to the validator convention (semiAngle>0, radius 0 at the
+        // apex). Apex at w=-refR/tan(semi) along the OCCT axis; if semi<0 flip
+        // the axis so the surface's +v (which the reprojected pcurves will use)
+        // grows toward the widening base. Cone faces reproject their pcurves +
+        // face:range onto this canonical surface (see addFace).
+        const double t = std::tan(semi);
+        std::array<double,3> apex = { o.X(), o.Y(), o.Z() };
+        if (std::fabs(t) > 1e-12) {
+            double w = -refR / t;
+            apex = { o.X()+w*axd.X(), o.Y()+w*axd.Y(), o.Z()+w*axd.Z() };
+        }
+        std::array<double,3> uaxis = { axd.X(), axd.Y(), axd.Z() };
+        double usemi = semi;
+        if (usemi < 0.0) { uaxis = {-uaxis[0],-uaxis[1],-uaxis[2]}; usemi = -usemi; }
+        a.kind = "BrepSurfaceConeAPI";
+        a.origin = apex;
+        a.axis = uaxis;
+        a.refDir = unitv(ax.XDirection());
+        a.radius = 0.0;
+        a.semiAngle = usemi;
+        a.reproject = true;             // cone needs pcurve reprojection onto canonical frame
+    } else if (ty == STANDARD_TYPE(Geom_SphericalSurface)) {
+        gp_Sphere sp = Handle(Geom_SphericalSurface)::DownCast(gs)->Sphere();
+        const gp_Ax3& ax = sp.Position();
+        gp_Pnt o = ax.Location();
+        a.kind = "BrepSurfaceSphereAPI";
+        a.origin = {o.X(),o.Y(),o.Z()};   // sphere center
+        a.axis = unitv(ax.Direction());
+        a.refDir = unitv(ax.XDirection());
+        a.radius = sp.Radius();
+    } else if (ty == STANDARD_TYPE(Geom_ToroidalSurface)) {
+        gp_Torus to = Handle(Geom_ToroidalSurface)::DownCast(gs)->Torus();
+        const gp_Ax3& ax = to.Position();
+        gp_Pnt o = ax.Location();
+        a.kind = "BrepSurfaceTorusAPI";
+        a.origin = {o.X(),o.Y(),o.Z()};   // torus center
+        a.axis = unitv(ax.Direction());
+        a.refDir = unitv(ax.XDirection());
+        a.majorRadius = to.MajorRadius();
+        a.minorRadius = to.MinorRadius();
+    }
+    return a;
+}
+
+// Rebuild the OCCT Geom_Surface from an AnalSurf, in the SAME (possibly
+// canonicalized) frame the builder will reconstruct. Used to reproject the
+// boundary pcurves so curveUv is consistent with the AUTHORED analytic surface
+// (not OCCT's original frame — critical for the apex-canonicalized cone).
+static Handle(Geom_Surface) canonicalSurface(const Out::AnalSurf& a) {
+    gp_Pnt o(a.origin[0], a.origin[1], a.origin[2]);
+    gp_Dir ax(a.axis[0], a.axis[1], a.axis[2]);
+    gp_Dir rx(a.refDir[0], a.refDir[1], a.refDir[2]);
+    gp_Ax3 frame(o, ax, rx);
+    if (a.kind == "BrepSurfacePlaneAPI")
+        return new Geom_Plane(frame);
+    if (a.kind == "BrepSurfaceCylinderAPI")
+        return new Geom_CylindricalSurface(frame, a.radius);
+    if (a.kind == "BrepSurfaceConeAPI")
+        return new Geom_ConicalSurface(frame, a.semiAngle, a.radius);
+    if (a.kind == "BrepSurfaceSphereAPI")
+        return new Geom_SphericalSurface(frame, a.radius);
+    if (a.kind == "BrepSurfaceTorusAPI")
+        return new Geom_ToroidalSurface(frame, a.majorRadius, a.minorRadius);
+    return Handle(Geom_Surface)();
+}
 
 static Out::Surf extractSurface(const TopoDS_Face& face) {
     Out::Surf s{};
@@ -173,8 +322,12 @@ struct ShareCtx {
 
 // Append one face (with all its wires) to the Out arrays.
 static void addFace(Out& o, ShareCtx& ctx, const TopoDS_Face& face) {
-    // surface
-    o.surfaces.push_back(extractSurface(face));
+    // surface: prefer the native analytic type (routes the builder through its
+    // robust analytic path); fall back to NURBS extraction otherwise.
+    Out::AnalSurf anal = detectAnalytic(face);
+    o.faceSurf.push_back(anal);
+    if (anal.kind.empty())
+        o.surfaces.push_back(extractSurface(face));   // NURBS, packed in face order over NURBS faces
     // face range (corner-point form is emitted later in emit()).
     Standard_Real u0,u1,v0,v1; BRepTools::UVBounds(face, u0,u1,v0,v1);
     o.faceRange.push_back({u0,u1,v0,v1});
@@ -280,7 +433,8 @@ static std::string fnum(double x) {
 }
 
 static void emit(const Out& o, bool isSolid, const std::string& prim,
-                 const std::string& path, const std::string& doc) {
+                 const std::string& path, const std::string& doc,
+                 double metersPerUnit = 0.01, const std::string& upAxis = "Y") {
     std::ofstream f(path);
     auto P3 = [&](const std::array<double,3>& p){ return "("+fnum(p[0])+", "+fnum(p[1])+", "+fnum(p[2])+")"; };
     auto P2 = [&](const std::array<double,2>& p){ return "("+fnum(p[0])+", "+fnum(p[1])+")"; };
@@ -288,9 +442,40 @@ static void emit(const Out& o, bool isSolid, const std::string& prim,
     size_t nEU    = o.edgeuseEdgeIndex.size();
     size_t nEdges = o.edge3d.size();
     size_t nVerts = o.verts.size();
-    f << "#usda 1.0\n(\n    defaultPrim = \"World\"\n    metersPerUnit = 0.01\n    upAxis = \"Y\"\n";
+    f << "#usda 1.0\n(\n    defaultPrim = \"World\"\n    metersPerUnit = "
+      << fnum(metersPerUnit) << "\n    upAxis = \"" << upAxis << "\"\n";
     f << "    doc = \"\"\"" << doc << "\"\"\"\n)\n\n";
-    f << "def Xform \"World\"\n{\n    def BrepArray \"" << prim << "\"\n    {\n";
+
+    // Per-face surfaceType tokens, and which analytic API schemas are used.
+    std::vector<std::string> faceSurfaceType;
+    bool useNurb=false, usePlane=false, useCyl=false, useCone=false, useSph=false, useTor=false;
+    for (const auto& a : o.faceSurf) {
+        if (a.kind.empty()) { faceSurfaceType.push_back("BrepSurfaceNurbAPI"); useNurb=true; }
+        else {
+            faceSurfaceType.push_back(a.kind);
+            if (a.kind=="BrepSurfacePlaneAPI") usePlane=true;
+            else if (a.kind=="BrepSurfaceCylinderAPI") useCyl=true;
+            else if (a.kind=="BrepSurfaceConeAPI") useCone=true;
+            else if (a.kind=="BrepSurfaceSphereAPI") useSph=true;
+            else if (a.kind=="BrepSurfaceTorusAPI") useTor=true;
+        }
+    }
+    // apiSchemas: point + edge/curveUv NURBS always; each analytic surface type
+    // in use (SchemaUsage errors on an applied schema with no matching faces, so
+    // add ONLY used types).
+    std::vector<std::string> apiSchemas = {
+        "BrepPointAPI:vertexPoint", "BrepCurve3dNurbAPI:edge3dNurb", "BrepCurveUvNurbAPI" };
+    if (useNurb)  apiSchemas.push_back("BrepSurfaceNurbAPI");
+    if (usePlane) apiSchemas.push_back("BrepSurfacePlaneAPI");
+    if (useCyl)   apiSchemas.push_back("BrepSurfaceCylinderAPI");
+    if (useCone)  apiSchemas.push_back("BrepSurfaceConeAPI");
+    if (useSph)   apiSchemas.push_back("BrepSurfaceSphereAPI");
+    if (useTor)   apiSchemas.push_back("BrepSurfaceTorusAPI");
+
+    f << "def Xform \"World\"\n{\n    def BrepArray \"" << prim << "\" (\n";
+    f << "        prepend apiSchemas = [";
+    for (size_t i=0;i<apiSchemas.size();++i){ f<<"\""<<apiSchemas[i]<<"\""; if(i+1<apiSchemas.size())f<<", "; }
+    f << "]\n    )\n    {\n";
     auto line = [&](const std::string& s){ f << "        " << s << "\n"; };
     auto arrTok = [&](const std::string& nm, const std::vector<std::string>& v){
         std::ostringstream s; s << "uniform token[] " << nm << " = [";
@@ -338,7 +523,7 @@ static void emit(const Out& o, bool isSolid, const std::string& prim,
     }
 
     { std::vector<int> lc(o.faceLoopCount); arrU("face:loopCount", lc); }
-    { std::vector<std::string> st(nFaces, "BrepSurfaceNurbAPI"); arrTok("face:surfaceType", st); }
+    arrTok("face:surfaceType", faceSurfaceType);
     { std::vector<std::string> tt(nFaces, "general"); arrTok("face:trimType", tt); }
     // face:range CORNER POINTS: for (u0,u1,v0,v1) -> "(u0, v0), (u1, v1)".
     { std::ostringstream s; s<<"uniform double2[] face:range = [";
@@ -391,7 +576,8 @@ static void emit(const Out& o, bool isSolid, const std::string& prim,
     { std::ostringstream s; s<<"uniform point3d[] brep:vertexPoint:point:position = [";
       for(size_t i=0;i<o.verts.size();++i){ s<<P3(o.verts[i]); if(i+1<o.verts.size())s<<", ";} s<<"]"; line(s.str()); }
 
-    // ---- surfaces (per face) ----
+    // ---- NURBS surfaces (only when NURBS faces exist; packed in face order) ----
+    if (useNurb) {
     { std::vector<int> a; for(auto&s:o.surfaces)a.push_back(s.uo); arrU("brep:surface:nurb:uOrder",a); }
     { std::vector<int> a; for(auto&s:o.surfaces)a.push_back(s.vo); arrU("brep:surface:nurb:vOrder",a); }
     { std::vector<int> a; for(auto&s:o.surfaces)a.push_back(s.un); arrU("brep:surface:nurb:uVertexCount",a); }
@@ -401,6 +587,57 @@ static void emit(const Out& o, bool isSolid, const std::string& prim,
     { std::ostringstream s; s<<"uniform point3d[] brep:surface:nurb:controlVertices = [";
       bool first=true; for(auto&su:o.surfaces)for(auto&p:su.cp){ if(!first)s<<", "; s<<P3(p); first=false;} s<<"]"; line(s.str()); }
     { std::vector<double> a; for(auto&s:o.surfaces)for(double w:s.w)a.push_back(w); arrD("brep:surface:nurb:weights",a); }
+    }
+
+    // ---- analytic surfaces (each type packed over its faces in face order) ----
+    // Helpers to emit vector3d[] / point3d[] / double[] over the analytic faces
+    // of a given kind, in face order.
+    auto emitVec3 = [&](const char* nm, const std::string& kind,
+                        std::array<double,3> Out::AnalSurf::* member){
+        std::ostringstream s; s<<"uniform vector3d[] "<<nm<<" = [";
+        bool first=true; for(auto&a:o.faceSurf){ if(a.kind!=kind) continue;
+            if(!first)s<<", "; s<<P3(a.*member); first=false; } s<<"]"; line(s.str()); };
+    auto emitPnt3 = [&](const char* nm, const std::string& kind,
+                        std::array<double,3> Out::AnalSurf::* member){
+        std::ostringstream s; s<<"uniform point3d[] "<<nm<<" = [";
+        bool first=true; for(auto&a:o.faceSurf){ if(a.kind!=kind) continue;
+            if(!first)s<<", "; s<<P3(a.*member); first=false; } s<<"]"; line(s.str()); };
+    auto emitDbl = [&](const char* nm, const std::string& kind,
+                       double Out::AnalSurf::* member){
+        std::vector<double> v; for(auto&a:o.faceSurf) if(a.kind==kind) v.push_back(a.*member);
+        arrD(nm, v); };
+
+    if (usePlane) {
+        emitPnt3("brep:surface:plane:origin", "BrepSurfacePlaneAPI", &Out::AnalSurf::origin);
+        emitVec3("brep:surface:plane:axis", "BrepSurfacePlaneAPI", &Out::AnalSurf::axis);
+        emitVec3("brep:surface:plane:refDirection", "BrepSurfacePlaneAPI", &Out::AnalSurf::refDir);
+    }
+    if (useCyl) {
+        emitPnt3("brep:surface:cylinder:origin", "BrepSurfaceCylinderAPI", &Out::AnalSurf::origin);
+        emitVec3("brep:surface:cylinder:axis", "BrepSurfaceCylinderAPI", &Out::AnalSurf::axis);
+        emitVec3("brep:surface:cylinder:refDirection", "BrepSurfaceCylinderAPI", &Out::AnalSurf::refDir);
+        emitDbl("brep:surface:cylinder:radius", "BrepSurfaceCylinderAPI", &Out::AnalSurf::radius);
+    }
+    if (useCone) {
+        emitPnt3("brep:surface:cone:origin", "BrepSurfaceConeAPI", &Out::AnalSurf::origin);
+        emitVec3("brep:surface:cone:axis", "BrepSurfaceConeAPI", &Out::AnalSurf::axis);
+        emitVec3("brep:surface:cone:refDirection", "BrepSurfaceConeAPI", &Out::AnalSurf::refDir);
+        emitDbl("brep:surface:cone:radius", "BrepSurfaceConeAPI", &Out::AnalSurf::radius);
+        emitDbl("brep:surface:cone:semiAngle", "BrepSurfaceConeAPI", &Out::AnalSurf::semiAngle);
+    }
+    if (useSph) {
+        emitPnt3("brep:surface:sphere:center", "BrepSurfaceSphereAPI", &Out::AnalSurf::origin);
+        emitVec3("brep:surface:sphere:axis", "BrepSurfaceSphereAPI", &Out::AnalSurf::axis);
+        emitVec3("brep:surface:sphere:refDirection", "BrepSurfaceSphereAPI", &Out::AnalSurf::refDir);
+        emitDbl("brep:surface:sphere:radius", "BrepSurfaceSphereAPI", &Out::AnalSurf::radius);
+    }
+    if (useTor) {
+        emitPnt3("brep:surface:torus:origin", "BrepSurfaceTorusAPI", &Out::AnalSurf::origin);
+        emitVec3("brep:surface:torus:axis", "BrepSurfaceTorusAPI", &Out::AnalSurf::axis);
+        emitVec3("brep:surface:torus:refDirection", "BrepSurfaceTorusAPI", &Out::AnalSurf::refDir);
+        emitDbl("brep:surface:torus:majorRadius", "BrepSurfaceTorusAPI", &Out::AnalSurf::majorRadius);
+        emitDbl("brep:surface:torus:minorRadius", "BrepSurfaceTorusAPI", &Out::AnalSurf::minorRadius);
+    }
 
     // ---- edge 3d curves (per UNIQUE edge) ----
     { std::vector<int> a; for(auto&c:o.edge3d)a.push_back(c.order); arrU("brep:edge3dNurb:curve3d:nurb:order",a); }
@@ -453,22 +690,63 @@ static TopoDS_Shape makePlaneWithHole() {
     mf.Add(hole);
     return mf.Face();
 }
+// Proper OCCT solid primitives (replace the natural-trim NURBS approximations).
+// Cone: base radius 5 at z=0, apex at (0,0,10) -> MakeCone(R1=5, R2=0, H=10).
+static TopoDS_Shape makeConeSolid() {
+    return BRepPrimAPI_MakeCone(5.0, 0.0, 10.0).Shape();
+}
+// Cylinder: radius 3, height 10, axis +Z, base at z=0.
+static TopoDS_Shape makeCylinderSolid() {
+    return BRepPrimAPI_MakeCylinder(3.0, 10.0).Shape();
+}
+// Sphere: radius 5 centered at origin.
+static TopoDS_Shape makeSphereSolid() {
+    return BRepPrimAPI_MakeSphere(5.0).Shape();
+}
+// Plain solid box 10^3 (analytic planar faces -> BrepSurfacePlaneAPI); pairs
+// with the NURBS testCube for the analytic-vs-NURBS gallery comparison.
+static TopoDS_Shape makeBoxSolid() {
+    return BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape();
+}
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::fprintf(stderr, "usage: brepExport <plane|cube|filleted> <out.usda>\n"); return 2; }
+    if (argc < 3) { std::fprintf(stderr, "usage: brepExport <plane|cube|filleted|cone|cylinder|sphere|box> <out.usda>\n"); return 2; }
     std::string what = argv[1], path = argv[2];
     TopoDS_Shape shape; std::string prim, doc;
+    // Header units: the cube/plane family uses Y-up cm; the analytic-solid
+    // gallery (cone/cylinder/sphere) is Z-up, metersPerUnit=1 to match the
+    // existing fixtures so the gallery stays coherent.
+    double metersPerUnit = 0.01; std::string upAxis = "Y";
+    // Analytic solids keep their native Geom_*Surface (no NurbsConvert) so the
+    // builder routes them through its robust analytic path.
+    bool analyticShape = false;
     if (what == "cube") { shape = makeCubeWithHole();
         prim = "CubeWithHole"; doc = "Box 10^3 with r=3 through-hole along Z (OCCT-generated, shared topology)."; }
     else if (what == "filleted") { shape = makeFilletedCubeWithHole();
         prim = "FilletedCubeWithHole"; doc = "Box 10^3, fillet r=1, r=3 through-hole along Z (OCCT-generated, shared topology)."; }
     else if (what == "plane") { shape = makePlaneWithHole();
         prim = "PlaneWithHole"; doc = "20x20 plane sheet with r=3 circular hole (OCCT-generated, shared topology)."; }
+    else if (what == "cone") { shape = makeConeSolid();
+        prim = "Cone"; doc = "Cone: base radius 5 at z=0, apex (0,0,10) (OCCT-generated solid).";
+        metersPerUnit = 1.0; upAxis = "Z"; analyticShape = true; }
+    else if (what == "cylinder") { shape = makeCylinderSolid();
+        prim = "Cylinder"; doc = "Cylinder radius=3 height=10 axis=Z (OCCT-generated solid).";
+        metersPerUnit = 1.0; upAxis = "Z"; analyticShape = true; }
+    else if (what == "sphere") { shape = makeSphereSolid();
+        prim = "Sphere"; doc = "Sphere radius=5 centered at origin (OCCT-generated solid).";
+        metersPerUnit = 1.0; upAxis = "Z"; analyticShape = true; }
+    else if (what == "box") { shape = makeBoxSolid();
+        prim = "Cube"; doc = "Box 10^3 (OCCT-generated analytic-planar solid).";
+        metersPerUnit = 1.0; upAxis = "Z"; analyticShape = true; }
     else { std::fprintf(stderr, "unknown shape %s\n", what.c_str()); return 2; }
 
-    // Convert all geometry to NURBS, then split closed/periodic faces so every
-    // face has a clean open boundary (no seam pcurve ambiguity).
-    BRepBuilderAPI_NurbsConvert nc(shape); shape = nc.Shape();
+    // NURBS-family shapes: convert everything to NURBS. Analytic solids: SKIP
+    // NurbsConvert so faces retain their Geom_{Plane,Cylinder,Cone,Sphere,Torus}
+    // surface. Both: ShapeDivideClosed splits the periodic seam (a split analytic
+    // face keeps its analytic surface), then BuildCurves3d for the 3D edges.
+    if (!analyticShape) {
+        BRepBuilderAPI_NurbsConvert nc(shape); shape = nc.Shape();
+    }
     ShapeUpgrade_ShapeDivideClosed div(shape); div.Perform(); shape = div.Result();
     BRepLib::BuildCurves3d(shape);
 
@@ -567,7 +845,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    emit(o, isSolid, prim, path, doc);
+    emit(o, isSolid, prim, path, doc, metersPerUnit, upAxis);
     std::fprintf(stderr,
         "wrote %s | solid=%d faces=%zu authoredEdges=%zu edgeuses=%zu verts=%zu "
         "emapEdges=%d degenerateEdges=%d\n",
