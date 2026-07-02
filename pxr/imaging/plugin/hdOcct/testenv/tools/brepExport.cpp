@@ -82,6 +82,18 @@
 #include <cstdio>
 #include <limits>
 
+// When true, author degenerate (null-3D-curve) pole/apex edgeuses instead of
+// skipping them. A pole/apex edge has no 3D curve but a VALID pcurve (the pole
+// line at v=+-pi/2, or the apex line): authoring it closes the face's UV loop
+// so MakeFace(surface, wire, Inside=true) bounds the finite region. Needed by
+// the NURBS-solid gallery (cone-nurbs/sphere-nurbs) whose seam-split faces are
+// bounded only by meridians meeting at degenerate poles; WITHOUT the closing
+// pole edges one hemisphere trims to the wrong (empty/complement) region.
+// Default false: the cube/filleted/plane/box producer paths must stay
+// byte-identical (the filleted fixture has degenerate seam edges too, and
+// including them there perturbs its tessellation).
+static bool gIncludeDegenerateEdges = false;
+
 // -------- accumulating arrays for the BrepArray --------
 struct Out {
     // per face
@@ -362,7 +374,11 @@ static void addFace(Out& o, ShareCtx& ctx, const TopoDS_Face& face) {
                 // NURBS trim path needs, and authoring them as extra trim
                 // segments perturbs the tessellation. The edge itself is dropped
                 // by the post-pass compaction (so no orphan-edge error).
-                if (eidx >= 0 && eidx < (int)ctx.edgeDegenerate.size() &&
+                // Exception (gIncludeDegenerateEdges): the NURBS-solid gallery
+                // authors them, using their valid pcurve, to CLOSE pole/apex UV
+                // loops so MakeFace(Inside) bounds the finite region.
+                if (!gIncludeDegenerateEdges &&
+                    eidx >= 0 && eidx < (int)ctx.edgeDegenerate.size() &&
                     ctx.edgeDegenerate[eidx]) {
                     continue;
                 }
@@ -710,7 +726,7 @@ static TopoDS_Shape makeBoxSolid() {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::fprintf(stderr, "usage: brepExport <plane|cube|filleted|cone|cylinder|sphere|box> <out.usda>\n"); return 2; }
+    if (argc < 3) { std::fprintf(stderr, "usage: brepExport <plane|cube|filleted|cone|cylinder|sphere|box|cone-nurbs|cylinder-nurbs|sphere-nurbs> <out.usda>\n"); return 2; }
     std::string what = argv[1], path = argv[2];
     TopoDS_Shape shape; std::string prim, doc;
     // Header units: the cube/plane family uses Y-up cm; the analytic-solid
@@ -738,6 +754,22 @@ int main(int argc, char** argv) {
     else if (what == "box") { shape = makeBoxSolid();
         prim = "Cube"; doc = "Box 10^3 (OCCT-generated analytic-planar solid).";
         metersPerUnit = 1.0; upAxis = "Z"; analyticShape = true; }
+    // NURBS-solid gallery (cone/cylinder/sphere): SAME OCCT primitives as the
+    // analytic dispatches above, but analyticShape=false so they route through
+    // NurbsConvert + ShapeDivideClosed -> shared radial-edge topology (like
+    // "cube"/"filleted"). This produces EDGED NURBS solids whose face outer
+    // loops carry seam + rim edges (proposal rule 424), instead of the edgeless
+    // single-periodic-NURBS form. The apex-tessellation problem is
+    // analytic-specific; a NURBS-converted cone tessellates cleanly.
+    else if (what == "cone-nurbs") { shape = makeConeSolid();
+        prim = "Cone"; doc = "Cone: base radius 5 at z=0, apex (0,0,10) (OCCT-generated NURBS solid, shared topology).";
+        metersPerUnit = 1.0; upAxis = "Z"; gIncludeDegenerateEdges = true; }
+    else if (what == "cylinder-nurbs") { shape = makeCylinderSolid();
+        prim = "Cylinder"; doc = "Cylinder radius=3 height=10 axis=Z (OCCT-generated NURBS solid, shared topology).";
+        metersPerUnit = 1.0; upAxis = "Z"; gIncludeDegenerateEdges = true; }
+    else if (what == "sphere-nurbs") { shape = makeSphereSolid();
+        prim = "Sphere"; doc = "Sphere radius=5 centered at origin (OCCT-generated NURBS solid, shared topology).";
+        metersPerUnit = 1.0; upAxis = "Z"; gIncludeDegenerateEdges = true; }
     else { std::fprintf(stderr, "unknown shape %s\n", what.c_str()); return 2; }
 
     // NURBS-family shapes: convert everything to NURBS. Analytic solids: SKIP
@@ -798,7 +830,20 @@ int main(int argc, char** argv) {
             }
         }
         ctx.edgeDegenerate[i-1] = degen;
-        if (degen) ++degenerateCount;
+        if (degen) {
+            ++degenerateCount;
+            // When the gallery authors degenerate edges, give each a placeholder
+            // 3D line between its endpoint vertices + a unit range, so the
+            // per-edge 3D arrays stay valid if a surviving edgeuse references it.
+            if (gIncludeDegenerateEdges) {
+                std::array<double,3> pa = (i1>=0 && i1<(int)o.verts.size())
+                    ? o.verts[i1] : std::array<double,3>{{0,0,0}};
+                std::array<double,3> pb = (i2>=0 && i2<(int)o.verts.size())
+                    ? o.verts[i2] : pa;
+                ctx.edgeCrv3[i-1] = placeholderLine3d(pa, pb);
+                ctx.edgeRng[i-1] = {0.0, 1.0};
+            }
+        }
     }
 
     // Faces -> edgeuses (curveUv per edgeuse). edgeuse:edgeIndex temporarily
