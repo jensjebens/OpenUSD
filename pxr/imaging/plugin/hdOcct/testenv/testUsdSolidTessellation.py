@@ -33,16 +33,20 @@ import unittest
 # trimming path landed; re-check on Windows + OCCT 8.0.0 if that toolchain
 # changes the meshing.
 EXPECTED_VERT_COUNTS = {
-    'testCone.usda': 466,
+    # testCone/testCylinder/testSphere were regenerated as EDGED NURBS solids
+    # (OCCT exporter, seam+rim edges, proposal rule 424) replacing the earlier
+    # edgeless single-periodic-NURBS form; their meshing density changed, so
+    # these three counts were re-baselined (Linux GCC 13 + OCCT 7.8.1).
+    'testCone.usda': 281,
     'testCube.usda': 24,
     'testCubeWithHole.usda': 148,
-    'testCylinder.usda': 328,
+    'testCylinder.usda': 124,
     'testDepressedPlane.usda': 122,
     'testFilletedCube.usda': 512,
     'testFilletedCubeWithHole.usda': 620,
     'testPlane.usda': 4,
     'testPlaneWithHole.usda': 33,
-    'testSphere.usda': 653,
+    'testSphere.usda': 577,
     'testTwoBoxes.usda': 48,
     'testProducerCube.usda': 24,
 }
