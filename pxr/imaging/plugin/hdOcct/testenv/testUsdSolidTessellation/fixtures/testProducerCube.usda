@@ -17,7 +17,9 @@
 
 def Xform "World"
 {
-    def BrepArray "Cube"
+    def BrepArray "Cube" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dNurbAPI:edge3dNurb", "BrepSurfaceNurbAPI"]
+    )
     {
         uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(0, 0, 0), (0, 0, 10), (0, 0, 10), (0, 10, 10), (0, 10, 0), (0, 10, 10), (0, 0, 0), (0, 10, 0), (10, 0, 0), (10, 0, 10), (10, 0, 10), (10, 10, 10), (10, 10, 0), (10, 10, 10), (10, 0, 0), (10, 10, 0), (0, 0, 0), (10, 0, 0), (0, 0, 10), (10, 0, 10), (0, 10, 0), (10, 10, 0), (0, 10, 10), (10, 10, 10)]
         uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10, 0, 0, 10, 10]
