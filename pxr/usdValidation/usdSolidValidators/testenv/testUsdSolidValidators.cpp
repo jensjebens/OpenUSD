@@ -147,6 +147,29 @@ def Xform "World"
         uniform token[] vertex:pointType = ["BrepPointAPI"]
     }
 
+    # A face whose FIRST (outer) loop has zero edgeuses: an edgeless periodic
+    # surface (a cylinder/sphere/cone authored as a single seamless NURBS
+    # patch). Proposal #109 rule 424/425 requires the outer loop to carry seam
+    # edges, so BrepArrayFaceOuterLoop must flag FaceOuterLoopNoEdges.
+    def BrepArray "BadOuterLoop"
+    {
+        uniform uint[] face:loopCount = [1]
+        uniform uint[] loop:edgeuseCount = [0]
+        uniform uint[] loop:vertexIndex = [0]
+    }
+
+    # A face authored honestly: its FIRST (outer) loop carries four edgeuses,
+    # and it has a SECOND (inner) loop that is a legal degenerate vertex-loop
+    # (zero edgeuses, a vertexIndex). Rule 428 permits a zero-edgeuse loop only
+    # as a non-first inner loop, so BrepArrayFaceOuterLoop must NOT flag it.
+    def BrepArray "GoodOuterLoopWithInnerVertex"
+    {
+        uniform uint[] face:loopCount = [2]
+        uniform uint[] loop:edgeuseCount = [4, 0]
+        uniform uint[] loop:vertexIndex = [0, 1]
+        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3]
+    }
+
     def BrepArray "BadNurbOrder"
     {
         uniform token[] face:surfaceType = ["BrepSurfaceNurbAPI"]
@@ -240,6 +263,7 @@ TestRegistration()
         UsdSolidValidatorNameTokens->brepArrayTopology,
         UsdSolidValidatorNameTokens->brepArrayTokenValues,
         UsdSolidValidatorNameTokens->brepArrayRanges,
+        UsdSolidValidatorNameTokens->brepArrayFaceOuterLoop,
         UsdSolidValidatorNameTokens->brepArrayAnalyticSurfaces,
         UsdSolidValidatorNameTokens->brepArrayAuthorship,
         UsdSolidValidatorNameTokens->brepArrayDataTypes,
@@ -256,7 +280,7 @@ TestRegistration()
     const UsdValidationValidatorMetadataVector metadata
         = registry.GetValidatorMetadataForPlugin(
             _tokens->usdSolidValidatorsPlugin);
-    TF_AXIOM(metadata.size() == 15);
+    TF_AXIOM(metadata.size() == 16);
 
     std::set<TfToken> validatorNames;
     for (const UsdValidationValidatorMetadata &m : metadata) {
@@ -348,6 +372,38 @@ TestBrepArrayRanges()
     TF_AXIOM(_HasError(errors, ".InvalidFaceLoopCount"));
     TF_AXIOM(_HasError(errors, ".DegenerateFaceURange"));
     TF_AXIOM(_HasError(errors, ".InvalidEdgeRangeOrder"));
+}
+
+static void
+TestBrepArrayFaceOuterLoop()
+{
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayFaceOuterLoop);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+
+    {
+        // Face whose first/outer loop has zero edgeuses: an edgeless periodic
+        // surface. Rule 424/425 requires the outer loop to carry seam edges.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/BadOuterLoop"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountError(errors, ".FaceOuterLoopNoEdges") == 1);
+    }
+
+    {
+        // Outer loop carries four edgeuses; the zero-edgeuse loop is a legal
+        // degenerate inner (non-first) vertex-loop (rule 428) and must NOT be
+        // flagged.
+        const UsdPrim prim = stage->GetPrimAtPath(
+            SdfPath("/World/GoodOuterLoopWithInnerVertex"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(!_HasError(errors, ".FaceOuterLoopNoEdges"));
+    }
 }
 
 static void
@@ -484,6 +540,7 @@ main()
     TestBrepArrayTopology();
     TestBrepArrayTokenValues();
     TestBrepArrayRanges();
+    TestBrepArrayFaceOuterLoop();
     TestBrepArrayAnalyticSurfaces();
     TestBrepArrayAuthorship();
     TestBrepArrayReferences();

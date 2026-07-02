@@ -21,6 +21,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((brepArrayTopology, "usdSolidValidators:BrepArrayTopology"))              \
     ((brepArrayTokenValues, "usdSolidValidators:BrepArrayTokenValues"))        \
     ((brepArrayRanges, "usdSolidValidators:BrepArrayRanges"))                  \
+    ((brepArrayFaceOuterLoop, "usdSolidValidators:BrepArrayFaceOuterLoop"))     \
     ((brepArrayAnalyticSurfaces,                                               \
       "usdSolidValidators:BrepArrayAnalyticSurfaces"))                         \
     ((brepArrayAuthorship, "usdSolidValidators:BrepArrayAuthorship"))          \
@@ -72,6 +73,8 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((degenerateFaceVRange, "DegenerateFaceVRange"))                           \
     ((invalidEdgeRangeOrder, "InvalidEdgeRangeOrder"))                         \
     ((invalidWireEdgeRangeOrder, "InvalidWireEdgeRangeOrder"))                 \
+    /* BrepArrayFaceOuterLoop */                                               \
+    ((faceOuterLoopNoEdges, "FaceOuterLoopNoEdges"))                           \
     /* BrepArrayAnalyticSurfaces */                                            \
     ((inconsistentAnalyticSurfaceCount, "InconsistentAnalyticSurfaceCount"))   \
     ((nonPositiveSurfaceRadius, "NonPositiveSurfaceRadius"))                    \

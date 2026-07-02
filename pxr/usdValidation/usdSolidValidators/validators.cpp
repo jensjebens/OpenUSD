@@ -583,6 +583,68 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
 }
 
 // -------------------------------------------------------------------------- //
+// BrepArrayFaceOuterLoop                                                     //
+// -------------------------------------------------------------------------- //
+UsdValidationErrorVector
+_BrepArrayFaceOuterLoop(const UsdPrim &usdPrim,
+                        const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
+    }
+    const UsdSolidBrepArray brep(usdPrim);
+
+    UsdValidationErrorVector errors;
+
+    const VtArray<unsigned int> faceLoopCount
+        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
+    const VtArray<unsigned int> loopEdgeuseCount
+        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
+
+    // BA.145 (proposal #109 rule 424/425): each face has a single outer loop,
+    // and the first loop listed is that outer loop; seam edges are required, so
+    // the outer loop must contain at least one edgeuse. A loop with zero
+    // edgeuses (a degenerate vertex-loop, rule 428) is legal only as a
+    // non-first (inner) loop. Faces whose FIRST loop has loop:edgeuseCount == 0
+    // are edgeless periodic surfaces (a cylinder/sphere/cone authored as a
+    // single seamless NURBS patch) and are flagged. Loops beyond the first are
+    // not examined here (a degenerate inner vertex-loop is allowed).
+    //
+    // Loops are stored contiguously: face f owns the loops in the half-open
+    // range [loopCursor, loopCursor + face:loopCount[f]); the first of those is
+    // the outer loop.
+    size_t loopCursor = 0;
+    for (size_t f = 0; f < faceLoopCount.size(); ++f) {
+        const unsigned int nlp = faceLoopCount[f];
+        if (nlp == 0) {
+            // No loops at all: BrepArrayRanges (BA.140) reports this; there is
+            // no outer loop to examine.
+            continue;
+        }
+        const size_t outerLoop = loopCursor;
+        if (outerLoop < loopEdgeuseCount.size()
+            && loopEdgeuseCount[outerLoop] == 0u) {
+            errors.emplace_back(
+                UsdSolidValidationErrorNameTokens->faceOuterLoopNoEdges,
+                UsdValidationErrorType::Error, _PrimSites(usdPrim),
+                TfStringPrintf(
+                    "[BA.145] BrepArray <%s>: face %zu has an outer loop "
+                    "(loop %zu, the first loop of the face) with "
+                    "loop:edgeuseCount = 0; a face's outer loop must contain "
+                    "at least one edgeuse (seam edges are required). A "
+                    "zero-edgeuse vertex-loop is legal only as a degenerate "
+                    "inner (non-first) loop. This face is an edgeless periodic "
+                    "surface (e.g. a cylinder/sphere/cone authored as a single "
+                    "seamless NURBS patch).",
+                    usdPrim.GetPath().GetText(), f, outerLoop));
+        }
+        loopCursor += nlp;
+    }
+
+    return errors;
+}
+
+// -------------------------------------------------------------------------- //
 // BrepArrayAnalyticSurfaces                                                  //
 // -------------------------------------------------------------------------- //
 
@@ -2670,6 +2732,10 @@ TF_REGISTRY_FUNCTION(UsdValidationRegistry)
 
     registry.RegisterPluginValidator(
         UsdSolidValidatorNameTokens->brepArrayRanges, _BrepArrayRanges);
+
+    registry.RegisterPluginValidator(
+        UsdSolidValidatorNameTokens->brepArrayFaceOuterLoop,
+        _BrepArrayFaceOuterLoop);
 
     registry.RegisterPluginValidator(
         UsdSolidValidatorNameTokens->brepArrayAnalyticSurfaces,

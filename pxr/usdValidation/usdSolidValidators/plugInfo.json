@@ -39,6 +39,15 @@
                             "UsdSolidBrepArray"
                         ]
                     },
+                    "BrepArrayFaceOuterLoop": {
+                        "doc": "Validates proposal #109 rule 424/425 on a UsdSolid BrepArray: each face has a single outer loop, and the first loop listed is that outer loop, which must contain at least one edgeuse (seam edges are required). Flags faces whose first/outer loop has loop:edgeuseCount == 0 (an edgeless periodic surface such as a cylinder/sphere/cone authored as a single seamless NURBS patch). A zero-edgeuse vertex-loop is legal only as a degenerate inner (non-first) loop, so inner loops are not flagged.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
                     "BrepArrayAnalyticSurfaces": {
                         "doc": "Validates analytic surface parameters of a UsdSolid BrepArray (plane, cylinder, cone, sphere, torus): the parameter arrays match the number of faces of that surface type, radii are positive, axis and refDirection are unit-length and mutually orthogonal, and cone semiAngle lies in (0, pi/2).",
                         "keywords": [
