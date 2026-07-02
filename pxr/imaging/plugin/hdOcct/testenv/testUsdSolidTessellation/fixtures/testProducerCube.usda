@@ -57,6 +57,9 @@ def Xform "World"
         uniform token[] shell:pointType = ["none", "none"]
         uniform uint[] shell:wireEdgeCount = [0, 0]
         uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform double[] wireEdge:range = []
+        uniform int2[] wireEdge:vertexIndices = []
     }
 }
 

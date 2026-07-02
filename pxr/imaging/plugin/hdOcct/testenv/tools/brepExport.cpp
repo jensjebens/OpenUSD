@@ -585,6 +585,16 @@ static void emit(const Out& o, bool isSolid, const std::string& prim,
       for(size_t i=0;i<o.edgeVtx.size();++i){ s<<"("<<o.edgeVtx[i][0]<<", "<<o.edgeVtx[i][1]<<")";
         if(i+1<o.edgeVtx.size())s<<", ";} s<<"]"; line(s.str()); }
 
+    // ---- wireEdges (per shell wire edge) ----
+    // These solids/sheets have no free wireEdges (shell:wireEdgeCount is all 0),
+    // but the proposal's canonical cube authors the three wireEdge arrays
+    // present-empty. Emit them so the fixtures match that canonical form
+    // (cosmetic; the builder reads them as empty vectors, so tessellation is
+    // unaffected).
+    arrTok("wireEdge:curveType", {});
+    arrD("wireEdge:range", {});
+    { line("uniform int2[] wireEdge:vertexIndices = []"); }
+
     // ---- vertices (per UNIQUE vertex) ----
     // vertex:pointType only allows "BrepPointAPI"; the matching
     // brep:vertexPoint:point:position data is authored below.
