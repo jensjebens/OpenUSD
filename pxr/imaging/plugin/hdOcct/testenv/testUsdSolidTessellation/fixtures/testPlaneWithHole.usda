@@ -8,7 +8,9 @@
 
 def Xform "World"
 {
-    def BrepArray "PlaneWithHole"
+    def BrepArray "PlaneWithHole" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dNurbAPI:edge3dNurb", "BrepCurveUvNurbAPI", "BrepSurfaceNurbAPI"]
+    )
     {
         uniform uint[] brep:regionCount = [1]
         uniform uint[] region:shellCount = [1]
