@@ -977,15 +977,59 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             }
 
             // Untrimmed fallback: single-loop NURBS faces (legacy) and faces
-            // with no boundary loops fall back to natural surface bounds. Faces
-            // that had edges but failed to trim are skipped (no garbage geometry).
+            // with no boundary loops fall back to the surface parameter bounds.
+            // Faces that had edges but failed to trim are skipped (no garbage
+            // geometry).
+            //
+            // When no curveUv (pcurve) is authored the natural surface bounds
+            // are the only 2D window available. If the authored face:range is a
+            // STRICT sub-window of those natural bounds, the NURBS surface is
+            // oversized relative to the face and untrimmed natural bounds would
+            // render the patch too large; trim to the authored face:range
+            // (uMin,vMin)-(uMax,vMax) instead. When face:range equals (or
+            // exceeds) the natural bounds this is a no-op and we keep the
+            // untrimmed natural-bounds face, so already-consistent fixtures are
+            // unaffected.
             if (!haveFace && (!attemptTrim || numLoops == 0)) {
                 try {
-                    BRepBuilderAPI_MakeFace faceMaker(
-                        surface, data.intersectTol3d);
-                    if (faceMaker.IsDone()) {
-                        finalFace = faceMaker.Face();
-                        haveFace = true;
+                    bool builtRanged = false;
+                    if (2 * faceIdx + 1 < data.faceRange.size()) {
+                        Standard_Real nu0, nu1, nv0, nv1;
+                        surface->Bounds(nu0, nu1, nv0, nv1);
+                        const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
+                        const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
+                        // A non-degenerate authored window strictly inside the
+                        // natural bounds (small epsilon guards floating point
+                        // equality so full-range faces stay on the legacy path).
+                        const double eps = 1e-9;
+                        const bool validRange =
+                            uvHi[0] > uvLo[0] && uvHi[1] > uvLo[1];
+                        const bool subWindow =
+                            uvLo[0] > nu0 + eps || uvHi[0] < nu1 - eps ||
+                            uvLo[1] > nv0 + eps || uvHi[1] < nv1 - eps;
+                        if (validRange && subWindow) {
+                            BRepBuilderAPI_MakeFace rf(surface,
+                                uvLo[0], uvHi[0], uvLo[1], uvHi[1],
+                                data.intersectTol3d);
+                            if (rf.IsDone()) {
+                                ShapeFix_Face fx(rf.Face());
+                                fx.Perform();
+                                TopoDS_Face rff = fx.Face();
+                                if (BRepCheck_Analyzer(rff).IsValid()) {
+                                    finalFace = rff;
+                                    haveFace = true;
+                                    builtRanged = true;
+                                }
+                            }
+                        }
+                    }
+                    if (!builtRanged) {
+                        BRepBuilderAPI_MakeFace faceMaker(
+                            surface, data.intersectTol3d);
+                        if (faceMaker.IsDone()) {
+                            finalFace = faceMaker.Face();
+                            haveFace = true;
+                        }
                     }
                 } catch (const Standard_Failure&) {}
             }
