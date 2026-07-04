@@ -2049,6 +2049,343 @@ _BrepArraySolidClosure(const UsdPrim &usdPrim,
     return errors;
 }
 
+// ========================================================================== //
+// Shared edge-geometry support (degenerate edges + curve-endpoint checks)    //
+// ========================================================================== //
+
+// One edge/wireEdge instance's resolved 3D geometry, enough to decide
+// degeneracy and to recover the curve's start/end points. Populated per
+// curve family (NURBS control hull, or analytic line/circle/ellipse).
+struct _EdgeGeom {
+    bool hasGeom = false;       // geometry for this edge was found
+    // NURBS: the control-vertex hull for this edge (in curve order).
+    bool isNurb = false;
+    std::vector<GfVec3d> cvs;
+    // Analytic: whether the curve has zero arc length, plus start/end points.
+    bool zeroArc = false;
+    // Curve endpoints in curve-parametric order (start = param min, end = max).
+    // Valid whenever hasGeom is true.
+    GfVec3d start{ 0, 0, 0 };
+    GfVec3d end{ 0, 0, 0 };
+};
+
+// Resolve every edge (or wireEdge, when wire==true) of a BrepArray to its 3D
+// geometry. NURBS edges pull their control hull from the edge3dNurb /
+// wireEdge3dNurb strata (a clamped curve passes through its first and last
+// control vertex, so those are its endpoints). Analytic edges pull line /
+// circle / ellipse parameters and evaluate the curve at the authored edge:range
+// endpoints. Instances of one curve family are packed in edge order, matching
+// the BrepArrayAnalyticCurves / BrepArrayNurbs conventions.
+std::vector<_EdgeGeom>
+_ResolveEdgeGeom(const UsdPrim &prim, const UsdSolidBrepArray &brep, bool wire)
+{
+    const std::string inst = wire ? "wireEdge" : "edge";
+    const VtArray<TfToken> curveType = wire
+        ? _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr())
+        : _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
+    const VtArray<double> range = wire
+        ? _Read<double>(brep.GetWireEdgeRangeAttr())
+        : _Read<double>(brep.GetEdgeRangeAttr());
+    const size_t numE = curveType.size();
+    std::vector<_EdgeGeom> geom(numE);
+
+    static const TfToken nurbTok("BrepCurve3dNurbAPI");
+    static const TfToken lineTok("BrepCurve3dLineAPI");
+    static const TfToken circleTok("BrepCurve3dCircleAPI");
+    static const TfToken ellipseTok("BrepCurve3dEllipseAPI");
+
+    // --- NURBS hull: per-edge control vertices sliced by vertexCount. --- //
+    const std::string nurbBase
+        = std::string("brep:") + (wire ? "wireEdge3dNurb" : "edge3dNurb")
+        + ":curve3d:nurb:";
+    const VtArray<unsigned int> nVC
+        = _ReadName<unsigned int>(prim, nurbBase + "vertexCount");
+    const VtArray<GfVec3d> nCv
+        = _ReadName<GfVec3d>(prim, nurbBase + "controlVertices");
+    size_t nurbCursor = 0;
+    size_t nurbInst = 0;
+
+    // --- Analytic parameter arrays (packed per curve family, edge order). --- //
+    const std::string lineBase
+        = std::string("brep:") + inst + "3dLine:curve3d:line:";
+    const VtArray<GfVec3d> lineOrigin
+        = _ReadName<GfVec3d>(prim, lineBase + "origin");
+    const VtArray<GfVec3d> lineDir
+        = _ReadName<GfVec3d>(prim, lineBase + "direction");
+    size_t lineInst = 0;
+
+    const std::string circleBase
+        = std::string("brep:") + inst + "3dCircle:curve3d:circle:";
+    const VtArray<GfVec3d> circleCenter
+        = _ReadName<GfVec3d>(prim, circleBase + "center");
+    const VtArray<GfVec3d> circleAxis
+        = _ReadName<GfVec3d>(prim, circleBase + "axis");
+    const VtArray<GfVec3d> circleRef
+        = _ReadName<GfVec3d>(prim, circleBase + "refDirection");
+    const VtArray<double> circleRadius
+        = _ReadName<double>(prim, circleBase + "radius");
+    size_t circleInst = 0;
+
+    const std::string ellipseBase
+        = std::string("brep:") + inst + "3dEllipse:curve3d:ellipse:";
+    const VtArray<GfVec3d> ellipseCenter
+        = _ReadName<GfVec3d>(prim, ellipseBase + "center");
+    const VtArray<GfVec3d> ellipseAxis
+        = _ReadName<GfVec3d>(prim, ellipseBase + "axis");
+    const VtArray<GfVec3d> ellipseRef
+        = _ReadName<GfVec3d>(prim, ellipseBase + "refDirection");
+    const VtArray<double> ellipseX
+        = _ReadName<double>(prim, ellipseBase + "xRadius");
+    const VtArray<double> ellipseY
+        = _ReadName<double>(prim, ellipseBase + "yRadius");
+    size_t ellipseInst = 0;
+
+    // Evaluate a conic (circle/ellipse) point:
+    //   center + cos(t)*xr*ref + sin(t)*yr*(axis x ref).
+    const auto conicAt = [](const GfVec3d &center, const GfVec3d &axis,
+                            const GfVec3d &ref, double xr, double yr,
+                            double t) {
+        const GfVec3d yDir = GfCross(axis, ref);
+        return center + std::cos(t) * xr * ref + std::sin(t) * yr * yDir;
+    };
+
+    for (size_t e = 0; e < numE; ++e) {
+        _EdgeGeom &g = geom[e];
+        const double t0 = 2 * e < range.size() ? range[2 * e] : 0.0;
+        const double t1 = 2 * e + 1 < range.size() ? range[2 * e + 1] : 0.0;
+        const TfToken &ct = curveType[e];
+        if (ct == nurbTok) {
+            const unsigned int vc
+                = nurbInst < nVC.size() ? nVC[nurbInst] : 0u;
+            ++nurbInst;
+            if (vc >= 1 && nurbCursor + vc <= nCv.size()) {
+                g.hasGeom = true;
+                g.isNurb = true;
+                g.cvs.assign(nCv.begin() + nurbCursor,
+                             nCv.begin() + nurbCursor + vc);
+                g.start = g.cvs.front();
+                g.end = g.cvs.back();
+            }
+            nurbCursor += vc;
+        } else if (ct == lineTok) {
+            const size_t i = lineInst++;
+            if (i < lineOrigin.size() && i < lineDir.size()) {
+                g.hasGeom = true;
+                g.start = lineOrigin[i] + t0 * lineDir[i];
+                g.end = lineOrigin[i] + t1 * lineDir[i];
+                g.zeroArc
+                    = std::abs((t1 - t0) * lineDir[i].GetLength()) <= _CurveEps;
+            }
+        } else if (ct == circleTok) {
+            const size_t i = circleInst++;
+            if (i < circleCenter.size() && i < circleAxis.size()
+                && i < circleRef.size() && i < circleRadius.size()) {
+                g.hasGeom = true;
+                const double r = circleRadius[i];
+                g.start = conicAt(circleCenter[i], circleAxis[i], circleRef[i],
+                                  r, r, t0);
+                g.end = conicAt(circleCenter[i], circleAxis[i], circleRef[i],
+                                r, r, t1);
+                g.zeroArc = std::abs(r * (t1 - t0)) <= _CurveEps;
+            }
+        } else if (ct == ellipseTok) {
+            const size_t i = ellipseInst++;
+            if (i < ellipseCenter.size() && i < ellipseAxis.size()
+                && i < ellipseRef.size() && i < ellipseX.size()
+                && i < ellipseY.size()) {
+                g.hasGeom = true;
+                g.start = conicAt(ellipseCenter[i], ellipseAxis[i],
+                                  ellipseRef[i], ellipseX[i], ellipseY[i], t0);
+                g.end = conicAt(ellipseCenter[i], ellipseAxis[i],
+                                ellipseRef[i], ellipseX[i], ellipseY[i], t1);
+                const double meanR = 0.5 * (ellipseX[i] + ellipseY[i]);
+                g.zeroArc = std::abs(meanR * (t1 - t0)) <= _CurveEps;
+            }
+        }
+    }
+    return geom;
+}
+
+// -------------------------------------------------------------------------- //
+// BrepArrayDegenerateEdges                                                   //
+// -------------------------------------------------------------------------- //
+// Proposal rule 381: "degenerate geometry is not allowed, where degeneracy is
+// measured against tolerance." An edge is degenerate when its 3D curve has no
+// extent: for a NURBS curve, every control vertex coincides (Umhoefer: "we
+// should be able to catch these degenerate edges because all of the control
+// points are equal"); for an analytic curve, the arc length is zero. Distances
+// are measured against the Brep's brep:intersectTol3d. Both edge3d* and
+// wireEdge3d* instances are checked. (BA.230.)
+UsdValidationErrorVector
+_BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
+                          const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
+    }
+    const UsdSolidBrepArray brep(usdPrim);
+
+    // Tolerance: the first authored brep:intersectTol3d if present, else a
+    // tight geometric default. (A per-Brep tolerance would need a per-edge Brep
+    // attribution, which the flat data does not carry; the first Brep's
+    // tolerance is exact for the common single-Brep case.)
+    const VtArray<double> tol
+        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
+    const double tol3d = (!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9;
+
+    UsdValidationErrorVector errors;
+
+    for (int wirePass = 0; wirePass < 2; ++wirePass) {
+        const bool wire = wirePass == 1;
+        const char *label = wire ? "wireEdge" : "edge";
+        const std::vector<_EdgeGeom> geom
+            = _ResolveEdgeGeom(usdPrim, brep, wire);
+        for (size_t e = 0; e < geom.size(); ++e) {
+            const _EdgeGeom &g = geom[e];
+            if (!g.hasGeom) {
+                continue;   // no resolvable geometry (reported elsewhere).
+            }
+            bool degenerate = false;
+            if (g.isNurb) {
+                // All control vertices equal within tolerance => the curve
+                // collapses to a point.
+                degenerate = true;
+                for (size_t c = 1; c < g.cvs.size(); ++c) {
+                    if ((g.cvs[c] - g.cvs[0]).GetLength() > tol3d) {
+                        degenerate = false;
+                        break;
+                    }
+                }
+                if (g.cvs.size() < 2) {
+                    // A single control vertex is a point, i.e. degenerate.
+                    degenerate = true;
+                }
+            } else {
+                degenerate = g.zeroArc;
+            }
+            if (degenerate) {
+                _Err(&errors,
+                     UsdSolidValidationErrorNameTokens->degenerateEdge, usdPrim,
+                     TfStringPrintf(
+                         "[BA.230] BrepArray <%s>: %s %zu is degenerate (its 3D "
+                         "curve has no extent within brep:intersectTol3d = %g; "
+                         "%s). Degenerate geometry is not allowed (proposal rule "
+                         "381).",
+                         usdPrim.GetPath().GetText(), label, e, tol3d,
+                         g.isNurb ? "all NURBS control vertices are equal"
+                                  : "the analytic curve has zero arc length"));
+            }
+        }
+    }
+
+    return errors;
+}
+
+// -------------------------------------------------------------------------- //
+// BrepArrayEdgeCurveVertices                                                 //
+// -------------------------------------------------------------------------- //
+// Proposal rule 434: "the curve runs from the start vertex to the end vertex."
+// An edge's authored vertexIndices name the start and end vertices; the edge's
+// 3D curve, evaluated at its parametric endpoints, must reach those vertex
+// positions in that order. This catches edge:vertexIndices authored in
+// topological (loop-traversal) order rather than curve-parametric order -- a
+// reversed edge whose curve start actually lands on the "end" vertex. Distances
+// are measured against brep:intersectTol3d. Degenerate edges (start vertex ==
+// end vertex) are exempt: their two endpoints coincide, so orientation is
+// meaningless (and rule 381 / BA.230 already reports them). (BA.240.)
+UsdValidationErrorVector
+_BrepArrayEdgeCurveVertices(const UsdPrim &usdPrim,
+                            const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
+    }
+    const UsdSolidBrepArray brep(usdPrim);
+
+    const VtArray<GfVec3d> vpos
+        = _ReadName<GfVec3d>(usdPrim, "brep:vertexPoint:point:position");
+    if (vpos.empty()) {
+        // Without vertex positions the endpoints cannot be checked; the
+        // vertexPoint data is required by BrepArraySchemaUsage when declared.
+        return {};
+    }
+
+    const VtArray<double> tol
+        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
+    const double tol3d = (!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9;
+
+    UsdValidationErrorVector errors;
+
+    struct Pass {
+        bool wire;
+        const char *label;
+        VtArray<GfVec2i> vtxIdx;
+    };
+    const std::vector<Pass> passes = {
+        { false, "edge", _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()) },
+        { true, "wireEdge",
+          _Read<GfVec2i>(brep.GetWireEdgeVertexIndicesAttr()) },
+    };
+
+    for (const Pass &p : passes) {
+        const std::vector<_EdgeGeom> geom
+            = _ResolveEdgeGeom(usdPrim, brep, p.wire);
+        const size_t numE = std::min(geom.size(), p.vtxIdx.size());
+        for (size_t e = 0; e < numE; ++e) {
+            const _EdgeGeom &g = geom[e];
+            if (!g.hasGeom) {
+                continue;
+            }
+            const int vs = p.vtxIdx[e][0];
+            const int ve = p.vtxIdx[e][1];
+            if (vs < 0 || ve < 0 || vs >= static_cast<int>(vpos.size())
+                || ve >= static_cast<int>(vpos.size())) {
+                continue;   // out-of-range indices are reported by References.
+            }
+            if (vs == ve) {
+                continue;   // degenerate edge: exempt (see BA.230).
+            }
+            const GfVec3d &pStart = vpos[vs];
+            const GfVec3d &pEnd = vpos[ve];
+            const double dForward = (g.start - pStart).GetLength()
+                + (g.end - pEnd).GetLength();
+            const double dReverse = (g.start - pEnd).GetLength()
+                + (g.end - pStart).GetLength();
+            // The endpoints match the authored order when the curve start is at
+            // the start vertex and the curve end is at the end vertex.
+            const bool matchesForward = (g.start - pStart).GetLength() <= tol3d
+                && (g.end - pEnd).GetLength() <= tol3d;
+            if (matchesForward) {
+                continue;
+            }
+            // Distinguish a mere reversal (curve runs end->start) from a genuine
+            // geometry/topology mismatch, for a clearer message.
+            const bool reversed = (g.start - pEnd).GetLength() <= tol3d
+                && (g.end - pStart).GetLength() <= tol3d;
+            _Err(&errors,
+                 UsdSolidValidationErrorNameTokens->edgeCurveVertexMismatch,
+                 usdPrim,
+                 TfStringPrintf(
+                     "[BA.240] BrepArray <%s>: %s %zu curve endpoints do not "
+                     "match its vertexIndices (%d, %d) within "
+                     "brep:intersectTol3d = %g. %s The curve must run from the "
+                     "start vertex to the end vertex (proposal rule 434); "
+                     "vertexIndices appear to be authored in topological rather "
+                     "than curve-parametric order.",
+                     usdPrim.GetPath().GetText(), p.label, e, vs, ve, tol3d,
+                     reversed
+                         ? "The curve runs from the end vertex to the start "
+                           "vertex (endpoints are swapped)."
+                         : TfStringPrintf(
+                               "Forward endpoint error %g, reversed %g.",
+                               dForward, dReverse)
+                               .c_str()));
+        }
+    }
+
+    return errors;
+}
+
 // -------------------------------------------------------------------------- //
 // BrepArrayContainment                                                       //
 // -------------------------------------------------------------------------- //
@@ -2775,6 +3112,14 @@ TF_REGISTRY_FUNCTION(UsdValidationRegistry)
     registry.RegisterPluginValidator(
         UsdSolidValidatorNameTokens->brepArraySolidClosure,
         _BrepArraySolidClosure);
+
+    registry.RegisterPluginValidator(
+        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges,
+        _BrepArrayDegenerateEdges);
+
+    registry.RegisterPluginValidator(
+        UsdSolidValidatorNameTokens->brepArrayEdgeCurveVertices,
+        _BrepArrayEdgeCurveVertices);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

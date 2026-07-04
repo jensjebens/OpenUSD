@@ -34,7 +34,11 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((brepArrayAnalyticCurves,                                                 \
       "usdSolidValidators:BrepArrayAnalyticCurves"))                           \
     ((brepArrayNurbs, "usdSolidValidators:BrepArrayNurbs"))                     \
-    ((brepArraySolidClosure, "usdSolidValidators:BrepArraySolidClosure"))
+    ((brepArraySolidClosure, "usdSolidValidators:BrepArraySolidClosure"))       \
+    ((brepArrayDegenerateEdges,                                                 \
+      "usdSolidValidators:BrepArrayDegenerateEdges"))                           \
+    ((brepArrayEdgeCurveVertices,                                               \
+      "usdSolidValidators:BrepArrayEdgeCurveVertices"))
 
 #define USD_SOLID_VALIDATOR_KEYWORD_TOKENS                                     \
     (UsdSolidValidators)                                                       \
@@ -132,7 +136,11 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((nurbVertexCountBelowOrder, "NurbVertexCountBelowOrder"))                  \
     /* BrepArraySolidClosure */                                                \
     ((solidShellOpenEdge, "SolidShellOpenEdge"))                               \
-    ((solidShellBrokenRadialRing, "SolidShellBrokenRadialRing"))
+    ((solidShellBrokenRadialRing, "SolidShellBrokenRadialRing"))               \
+    /* BrepArrayDegenerateEdges */                                             \
+    ((degenerateEdge, "DegenerateEdge"))                                       \
+    /* BrepArrayEdgeCurveVertices */                                           \
+    ((edgeCurveVertexMismatch, "EdgeCurveVertexMismatch"))
 
 /// \def USD_SOLID_VALIDATOR_NAME_TOKENS
 /// Tokens representing validator names. Note that for plugin provided

@@ -147,6 +147,24 @@
                             "UsdSolidBrepArray"
                         ]
                     },
+                    "BrepArrayDegenerateEdges": {
+                        "doc": "Validates proposal rule 381 (degenerate geometry is not allowed, measured against tolerance) on a UsdSolid BrepArray: flags any edge or wireEdge whose 3D curve has no extent. For NURBS curves this means all control vertices coincide within brep:intersectTol3d; for analytic curves (line/circle/ellipse) it means zero arc length. Catches the collapsed apex/pole edges left when a periodic surface is authored with an all-equal-control-point seam.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayEdgeCurveVertices": {
+                        "doc": "Validates proposal rule 434 (the curve runs from the start vertex to the end vertex) on a UsdSolid BrepArray: for each edge and wireEdge, the 3D curve evaluated at its parametric endpoints must match the positions of the vertices named by its vertexIndices, in that order, within brep:intersectTol3d. Flags edge:vertexIndices authored in topological rather than curve-parametric order (reversed edges). Degenerate edges (start vertex == end vertex) are exempt.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
                     "keywords": [
                         "UsdSolidValidators"
                     ]

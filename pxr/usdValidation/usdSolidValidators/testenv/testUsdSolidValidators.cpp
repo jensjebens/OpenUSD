@@ -249,6 +249,81 @@ def Xform "World"
         uniform double[] edge:range = [0, 1, 0, 1, 0, 1, 0, 1]
         uniform token[] vertex:pointType = ["none", "none", "none", "none"]
     }
+
+    # Two NURBS edges. Edge 0 has all control vertices equal (both (0,0,0)) and
+    # its vertexIndices name the same vertex twice: a degenerate/collapsed apex
+    # edge that proposal rule 381 forbids. Edge 1 is a healthy line from
+    # vertex 1 to vertex 2. BrepArrayDegenerateEdges must flag exactly edge 0.
+    def BrepArray "DegenerateEdges"
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform uint[] brep:regionCount = [1]
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
+        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(0, 0, 0), (0, 0, 0), (1, 0, 0), (2, 0, 0)]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1]
+        uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
+        uniform double[] edge:range = [0, 1, 0, 1]
+        uniform int2[] edge:vertexIndices = [(0, 0), (1, 2)]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+    }
+
+    # A degenerate analytic (zero-length line) edge: origin == vertex, direction
+    # scaled by a zero-length edge:range span. BrepArrayDegenerateEdges must flag
+    # it via the analytic (zero arc length) path.
+    def BrepArray "DegenerateAnalyticEdge" (
+        prepend apiSchemas = ["BrepCurve3dLineAPI:edge3dLine"]
+    )
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform uint[] brep:regionCount = [1]
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (1, 0, 0)]
+        uniform vector3d[] brep:edge3dLine:curve3d:line:direction = [(1, 0, 0), (1, 0, 0)]
+        uniform point3d[] brep:edge3dLine:curve3d:line:origin = [(0, 0, 0), (0, 0, 0)]
+        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI"]
+        # Edge 0 span 5->5 = 0 (degenerate); edge 1 span 0->1 = healthy.
+        uniform double[] edge:range = [5, 5, 0, 1]
+        uniform int2[] edge:vertexIndices = [(0, 0), (0, 1)]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI"]
+    }
+
+    # Two NURBS edges with matching curve/vertex directions: edge 0 runs
+    # vertex 0 -> vertex 1, edge 1 runs vertex 1 -> vertex 2, and the control
+    # hulls agree. BrepArrayEdgeCurveVertices must NOT flag either.
+    def BrepArray "GoodEdgeVertices"
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform uint[] brep:regionCount = [1]
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
+        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(0, 0, 0), (1, 0, 0), (1, 0, 0), (2, 0, 0)]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1]
+        uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
+        uniform double[] edge:range = [0, 1, 0, 1]
+        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2)]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+    }
+
+    # Same geometry as GoodEdgeVertices, but edge 0's vertexIndices are swapped
+    # to (1, 0): the curve still runs (0,0,0)->(1,0,0) but the authored order
+    # says vertex 1 -> vertex 0. This is exactly the topological-order authoring
+    # rule 434 forbids. BrepArrayEdgeCurveVertices must flag edge 0 (and only 0).
+    def BrepArray "ReversedEdgeVertices"
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform uint[] brep:regionCount = [1]
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
+        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(0, 0, 0), (1, 0, 0), (1, 0, 0), (2, 0, 0)]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1]
+        uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
+        uniform double[] edge:range = [0, 1, 0, 1]
+        uniform int2[] edge:vertexIndices = [(1, 0), (1, 2)]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+    }
 }
 )usda";
 
@@ -275,12 +350,14 @@ TestRegistration()
         UsdSolidValidatorNameTokens->brepArrayAnalyticCurves,
         UsdSolidValidatorNameTokens->brepArrayNurbs,
         UsdSolidValidatorNameTokens->brepArraySolidClosure,
+        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges,
+        UsdSolidValidatorNameTokens->brepArrayEdgeCurveVertices,
     };
 
     const UsdValidationValidatorMetadataVector metadata
         = registry.GetValidatorMetadataForPlugin(
             _tokens->usdSolidValidatorsPlugin);
-    TF_AXIOM(metadata.size() == 16);
+    TF_AXIOM(metadata.size() == 18);
 
     std::set<TfToken> validatorNames;
     for (const UsdValidationValidatorMetadata &m : metadata) {
@@ -532,6 +609,74 @@ TestBrepArraySolidClosure()
     }
 }
 
+static void
+TestBrepArrayDegenerateEdges()
+{
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+
+    {
+        // Edge 0 has all NURBS control vertices equal; edge 1 is healthy.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/DegenerateEdges"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountError(errors, ".DegenerateEdge") == 1);
+    }
+
+    {
+        // Edge 0 is a zero-length (zero arc) analytic line; edge 1 is healthy.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/DegenerateAnalyticEdge"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountError(errors, ".DegenerateEdge") == 1);
+    }
+
+    {
+        // Clean, non-degenerate edges: no findings.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/GoodEdgeVertices"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(!_HasError(errors, ".DegenerateEdge"));
+    }
+}
+
+static void
+TestBrepArrayEdgeCurveVertices()
+{
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayEdgeCurveVertices);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+
+    {
+        // Curve directions agree with vertexIndices order: no findings.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/GoodEdgeVertices"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(!_HasError(errors, ".EdgeCurveVertexMismatch"));
+    }
+
+    {
+        // Edge 0's vertexIndices are swapped versus its curve direction
+        // (topological rather than curve-parametric order). Rule 434 flags it.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/ReversedEdgeVertices"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountError(errors, ".EdgeCurveVertexMismatch") == 1);
+    }
+}
+
 int
 main()
 {
@@ -547,6 +692,8 @@ main()
     TestBrepArrayNurbs();
     TestBrepArrayAnalyticCurves();
     TestBrepArraySolidClosure();
+    TestBrepArrayDegenerateEdges();
+    TestBrepArrayEdgeCurveVertices();
 
     std::cout << "OK\n";
     return EXIT_SUCCESS;
