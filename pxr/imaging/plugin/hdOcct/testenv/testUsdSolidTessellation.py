@@ -46,7 +46,13 @@ EXPECTED_VERT_COUNTS = {
     'testFilletedCubeWithHole.usda': 620,
     'testPlane.usda': 4,
     'testPlaneWithHole.usda': 33,
-    'testSphere.usda': 577,
+    # testSphere was regenerated as the analytic (BrepSurfaceSphereAPI) solid to
+    # remove the degenerate pole edges of the earlier edged-NURBS form (proposal
+    # rule 381: no degenerate geometry). Two seam-meridian edges, poles are
+    # converging vertices, no zero-length edges; re-baselined (Linux GCC 13 +
+    # OCCT 7.8.1). Meshes slightly under the true 4/3*pi*5^3 = 523.6 (chord
+    # deflection on the curved surface).
+    'testSphere.usda': 306,
     'testTwoBoxes.usda': 48,
     'testProducerCube.usda': 24,
 }
