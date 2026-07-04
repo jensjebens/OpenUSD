@@ -817,7 +817,11 @@ int main(int argc, char** argv) {
     ctx.edgeVtx.resize(nEmap);
     for (int i = 1; i <= nEmap; ++i) {
         const TopoDS_Edge& edge = TopoDS::Edge(ctx.emap(i));
-        // endpoint vertices (orientation-independent indices into vmap)
+        // endpoint vertices (orientation-independent indices into vmap).
+        // TopExp::Vertices(CumOri=false) returns (FORWARD-vertex, REVERSED-vertex)
+        // of the edge as stored. emap holds edges FORWARD, so v1 sits at the 3D
+        // curve's first parameter and v2 at the last -- i.e. already in
+        // curve-parametric order. We do NOT reorder here by topology.
         TopoDS_Vertex v1, v2;
         TopExp::Vertices(edge, v1, v2);
         int i1 = v1.IsNull() ? 0 : ctx.vmap.FindIndex(v1) - 1;
@@ -833,6 +837,32 @@ int main(int argc, char** argv) {
                     new Geom_TrimmedCurve(c3, f3, l3));
                 ctx.edgeCrv3[i-1] = extractCurve3d(bc3);
                 ctx.edgeRng[i-1] = {f3, l3};
+                // FIX 1 (proposal rule 434: "the curve runs from the start vertex
+                // to the end vertex"). Author edge:vertexIndices in CURVE-PARAMETRIC
+                // order: [0] = vertex at the curve's START (param f3), [1] = vertex
+                // at its END (param l3). We enforce this explicitly by matching the
+                // authored 3D curve's endpoint control points to the endpoint
+                // vertices, rather than relying on TopExp topological order. This
+                // makes the convention robust even if an emap edge were ever stored
+                // REVERSED (curve start would then be v2, not v1). edge:range stays
+                // (f3, l3), consistent with the 3D curve's natural direction.
+                if (!ctx.edgeCrv3[i-1].cp.empty() && i1 >= 0 && i2 >= 0 &&
+                    i1 < (int)o.verts.size() && i2 < (int)o.verts.size()) {
+                    const auto& cpFirst = ctx.edgeCrv3[i-1].cp.front();
+                    const auto& cpLast  = ctx.edgeCrv3[i-1].cp.back();
+                    auto d2 = [](const std::array<double,3>& a,
+                                 const std::array<double,3>& b){
+                        double s=0; for(int k=0;k<3;++k){double e=a[k]-b[k]; s+=e*e;} return s; };
+                    // Distance of the curve's start CP to v1 vs v2: if it is closer
+                    // to v2, the stored (v1,v2) is the curve's (end,start) -> swap.
+                    double dStartV1 = d2(cpFirst, o.verts[i1]);
+                    double dStartV2 = d2(cpFirst, o.verts[i2]);
+                    double dEndV2   = d2(cpLast,  o.verts[i2]);
+                    double dEndV1   = d2(cpLast,  o.verts[i1]);
+                    if (dStartV2 + dEndV1 < dStartV1 + dEndV2) {
+                        ctx.edgeVtx[i-1] = {i2, i1};
+                    }
+                }
             } catch (const Standard_Failure& e) {
                 std::fprintf(stderr, "  edge %d curve convert failed: %s\n",
                              i-1, e.GetMessageString());
