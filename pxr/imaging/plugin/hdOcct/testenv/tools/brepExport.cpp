@@ -122,6 +122,15 @@ struct Out {
         double semiAngle = 0.0;              // cone only
         double majorRadius = 0.0, minorRadius = 0.0; // torus only
         bool reproject = false;              // reproject pcurves onto canonical frame
+        // FIX 2 (cone v = AXIAL distance, STEP/PRC/SMLib convention). OCCT's
+        // Geom_ConicalSurface parametrizes v as SLANT distance along the
+        // generator; the UsdSolid BrepSurfaceConeAPI schema defines
+        //   S(u,v) = origin + R(v)*(cos u * refDir + sin u * (axis x refDir)) + v*axis,
+        //   R(v)   = radius + v*tan(semiAngle),
+        // so its v is the AXIAL height (distance along the axis). Convert
+        // slant -> axial by v_axial = v_slant * cos(semiAngle). vScale carries
+        // that factor (1.0 for every non-cone surface, so their v is untouched).
+        double vScale = 1.0;
     };
     std::vector<Surf> surfaces;            // per NURBS face (packed over NURBS faces)
     std::vector<AnalSurf> faceSurf;        // per face (kind + analytic params); kind=="" -> NURBS (index into surfaces in face order)
@@ -209,6 +218,9 @@ static Out::AnalSurf detectAnalytic(const TopoDS_Face& face) {
         a.radius = 0.0;
         a.semiAngle = usemi;
         a.reproject = true;             // cone needs pcurve reprojection onto canonical frame
+        // FIX 2: v is authored as AXIAL distance (schema R(v)=radius+v*tan(semi),
+        // + v*axis). OCCT's v is SLANT; scale by cos(semiAngle) on emit.
+        a.vScale = std::cos(usemi);
     } else if (ty == STANDARD_TYPE(Geom_SphericalSurface)) {
         gp_Sphere sp = Handle(Geom_SphericalSurface)::DownCast(gs)->Sphere();
         const gp_Ax3& ax = sp.Position();
@@ -340,9 +352,11 @@ static void addFace(Out& o, ShareCtx& ctx, const TopoDS_Face& face) {
     o.faceSurf.push_back(anal);
     if (anal.kind.empty())
         o.surfaces.push_back(extractSurface(face));   // NURBS, packed in face order over NURBS faces
-    // face range (corner-point form is emitted later in emit()).
+    // face range (corner-point form is emitted later in emit()). FIX 2: for a
+    // cone, OCCT's v is slant distance; author it as AXIAL (v*cos(semiAngle)) so
+    // face:range is consistent with the schema's cone parameterization.
     Standard_Real u0,u1,v0,v1; BRepTools::UVBounds(face, u0,u1,v0,v1);
-    o.faceRange.push_back({u0,u1,v0,v1});
+    o.faceRange.push_back({u0,u1,v0*anal.vScale,v1*anal.vScale});
     // faceuse orientation: REVERSED -> outward against natural normal
     bool rev = (face.Orientation() == TopAbs_REVERSED);
     o.faceuseOrient.push_back(rev ? "opposite" : "same");
@@ -391,7 +405,14 @@ static void addFace(Out& o, ShareCtx& ctx, const TopoDS_Face& face) {
                     new Geom2d_TrimmedCurve(pc, f2, l2));
                 bool reversed = (edge.Orientation() == TopAbs_REVERSED);
                 if (reversed) bpc->Reverse();
-                p2.push_back(extractCurve2d(bpc));
+                Out::Crv2 uv = extractCurve2d(bpc);
+                // FIX 2: scale the pcurve's v (second) coordinate from OCCT slant
+                // to schema axial for cone faces, so the authored curveUv stays
+                // consistent with the axial face:range and cone parameterization.
+                // vScale is 1.0 for all non-cone surfaces (no-op).
+                if (anal.vScale != 1.0)
+                    for (auto& cp : uv.cp) cp[1] *= anal.vScale;
+                p2.push_back(uv);
                 euEdgeIdx.push_back(eidx);
                 // "opposite" when this edgeuse traverses the edge against its
                 // natural (FORWARD) sense.
