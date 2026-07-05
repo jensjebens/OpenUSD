@@ -33,16 +33,32 @@ import unittest
 # trimming path landed; re-check on Windows + OCCT 8.0.0 if that toolchain
 # changes the meshing.
 EXPECTED_VERT_COUNTS = {
-    # testCone/testCylinder/testSphere were regenerated as EDGED NURBS solids
-    # (OCCT exporter, seam+rim edges, proposal rule 424) replacing the earlier
-    # edgeless single-periodic-NURBS form; their meshing density changed, so
-    # these three counts were re-baselined (Linux GCC 13 + OCCT 7.8.1).
-    'testCone.usda': 281,
+    # testCylinder was regenerated as an EDGED NURBS solid (OCCT exporter,
+    # seam+rim edges, proposal rule 424) replacing the earlier edgeless
+    # single-periodic-NURBS form; its meshing density changed, so it was
+    # re-baselined (Linux GCC 13 + OCCT 7.8.1).
+    #
+    # testCone was regenerated as the analytic (BrepSurfaceConeAPI) solid to
+    # remove the two degenerate apex edges of the earlier edged-NURBS form
+    # (proposal rule 381: no degenerate geometry). Two seam-meridian edges + a
+    # base rim, the apex is a converging vertex (no zero-length edge); the
+    # hdOcct builder closes the apex via the parametric pole-closure fallback.
+    # Re-baselined 281 -> 104 (Linux GCC 13 + OCCT 7.8.1); meshes to signed
+    # volume +256.8 vs true (1/3)*pi*5^2*10 = 261.8 (chord deflection on the
+    # curved lateral surface + apex fan).
+    'testCone.usda': 104,
     'testCube.usda': 24,
     'testCubeWithHole.usda': 148,
     'testCylinder.usda': 124,
     'testDepressedPlane.usda': 122,
-    'testFilletedCube.usda': 512,
+    # testFilletedCube was regenerated degenerate-edge-free: the earlier form
+    # closed each of the 8 cube-corner spherical blends with a zero-length
+    # corner edge (all control vertices equal), which BrepArrayDegenerateEdges
+    # (BA.230) flags. The corners are now converging vertices (proposal rule
+    # 381 / rule 428); the corner blend patches mesh through the builder's NURBS
+    # pcurve path. Re-baselined 512 -> 496 (Linux GCC 13 + OCCT 7.8.1); signed
+    # volume +974.9 (box 10^3 minus the 12 edge + 8 corner fillet volumes).
+    'testFilletedCube.usda': 496,
     'testFilletedCubeWithHole.usda': 620,
     'testPlane.usda': 4,
     'testPlaneWithHole.usda': 33,

@@ -724,6 +724,18 @@ static TopoDS_Shape makeFilletedCubeWithHole() {
     TopoDS_Shape cyl = BRepPrimAPI_MakeCylinder(ax, 3.0, 14.0).Shape();
     return BRepAlgoAPI_Cut(filleted, cyl).Shape();
 }
+// Plain filleted cube (no hole): box 10^3 with r=1 fillets on all 12 edges.
+// The 8 cube-corner blends are spherical patches that collapse to a point at
+// the corner; with gIncludeDegenerateEdges=false the producer drops the
+// zero-length corner edges (rule 381) and represents each corner as a
+// converging vertex, and the hdOcct builder closes the collapsed patch.
+static TopoDS_Shape makeFilletedCube() {
+    TopoDS_Shape box = BRepPrimAPI_MakeBox(10,10,10).Shape();
+    BRepFilletAPI_MakeFillet fil(box);
+    for (TopExp_Explorer ex(box, TopAbs_EDGE); ex.More(); ex.Next())
+        fil.Add(1.0, TopoDS::Edge(ex.Current()));
+    return fil.Shape();
+}
 static TopoDS_Shape makePlaneWithHole() {
     gp_Pln pln(gp_Pnt(0,0,0), gp_Dir(0,0,1));
     BRepBuilderAPI_MakePolygon poly(gp_Pnt(-10,-10,0), gp_Pnt(10,-10,0),
@@ -757,7 +769,7 @@ static TopoDS_Shape makeBoxSolid() {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::fprintf(stderr, "usage: brepExport <plane|cube|filleted|cone|cylinder|sphere|box|cone-nurbs|cylinder-nurbs|sphere-nurbs> <out.usda>\n"); return 2; }
+    if (argc < 3) { std::fprintf(stderr, "usage: brepExport <plane|cube|filleted|filleted-cube|cone|cylinder|sphere|box|cone-nurbs|cylinder-nurbs|sphere-nurbs> <out.usda>\n"); return 2; }
     std::string what = argv[1], path = argv[2];
     TopoDS_Shape shape; std::string prim, doc;
     // Header units: the cube/plane family uses Y-up cm; the analytic-solid
@@ -771,6 +783,8 @@ int main(int argc, char** argv) {
         prim = "CubeWithHole"; doc = "Box 10^3 with r=3 through-hole along Z (OCCT-generated, shared topology)."; }
     else if (what == "filleted") { shape = makeFilletedCubeWithHole();
         prim = "FilletedCubeWithHole"; doc = "Box 10^3, fillet r=1, r=3 through-hole along Z (OCCT-generated, shared topology)."; }
+    else if (what == "filleted-cube") { shape = makeFilletedCube();
+        prim = "FilletedCube"; doc = "Box 10^3 with r=1 fillets on all edges (OCCT-generated, shared topology, degenerate-edge-free corners)."; }
     else if (what == "plane") { shape = makePlaneWithHole();
         prim = "PlaneWithHole"; doc = "20x20 plane sheet with r=3 circular hole (OCCT-generated, shared topology)."; }
     else if (what == "cone") { shape = makeConeSolid();
