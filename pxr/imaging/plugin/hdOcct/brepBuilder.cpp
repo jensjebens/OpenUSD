@@ -36,8 +36,11 @@
 #include <BRep_Tool.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <Geom_ElementarySurface.hxx>
+#include <Geom_ConicalSurface.hxx>
 #include <Standard_Failure.hxx>
 #include <TopLoc_Location.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <Poly_Triangulation.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <gp_Pnt.hxx>
 #include <ShapeFix_Shape.hxx>
@@ -282,6 +285,88 @@ Handle(Geom2d_BSplineCurve) _MakeBSplineCurve2d(
     } catch (...) {
         return nullptr;
     }
+}
+
+/// True when a v-extreme (v0 or v1) of the authored face UV window sits on a
+/// surface SINGULARITY -- an isoparm that collapses to a single point: a cone
+/// apex or a sphere/torus pole. Sampled by walking u across [u0,u1] at each
+/// v-extreme and testing whether all samples coincide within \p tol. This is
+/// how the degenerate-edge-free (rule 381) form of a singularity is detected:
+/// the apex/pole is a converging VERTEX (rule 428), not a zero-length edge, so
+/// the boundary wire alone cannot bound the patch and OCCT must supply the
+/// natural pole closure (FixAddNaturalBoundMode / a parametric face:range face).
+bool _FaceRangeTouchesPole(
+    const Handle(Geom_Surface)& surface,
+    double u0, double u1, double v0, double v1, double tol)
+{
+    if (surface.IsNull()) return false;
+    const int N = 5;
+    for (int vi = 0; vi < 2; ++vi) {
+        const double v = (vi == 0) ? v0 : v1;
+        gp_Pnt first = surface->Value(u0, v);
+        bool collapsed = true;
+        for (int i = 1; i <= N; ++i) {
+            const double u = u0 + (u1 - u0) * (double(i) / double(N));
+            if (surface->Value(u, v).Distance(first) > tol) {
+                collapsed = false;
+                break;
+            }
+        }
+        if (collapsed && std::abs(u1 - u0) > tol) return true;
+    }
+    return false;
+}
+
+/// Triangle count a face produces under BRepMesh at the tessellator's default
+/// deflection. A singular (pole/apex) wire-built face can be geometrically
+/// valid yet triangulate to nothing -- the recurring cone-apex symptom -- so
+/// this is the reliable discriminator for routing to the parametric fallback.
+int _FaceMeshTris(const TopoDS_Face& face)
+{
+    if (face.IsNull()) return 0;
+    try {
+        TopoDS_Face f = face;
+        BRepMesh_IncrementalMesh mesh(f, 0.1, Standard_False, 0.5,
+                                      Standard_False);
+        TopLoc_Location loc;
+        Handle(Poly_Triangulation) t = BRep_Tool::Triangulation(f, loc);
+        return t.IsNull() ? 0 : t->NbTriangles();
+    } catch (const Standard_Failure&) {
+        return 0;
+    }
+}
+
+/// Build a face from a surface + the authored UV window (face:range), letting
+/// OCCT add the natural seam + degenerate pole/apex edges a boundary wire
+/// cannot express. This is the parametric pole-closure the sphere poles and the
+/// analytic-cone apex already rely on; returns a null face on any failure.
+///
+/// Cone v-parameter convention: the UsdSolid BrepSurfaceConeAPI schema authors
+/// face:range v as AXIAL distance (height along the axis), whereas OCCT's
+/// Geom_ConicalSurface parametrizes v as SLANT distance along the generator.
+/// Convert axial -> slant (v_slant = v_axial / cos(semiAngle)) so the
+/// parametric window covers the full authored height, not a foreshortened one.
+TopoDS_Face _MakeParametricPoleFace(
+    const Handle(Geom_Surface)& surface,
+    double u0, double u1, double v0, double v1, double tol)
+{
+    Handle(Geom_ConicalSurface) cone =
+        Handle(Geom_ConicalSurface)::DownCast(surface);
+    if (!cone.IsNull()) {
+        const double c = std::cos(cone->SemiAngle());
+        if (std::abs(c) > 1e-9) { v0 /= c; v1 /= c; }
+    }
+    if (u1 <= u0 || v1 <= v0) return TopoDS_Face();
+    try {
+        BRepBuilderAPI_MakeFace pf(surface, u0, u1, v0, v1, tol);
+        if (!pf.IsDone()) return TopoDS_Face();
+        ShapeFix_Face fx(pf.Face());
+        fx.FixAddNaturalBoundMode() = Standard_True;
+        fx.Perform();
+        TopoDS_Face f = fx.Face();
+        if (BRepCheck_Analyzer(f).IsValid()) return f;
+    } catch (const Standard_Failure&) {}
+    return TopoDS_Face();
 }
 
 } // anonymous namespace
@@ -1141,6 +1226,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             }
 
             bool faceOk = true;
+            bool hasVertexLoop = false;   // rule-428 zero-edgeuse (pole) loop
             std::vector<TopoDS_Wire> loopWires;   // [0] = outer, rest = holes
 
             for (int li = 0; li < numLoops; ++li) {
@@ -1153,7 +1239,17 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 // loop cannot desync subsequent faces.
                 currentEdgeuse += numEdgeuses;
                 currentLoop++;
-                if (!faceOk || numEdgeuses == 0) { loopWires.push_back(TopoDS_Wire()); continue; }
+                // A zero-edgeuse loop is a rule-428 degenerate vertex-loop: it
+                // marks a surface singularity (cone apex / sphere pole) with its
+                // loop:vertexIndex, carrying no boundary geometry. Accept it (do
+                // NOT fail the face); the pole is closed below by the parametric
+                // pole-closure fallback, exactly as for a converging-vertex apex.
+                if (numEdgeuses == 0) {
+                    hasVertexLoop = true;
+                    loopWires.push_back(TopoDS_Wire());
+                    continue;
+                }
+                if (!faceOk) { loopWires.push_back(TopoDS_Wire()); continue; }
 
                 BRepBuilderAPI_MakeWire wireMaker;
                 bool wireOk = true;
@@ -1202,7 +1298,30 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 loopWires.push_back(wireMaker.Wire());
             }
 
-            if (faceOk && !loopWires.empty() && !loopWires[0].IsNull()) {
+            // A singular (pole/apex) analytic face: its authored UV window
+            // reaches a surface singularity (cone apex / sphere pole) either as
+            // a converging vertex or as a rule-428 vertex-loop. The boundary
+            // wire alone cannot bound such a patch, so OCCT must supply the
+            // natural pole closure; detect it here so we can route to the
+            // parametric fallback below when the wire-built face collapses.
+            const bool analyticSurf =
+                surface->IsKind(STANDARD_TYPE(Geom_ElementarySurface));
+            bool singularFace = false;
+            double fu0 = 0, fu1 = 0, fv0 = 0, fv1 = 0;
+            if (analyticSurf && 2 * faceIdx + 1 < data.faceRange.size()) {
+                const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
+                const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
+                fu0 = uvLo[0]; fu1 = uvHi[0]; fv0 = uvLo[1]; fv1 = uvHi[1];
+                singularFace = hasVertexLoop ||
+                    _FaceRangeTouchesPole(surface, fu0, fu1, fv0, fv1,
+                                          data.intersectTol3d);
+            }
+
+            TopoDS_Face finalFace;
+            bool haveFace = false;
+
+            if (faceOk && !loopWires.empty()
+                && !loopWires[0].IsNull()) {
                 // Build the face FROM its outer wire (Inside=true bounds a
                 // finite region); add the remaining loops as holes (reversed).
                 // NOT MakeFace(surface)+Add(outer): that treats the outer wire
@@ -1215,8 +1334,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     hole.Reverse();               // hole runs opposite the outer
                     faceMaker.Add(hole);
                 }
-                if (!faceMaker.IsDone()) faceOk = false;
-                if (faceOk) {
+                if (faceMaker.IsDone()) {
                     TopoDS_Face face = faceMaker.Face();
                     // pcurve-built edges carry no 3D curve and leave
                     // SameParameter unset; synthesize/reconcile both before
@@ -1224,8 +1342,32 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     BRepLib::BuildCurves3d(face, data.intersectTol3d);
                     BRepLib::SameParameter(face, data.intersectTol3d,
                                            Standard_True);
-                    faces.push_back(applyFaceuseOrientation(face, fi));
+                    finalFace = face;
+                    haveFace = true;
                 }
+            }
+
+            // Parametric pole-closure fallback for a singular analytic face
+            // whose boundary wire cannot bound the patch. A pole/apex face's
+            // wire runs UP to the singular isoparm but cannot trace ALONG it
+            // (the apex/pole is a single point, not a curve), so
+            // MakeFace(surface, wire) yields a face OCCT's mesher cannot fan
+            // into the apex -- it triangulates to a sliver (the recurring
+            // cone-apex problem). Detect that by mesh-testing the wire face;
+            // when it collapses, rebuild from the authored face:range UV window,
+            // where OCCT supplies the natural seam + the degenerate pole/apex
+            // edge the wire cannot express. The sphere's pole faces mesh fine
+            // from the wire (hundreds of triangles) and are left untouched, so
+            // only genuinely-collapsing apex/pole faces take this route.
+            if (singularFace &&
+                (!haveFace || _FaceMeshTris(finalFace) <= 2)) {
+                TopoDS_Face pf = _MakeParametricPoleFace(
+                    surface, fu0, fu1, fv0, fv1, data.intersectTol3d);
+                if (!pf.IsNull()) { finalFace = pf; haveFace = true; }
+            }
+
+            if (haveFace) {
+                faces.push_back(applyFaceuseOrientation(finalFace, fi));
             }
         }
     }
