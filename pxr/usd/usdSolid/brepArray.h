@@ -510,8 +510,11 @@ public:
     // --------------------------------------------------------------------- //
     // LOOPVERTEXINDEX 
     // --------------------------------------------------------------------- //
-    /// Loop_ii's vertex index when loop:edgeuseCount[ii] == 0, else ignored.  
-    /// loop:vertexIndex is required because vertex can be shared with EdgeVertices and wireEdgeVertices. 
+    /// Loop_ii's vertex index when loop:edgeuseCount[ii] == 0, else ignored.
+    /// loop:vertexIndex is required because vertex can be shared with EdgeVertices and wireEdgeVertices.
+    /// A loop with loop:edgeuseCount[ii] == 0 is a degenerate VERTEX-LOOP: a loop consisting of the single vertex named here.
+    /// This is the representation for a surface singularity (a cone apex, a sphere pole, a fillet corner) -- such a point is
+    /// authored as a vertex-loop (Rule 428), NEVER as a zero-length degenerate edge (which is forbidden; see edge:curveType, Rule 381).
     /// size() = number of Loops.
     ///
     /// | ||
@@ -646,6 +649,11 @@ public:
     /// BrepCurve3dLineAPI      = shape for edge_ii is an analytic 3d line (see BrepCurve3dLineAPI).
     /// BrepCurve3dCircleAPI    = shape for edge_ii is an analytic 3d circle (see BrepCurve3dCircleAPI).
     /// BrepCurve3dEllipseAPI   = shape for edge_ii is an analytic 3d ellipse (see BrepCurve3dEllipseAPI).
+    /// An edge must NOT be degenerate: its 3d curve must have non-zero length and its control vertices must not all be equal,
+    /// measured against brep:intersectTol3d (Rule 381). A surface singularity (a cone apex, a sphere pole, a fillet corner)
+    /// is NEVER represented as a zero-length edge; it is represented as a degenerate VERTEX-LOOP -- a loop consisting of a single
+    /// vertex (Rule 428; see loop:vertexIndex) -- or as a converging vertex where real edges meet. Interop: the native validator
+    /// (BA.230) now enforces no-degenerate-edges; the singularity-representation convention was previously implicit.
     /// size() = Number of edges. 
     ///
     /// | ||
@@ -696,7 +704,14 @@ public:
     /// Edge_ii's vertexIndices = {startVertexIndex, endVertexIndex}.
     /// where Vertex_startVertexIndex:position = Edge_ii:Curve(Edge:Range(0)).
     /// Vertex_endVertexIndex:position   = Edge_ii:Curve(Edge:Range(1)).
-    /// edge:vertexIndices are required because vertices can be shared with loopVertices and wireEdgeVertices.
+    /// The pair is ordered by the 3d curve's PARAMETRIC direction, NOT by topological edge orientation: vertexIndices[0]
+    /// is the vertex at the curve's parametric START (Edge:Range(0)) and vertexIndices[1] is the vertex at its END
+    /// (Edge:Range(1)); the curve runs start -> end. Producers must swap the pair for edges whose topological orientation
+    /// is reversed relative to the curve, so that the authored endpoints always agree with the curve's evaluated start/end.
+    /// (Rule 434.) Interop: the native validator (BA.240) and SMLib require the authored endpoints to match the 3d curve's
+    /// evaluated start/end within brep:intersectTol3d; ordering by topological edge orientation instead corrupts curved-edge
+    /// reconstruction (an observed SMLib round-trip failure).
+    /// When a Brep has edges, edge:vertexIndices are required because vertices can be shared with loopVertices and wireEdgeVertices.
     /// (note: edge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
     /// size() = number of Edges. 
     ///
@@ -776,7 +791,11 @@ public:
     /// WireEdge_ii's vertexIndices = {startVertexIndex, EndVertexIndex}.
     /// where Vertex_startVertexIndex:position = Edge_ii:Curve(Edge:Range(0)).
     /// Vertex_EndVertexIndex:position   = Edge_ii:Curve(Edge:Range(1)).
-    /// wireEdge:vertexIndices are required because vertices can be shared with loopVertices and edgeVertices.
+    /// As with edge:vertexIndices, the pair is ordered by the 3d curve's PARAMETRIC direction, NOT by topological orientation:
+    /// vertexIndices[0] is the vertex at the curve's parametric START and vertexIndices[1] the vertex at its END (the curve runs
+    /// start -> end); producers must swap the pair for reversed wireEdges so the authored endpoints agree with the curve's
+    /// evaluated start/end within brep:intersectTol3d. (Rule 434; see edge:vertexIndices for the interop rationale.)
+    /// When a Brep has wireEdges, wireEdge:vertexIndices are required because vertices can be shared with loopVertices and edgeVertices (a Brep with no wireEdges authors no wireEdge:* arrays).
     /// (note: wireEdge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
     /// size() = number of Edges. 
     ///
