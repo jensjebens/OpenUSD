@@ -385,7 +385,14 @@ public:
     // --------------------------------------------------------------------- //
     // FACELOOPCOUNT 
     // --------------------------------------------------------------------- //
-    /// face_ii's number of Loops.  1st loop = outerLoop, subsequent loops = innerLoops. size() = number of faces. 
+    /// face_ii's number of Loops.  1st loop = outerLoop, subsequent loops = innerLoops. size() = number of faces.
+    /// Outer vs inner is identified structurally by stored order: the FIRST loop is the single
+    /// outer loop (proposal Rule 424) and the rest are inner (hole) loops. Some producers' native
+    /// formats (e.g. OCCT .brep) do not flag the outer wire and instead detect it geometrically
+    /// (largest UV-domain bounding-box area); in this schema outer-first is a convention, so a
+    /// producer emits the outer loop first and a consumer need not detect it. The loops' winding
+    /// (outer CCW / inner CW as seen from the owning faceuse's designated side) follows from
+    /// edgeuse:orientationType; see edgeuse:orientationType for the full rule. 
     ///
     /// | ||
     /// | -- | -- |
@@ -487,7 +494,10 @@ public:
     // --------------------------------------------------------------------- //
     // LOOPEDGEUSECOUNT 
     // --------------------------------------------------------------------- //
-    /// Loop_ii's number of head-to-tail connected edgeuses. size() = number of Loops. 
+    /// Loop_ii's number of head-to-tail connected edgeuses. size() = number of Loops.
+    /// The edgeuses are stored in traversal order; that order plus each edgeuse:orientationType
+    /// fixes the loop's winding (outer loop CCW / inner loop CW as seen from the owning faceuse's
+    /// designated side, material on the left). See edgeuse:orientationType for the full rule. 
     ///
     /// | ||
     /// | -- | -- |
@@ -565,7 +575,31 @@ public:
     /// represents the owning edge's binormal side connecting to a face..
     /// opposite = edgeuse's UVTrimCurve runs in the opposite direction and
     /// represents the edge's other side connecting to a face.
-    /// size() = Number of one-sided edge_to_face connections. 
+    /// size() = Number of one-sided edge_to_face connections.
+    /// 
+    /// Loop winding convention. edgeuse:orientationType together with the stored edgeuse order
+    /// and the owning faceuse:orientationType fixes each loop's winding; no separate winding
+    /// attribute exists or is needed. Walk a loop's edgeuses in stored order, applying each
+    /// edgeuse's orientationType to get the direction its UVTrimCurve is traced. Seen from the
+    /// side of the surface designated by the owning faceuse (the surface-normal side for a
+    /// 'same' faceuse, the opposite side for an 'opposite' faceuse), the face's material lies to
+    /// the LEFT of that traversal. The geometric consequence in UV parameter space, viewed from
+    /// that designated side: the outer loop (the first loop of the face; see face:loopCount)
+    /// winds counter-clockwise (CCW) and every inner (hole) loop winds clockwise (CW). For a
+    /// face's void-region faceuse the surface is seen from the opposite side, so the winding
+    /// mirrors (outer CW / inner CCW as seen from the void side); the "material on the left"
+    /// rule still holds because the viewing side flipped.
+    /// 
+    /// Producers MUST author edgeuse order and orientationType so this holds. Consumers MAY rely
+    /// on it and need not re-orient loops to assemble holes.
+    /// 
+    /// Why this is stated. NVIDIA's SMLib OCCT/PRC-to-USD converters (OCCT_BREP_IMPORT,
+    /// BREP_PRC_SM) and OCCT itself key hole assembly off explicit orientation flags
+    /// (OCCT Forward/Reversed map to this orientationType), never off geometric winding, and they
+    /// expect outer-CCW / inner-CW ("material on the left"), consistent with the STEP norm. SMLib
+    /// as a consumer drops holed faces when inner loops are authored CCW. Fixing the winding as
+    /// the deterministic consequence of orientationType lets any consumer assemble holes without
+    /// re-orienting loops or detecting the outer loop geometrically. 
     ///
     /// | ||
     /// | -- | -- |
