@@ -39,6 +39,9 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_Result.hxx>
+#include <BRepCheck_ListOfStatus.hxx>
+#include <TopExp_Explorer.hxx>
 #include <Geom_ElementarySurface.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Standard_Failure.hxx>
@@ -1188,7 +1191,31 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         (analyticSurf && poleSurface) ? Standard_True
                                                       : Standard_False;
                     fix.FixWireMode() = Standard_True;
+                    // Enable wire-orientation repair on MULTI-LOOP (holed) faces.
+                    // On real STEP holed planes the inner (hole) wire is authored
+                    // CW and consumed as-built; once MakeFace computes its pcurve
+                    // in-context the 2D winding can come out same-sense as the
+                    // outer, which OCCT flags BRepCheck_BadOrientationOfSubshape
+                    // (status 32) and the face is rejected -> oversized fallback
+                    // (the untrimmed, unholed plane the user saw). FixOrientation
+                    // reorders/reverses the wires against the surface material
+                    // side so the hole cuts. Applied to holed faces AND single-
+                    // loop full-period bands (cylinders/planes) whose seam wire
+                    // likewise only closes once oriented against the material
+                    // side -- EXCEPT single-loop cones. A single-loop cone's lone
+                    // outer wire needs no reorientation, and its pcurve-less twin
+                    // baseline (testConeNoPcurves = 106 verts) shifts by 2 if a
+                    // spurious orientation pass adds a seam. A holed cone
+                    // (numLoops>1) still gets the fix.
+                    const bool isConeSurf =
+                        surface->IsKind(STANDARD_TYPE(Geom_ConicalSurface));
+                    const bool fixOrient = (numLoops > 1) || !isConeSurf;
+                    if (fixOrient) fix.FixOrientationMode() = Standard_True;
                     fix.Perform();
+                    // Explicit orientation pass: Perform()'s auto route does not
+                    // always reconcile an as-built inner wire; call it directly
+                    // so a mis-wound hole is flipped rather than dropped.
+                    if (fixOrient) fix.FixOrientation();
                     trimmedFace = fix.Face();
                     BRepLib::SameParameter(trimmedFace, data.intersectTol3d);
                     // Validity-check NURBS trims too (was analytic-only): a
@@ -1224,6 +1251,45 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                               "  ANALYZ-FAIL face=%zu st=%s loops=%zu "
                               "uspan=%.4f vspan=%.4f\n",
                               faceIdx, _stName[_st], numLoops, us, vs);
+                            // HDOCCT_TRIM_DIAG: dump per-subshape BRepCheck
+                            // status codes so we can see WHICH sub-check
+                            // rejects (edge-on-surface, closed, range, ...).
+                            if (getenv("HDOCCT_TRIM_DIAG") != nullptr) {
+                                BRepCheck_Analyzer an(trimmedFace);
+                                auto dumpStat = [&](const TopoDS_Shape& sh,
+                                                    const char* kind){
+                                    Handle(BRepCheck_Result) res =
+                                        an.Result(sh);
+                                    if (res.IsNull()) return;
+                                    for (res->InitContextIterator();
+                                         res->MoreShapeInContext();
+                                         res->NextShapeInContext()) {
+                                        const BRepCheck_ListOfStatus& ls =
+                                            res->StatusOnShape();
+                                        for (BRepCheck_ListIteratorOfListOfStatus
+                                             it(ls); it.More(); it.Next())
+                                            if (it.Value() != BRepCheck_NoError)
+                                                fprintf(stderr,
+                                                  "      %s status=%d\n",
+                                                  kind, (int)it.Value());
+                                    }
+                                    const BRepCheck_ListOfStatus& gl =
+                                        res->Status();
+                                    for (BRepCheck_ListIteratorOfListOfStatus
+                                         it(gl); it.More(); it.Next())
+                                        if (it.Value() != BRepCheck_NoError)
+                                            fprintf(stderr,
+                                              "      %s gstatus=%d\n",
+                                              kind, (int)it.Value());
+                                };
+                                dumpStat(trimmedFace, "FACE");
+                                for (TopExp_Explorer ex(trimmedFace,
+                                       TopAbs_WIRE); ex.More(); ex.Next())
+                                    dumpStat(ex.Current(), "WIRE");
+                                for (TopExp_Explorer ex(trimmedFace,
+                                       TopAbs_EDGE); ex.More(); ex.Next())
+                                    dumpStat(ex.Current(), "EDGE");
+                            }
                         }
                     }
                 }
