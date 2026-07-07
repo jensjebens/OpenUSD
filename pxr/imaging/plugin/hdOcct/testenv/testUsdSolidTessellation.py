@@ -467,6 +467,70 @@ class TestTessellationErrorHandling(unittest.TestCase):
         self.assertNotEqual(rc, 0)
 
 
+# Pcurve-less ("derived-trim") twins: fixtures/derivedTrims/<name>NoPcurves.usda
+# are generated from the originals by removing the five brep:curveUv:nurb:*
+# arrays and dropping the BrepCurveUvNurbAPI schema, so face trims are DERIVED
+# from the 3D edge curves at read time. brep:curveUv is optional per proposal
+# #109 (the 3D edge curve is the model truth), so a conformant consumer must
+# handle both encodings. These counts are the derived-trim tessellation (coarser
+# than the authored-pcurve original for curved faces, identical for planar).
+# See fixtures/derivedTrims/README.md.
+PCURVELESS_TWIN_VERTS = {
+    'testCubeNoPcurves.usda': 24,
+    'testCylinderNoPcurves.usda': 72,
+    'testConeNoPcurves.usda': 106,
+    'testFilletedCubeNoPcurves.usda': 512,
+    'testCubeWithHoleNoPcurves.usda': 148,
+    'testPlaneWithHoleNoPcurves.usda': 33,
+    'testDepressedPlaneNoPcurves.usda': 97,
+}
+
+
+class TestPcurveLessTwins(unittest.TestCase):
+    """Derived-trim twins tessellate correctly with no authored pcurves."""
+
+    def _tessellate_twin(self, twin_name):
+        input_path = os.path.join(_get_fixtures_dir(), 'derivedTrims', twin_name)
+        stage_in = Usd.Stage.Open(input_path)
+        prim = next(p for p in stage_in.Traverse()
+                    if p.GetTypeName() == 'BrepArray')
+        fd, output_path = tempfile.mkstemp(suffix='.usda')
+        os.close(fd)
+        rc, so, se = _run_tessellator(input_path, output_path,
+                                      prim.GetPath().pathString)
+        if rc != 0:
+            os.unlink(output_path)
+            raise RuntimeError(f"{twin_name}: tessellation failed: {so} {se}")
+        stage = Usd.Stage.Open(output_path)
+        os.unlink(output_path)
+        return stage
+
+    def test_twins_tessellate(self):
+        for twin, expected in PCURVELESS_TWIN_VERTS.items():
+            with self.subTest(twin=twin):
+                stage = self._tessellate_twin(twin)
+                verts = sum(len(m.GetPointsAttr().Get())
+                            for m in _meshes(stage))
+                self.assertEqual(verts, expected,
+                                 f"{twin}: expected {expected} verts, "
+                                 f"got {verts}")
+
+    @unittest.expectedFailure
+    def test_twin_Sphere_rendersFull(self):
+        # testSphere is authored as two seam-split half-lune faces; without
+        # pcurves the meridian-only boundary wire cannot close a lune (the
+        # degenerate pole/seam edges are absent per rule 381), so the twin
+        # renders half a sphere. Expected failure: it flips to XPASS if the
+        # pole/seam derive path is ever completed, prompting a baseline update.
+        # A sphere authored as a single natural-bound face (testAnalyticSphere)
+        # renders correctly pcurve-less. See fixtures/derivedTrims/README.md.
+        stage = self._tessellate_twin('testSphereNoPcurves.usda')
+        ys = [p[1] for m in _meshes(stage) for p in m.GetPointsAttr().Get()]
+        span_y = (max(ys) - min(ys)) if ys else 0.0
+        self.assertGreater(span_y, 9.0,
+                           "sphere twin should span the full diameter")
+
+
 class TestAnalyticSurfaceArea(unittest.TestCase):
     """Analytic surfaces tessellate to their exact geometric area.
 
