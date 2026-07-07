@@ -132,6 +132,13 @@ def line_nurb_3d(p0, p1):
     return dict(o=2, n=2, k=[0,0,1,1], cp=[p0,p1], w=[1,1])
 def line_nurb_2d(p0, p1):
     return dict(o=2, n=2, k=[0,0,1,1], cp=[p0,p1], w=[1,1])
+def rev2d(cp, w, k):
+    # Reverse a 2D NURBS curve so its loop winds the other way. Used to author
+    # inner/hole loops CW (the outer loop stays CCW), per the material-on-left
+    # convention that SMLib and the OCCT/PRC converters expect. Reverse the
+    # control points and weights; reflect the knot vector about its span.
+    a, bb = k[0], k[-1]
+    return list(reversed(cp)), list(reversed(w)), [a + bb - x for x in reversed(k)]
 
 def build_top_only():
     b=Brep()
@@ -155,11 +162,12 @@ def build_top_only():
                 dict(edge=1,o="same",next=1,entry="topEntry"),
                 dict(edge=2,o="same",next=2,entry="topEntry"),
                 dict(edge=3,o="same",next=3,entry="topEntry"),
-                dict(edge=4,o="same",next=4,entry="topEntry")]
+                dict(edge=4,o="opposite",next=4,entry="topEntry")]  # inner hole -> opposite
     # curveUv (one per edgeuse, in face UV [0,20]^2)
     b.cuv=[line_nurb_2d((0,0),(20,0)),line_nurb_2d((20,0),(20,20)),
            line_nurb_2d((20,20),(0,20)),line_nurb_2d((0,20),(0,0))]
-    c2,w2,k2=circle2d(CX,CY,R); b.cuv.append(dict(o=3,n=7,k=k2,cp=c2,w=w2))
+    c2,w2,k2=circle2d(CX,CY,R); c2,w2,k2=rev2d(c2,w2,k2)  # inner hole loop -> CW
+    b.cuv.append(dict(o=3,n=7,k=k2,cp=c2,w=w2))
     # sheet body: 1 face -> 2 faceuses, 1 shell, 1 region
     b.faceuses=[dict(face=0,o="same"),dict(face=0,o="opposite")]
     b.shells=[2]
@@ -211,8 +219,10 @@ def build_full():
     b.edgeuses[4]["next"]=5; b.edgeuses[5]["next"]=4
     b.edgeuses[7]["next"]=9; b.edgeuses[9]["next"]=7
     b.edgeuses[6]["next"]=8; b.edgeuses[8]["next"]=6
+    b.edgeuses[4]["o"]="opposite"   # TOP hole -> inner loop CW (material-on-left)
     # ---- curveUv (one per edgeuse, in each face's UV) ----
     cTop,wTop,kTop = circle2d(CX,CY,R)        # in TOP UV [0,20]
+    cTop,wTop,kTop = rev2d(cTop,wTop,kTop)    # TOP hole -> inner loop CW
     cBot,wBot,kBot = circle2d(CX,CY,R)        # in BOTTOM UV [7,13] (same coords)
     D=DEPTH; TP=2*math.pi
     b.cuv=[line_nurb_2d((0,0),(20,0)),line_nurb_2d((20,0),(20,20)),

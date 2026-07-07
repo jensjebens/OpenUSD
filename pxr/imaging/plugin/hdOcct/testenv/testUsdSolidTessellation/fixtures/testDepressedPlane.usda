@@ -9,7 +9,7 @@ def Xform "World" (
         prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dNurbAPI:edge3dNurb", "BrepCurveUvNurbAPI", "BrepSurfaceNurbAPI"]
     )
     {
-        uniform double2[] brep:curveUv:nurb:controlVertices = [(0, 0), (20, 0), (20, 0), (20, 20), (20, 20), (0, 20), (0, 20), (0, 0), (13, 10), (13, 15.1961524227), (8.5, 12.5980762114), (4, 10), (8.5, 7.4019237886), (13, 4.8038475773), (13, 10), (0, 0), (6.2831853072, 0), (6.2831853072, 0), (6.2831853072, 5), (6.2831853072, 5), (0, 5), (0, 5), (0, 0), (13, 10), (13, 15.1961524227), (8.5, 12.5980762114), (4, 10), (8.5, 7.4019237886), (13, 4.8038475773), (13, 10)]
+        uniform double2[] brep:curveUv:nurb:controlVertices = [(0, 0), (20, 0), (20, 0), (20, 20), (20, 20), (0, 20), (0, 20), (0, 0), (13, 10), (13, 4.8038475773), (8.5, 7.4019237886), (4, 10), (8.5, 12.5980762114), (13, 15.1961524227), (13, 10), (0, 0), (6.2831853072, 0), (6.2831853072, 0), (6.2831853072, 5), (6.2831853072, 5), (0, 5), (0, 5), (0, 0), (13, 10), (13, 15.1961524227), (8.5, 12.5980762114), (4, 10), (8.5, 7.4019237886), (13, 4.8038475773), (13, 10)]
         uniform double[] brep:curveUv:nurb:knots = [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 2.0943951024, 2.0943951024, 4.1887902048, 4.1887902048, 6.2831853072, 6.2831853072, 6.2831853072, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 2.0943951024, 2.0943951024, 4.1887902048, 4.1887902048, 6.2831853072, 6.2831853072, 6.2831853072]
         uniform uint[] brep:curveUv:nurb:order = [2, 2, 2, 2, 3, 2, 2, 2, 2, 3]
         uniform uint[] brep:curveUv:nurb:vertexCount = [2, 2, 2, 2, 7, 2, 2, 2, 2, 7]
@@ -36,7 +36,7 @@ def Xform "World" (
         uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 4), (5, 5), (4, 5)]
         uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3, 4, 4, 6, 5, 6, 5]
         uniform uint[] edgeuse:nextRadialEUIndex = [0, 1, 2, 3, 5, 4, 8, 9, 6, 7]
-        uniform token[] edgeuse:orientationType = ["same", "same", "same", "same", "same", "same", "same", "same", "same", "same"]
+        uniform token[] edgeuse:orientationType = ["same", "same", "same", "same", "opposite", "same", "same", "same", "same", "same"]
         uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry", "topEntry", "bottomEntry", "topEntry", "topEntry", "bottomEntry", "bottomEntry"]
         uniform uint[] face:loopCount = [2, 1, 1]
         uniform double2[] face:range = [(0, 0), (20, 20), (0, 0), (6.2831853072, 5), (7, 7), (13, 13)]

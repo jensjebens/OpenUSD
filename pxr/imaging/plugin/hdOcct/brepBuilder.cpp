@@ -1335,9 +1335,12 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                                                   Standard_True);
                 for (size_t k = 1; k < loopWires.size(); ++k) {
                     if (loopWires[k].IsNull()) continue;
-                    TopoDS_Wire hole = loopWires[k];
-                    hole.Reverse();               // hole runs opposite the outer
-                    faceMaker.Add(hole);
+                    // Inner loops are authored CW (opposite the CCW outer) per
+                    // the material-on-left convention, so add them as-built to
+                    // cut the hole. (Previously the exporter forced all loops
+                    // CCW and we reversed here; both sides now use the standard
+                    // outer-CCW/inner-CW convention.)
+                    faceMaker.Add(loopWires[k]);
                 }
                 if (faceMaker.IsDone()) {
                     TopoDS_Face face = faceMaker.Face();

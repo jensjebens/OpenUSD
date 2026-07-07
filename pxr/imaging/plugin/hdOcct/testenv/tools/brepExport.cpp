@@ -372,7 +372,8 @@ static void addFace(Out& o, ShareCtx& ctx, const TopoDS_Face& face) {
     }
     o.faceLoopCount.push_back((int)wires.size());
 
-    for (const TopoDS_Wire& w : wires) {
+    for (size_t wi = 0; wi < wires.size(); ++wi) {
+        const TopoDS_Wire& w = wires[wi];
         // Collect this loop's edgeuses, in traversal order. Each parallel array
         // entry describes ONE edgeuse: its 2D pcurve (curveUv), the SHARED
         // unique-edge index, and the orientation token.
@@ -421,17 +422,21 @@ static void addFace(Out& o, ShareCtx& ctx, const TopoDS_Face& face) {
                 std::fprintf(stderr, "  skip edge: %s\n", e.GetMessageString());
             }
         }
-        // Force the loop CCW in UV (positive signed area). The builder bounds
-        // the face by its outer wire (needs CCW) and reverses inner wires to
-        // cut holes — so EVERY authored loop must be CCW regardless of the
-        // face's 3D orientation. Shoelace over all 2D control points in order.
+        // Author the standard STEP/OCCT loop-winding convention (material on
+        // the left): the OUTER loop (wi==0) winds CCW in UV (positive signed
+        // area); every INNER (hole) loop (wi>0) winds CW (negative signed area).
+        // This matches the SMLib OCCT/PRC->USD converters and OCCT itself, which
+        // key off orientationType and expect outer-CCW/inner-CW; hdOcct's builder
+        // now consumes the authored orientation directly (it no longer force-
+        // reverses inner wires). Shoelace over all 2D control points in order.
+        const bool wantCCW = (wi == 0);      // outer CCW, holes CW
         double signedA = 0.0; std::vector<std::array<double,2>> poly;
         for (auto& c : p2) for (auto& cp : c.cp) poly.push_back(cp);
         for (size_t i=0;i+1<poly.size();++i)
             signedA += poly[i][0]*poly[i+1][1] - poly[i+1][0]*poly[i][1];
         if (!poly.empty())
             signedA += poly.back()[0]*poly.front()[1] - poly.front()[0]*poly.back()[1];
-        if (signedA < 0) {
+        if ((wantCCW && signedA < 0) || (!wantCCW && signedA > 0)) {
             // Reverse the per-edgeuse lists in LOCKSTEP so curveUv[k],
             // edgeuseEdgeIndex[k] and orientation stay aligned, and reverse the
             // pcurve direction (and flip the orientation token) of each.
