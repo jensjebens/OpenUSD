@@ -730,12 +730,14 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     //      side) as the outward reference, so the same opposite->REVERSED rule
     //      as (A) applies and normals point outward.
     //  (C) A void-ONLY body (voidRegion with no solidRegion -- e.g. CATIA
-    //      solids via hoops-converter). Faceuses are interleaved coedge pairs,
-    //      but the producer's pair ORDER varies between bodies, so the fixed
-    //      2*fi pick (A) flips ('opposite','same')-first bodies entirely
-    //      inward. Pick by CONTENT: the 'same' coedge of each pair is the
-    //      outward (FORWARD) reference; REVERSE only when both coedges of the
-    //      face are 'opposite'.
+    //      solids via hoops-converter). All faceuses live in the single void
+    //      shell, so like (B) resolve each face through faceuse:faceIndex
+    //      rather than by position: the fixed 2*fi pick assumed an INTERLEAVED
+    //      faceuse layout ([0,0,1,1,...]), but producers may author GROUPED
+    //      faceuses ([0,1,2,0,1,2,...]) -- the same grouping (B) uses -- so the
+    //      positional pair never matches and every face falls to the fallback.
+    //      Pick by CONTENT: REVERSE only when ALL of a face's faceuses are
+    //      'opposite'; otherwise FORWARD.
     std::vector<int> faceOutwardOpposite(numFaces, -1);   // -1 = unknown
     {
         bool hasVoid = false, hasSolid = false;
@@ -770,22 +772,25 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     }
                 }
             }
-        } else if (hasVoid && !hasSolid) {
-            // Layout (C): void-only body -- pick each face's outward
-            // orientation by CONTENT from its interleaved coedge pair, since
-            // the producer's pair order varies. Default to the 'same' coedge
-            // as FORWARD; REVERSE only when both coedges are 'opposite'.
-            for (size_t fi = 0; fi < numFaces; ++fi) {
-                const size_t f0 = faceuseStart + 2 * fi, f1 = f0 + 1;
-                if (f1 >= data.faceuseOrientationType.size()) break;
-                if (!data.faceuseFaceIndex.empty() &&
-                    f1 < data.faceuseFaceIndex.size() &&
-                    data.faceuseFaceIndex[f0] != data.faceuseFaceIndex[f1])
-                    continue;   // {f0,f1} not this face's interleaved pair
-                faceOutwardOpposite[fi] =
-                    (data.faceuseOrientationType[f0] == _tokens->opposite &&
-                     data.faceuseOrientationType[f1] == _tokens->opposite)
-                        ? 1 : 0;
+        } else if (hasVoid && !hasSolid && !data.faceuseFaceIndex.empty()) {
+            // Layout (C): void-only body -- order-independent. Walk this Brep's
+            // faceuse range once and fold each faceuse's orientation into its
+            // face (mapped through faceuse:faceIndex, not by 2*fi position, so
+            // interleaved and grouped layouts both work). REVERSE a face only
+            // when ALL of its faceuses are 'opposite'; otherwise FORWARD.
+            for (size_t fu = faceuseStart;
+                 fu < faceuseStart + totalFaceuses &&
+                 fu < data.faceuseFaceIndex.size() &&
+                 fu < data.faceuseOrientationType.size(); ++fu) {
+                const size_t fl = (size_t)data.faceuseFaceIndex[fu] - faceStart;
+                if (fl >= numFaces) continue;
+                const bool opp =
+                    data.faceuseOrientationType[fu] == _tokens->opposite;
+                // Start FORWARD (0); stay 1 (REVERSE) only if every faceuse of
+                // this face is 'opposite'.
+                faceOutwardOpposite[fl] =
+                    (faceOutwardOpposite[fl] < 0) ? (opp ? 1 : 0)
+                                                  : (faceOutwardOpposite[fl] & (opp ? 1 : 0));
             }
         }
     }
