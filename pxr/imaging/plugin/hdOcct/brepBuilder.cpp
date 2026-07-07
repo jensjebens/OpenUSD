@@ -6,6 +6,10 @@
 
 #include "brepBuilder.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/usd/usd/attribute.h"
@@ -815,6 +819,34 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     };
 
     if (!hasTrimCurves) {
+        // ---- HDOCCT_TRIM_HIST instrumentation --------------------------------
+        // Per-surface-type failure histogram for the analytic wire-trim path.
+        // Enabled by env HDOCCT_TRIM_HIST=1; printed to stderr at end of build.
+        static const bool _histOn =
+            (getenv("HDOCCT_TRIM_HIST") != nullptr);
+        enum { ST_PLANE=0, ST_CYL, ST_CONE, ST_SPHERE, ST_TORUS, ST_NURBS,
+               ST_OTHER, ST_N };
+        static const char* _stName[ST_N] =
+            {"plane","cylinder","cone","sphere","torus","nurbs","other"};
+        enum { FS_EDGE3D=0, FS_PROJNULL, FS_WIRE, FS_MKFACE_OUTER,
+               FS_MKFACE_INNER, FS_ANALYZER, FS_FALLBACK_PARAM,
+               FS_FALLBACK_RANGE, FS_SKIP, FS_TRIM_OK, FS_N };
+        // Accumulate across all Breps of the whole build.
+        static long _hist[ST_N][FS_N] = {{0}};
+        static long _faceSeen[ST_N] = {0};
+        auto _stOf = [](const Handle(Geom_Surface)& s) -> int {
+            if (s.IsNull()) return ST_OTHER;
+            if (s->IsKind(STANDARD_TYPE(Geom_Plane)))            return ST_PLANE;
+            if (s->IsKind(STANDARD_TYPE(Geom_CylindricalSurface)))return ST_CYL;
+            if (s->IsKind(STANDARD_TYPE(Geom_ConicalSurface)))   return ST_CONE;
+            if (s->IsKind(STANDARD_TYPE(Geom_SphericalSurface))) return ST_SPHERE;
+            if (s->IsKind(STANDARD_TYPE(Geom_ToroidalSurface)))  return ST_TORUS;
+            if (s->IsKind(STANDARD_TYPE(Geom_BSplineSurface)))   return ST_NURBS;
+            return ST_OTHER;
+        };
+        #define HIST(st, fs) do { if (_histOn) _hist[(st)][(fs)]++; } while(0)
+        // ---- end instrumentation setup ---------------------------------------
+
         // Surface-only path: trim each face with its 3D edge curves.
         // Build the 3D curve for every edge, dispatching on edge:curveType
         // (NURBS / line / circle / ellipse), each packed per curve type.
@@ -828,6 +860,34 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         size_t numEdgesTotal = data.edgeCurveType.size();
         std::vector<Handle(Geom_Curve)> edge3dCurves(numEdgesTotal);
         std::vector<bool> edgeIsAnalytic(numEdgesTotal, false);
+
+        // Shared boundary vertices, one TopoDS_Vertex per authored vertex index
+        // (brep:vertexPoint:point:position). Building each analytic edge between
+        // these SHARED vertices -- rather than letting BRepBuilderAPI_MakeEdge
+        // mint fresh independent vertices per edge -- is what lets the boundary
+        // loop close: MakeWire connects edges by shared vertex identity, and the
+        // authored analytic geometry (imperfect STEP axes, a 3D edge sitting a
+        // few ulps off its host surface) leaves consecutive edges' independent
+        // endpoint vertices just far enough apart that MakeWire's final closure
+        // reports Disconnected -> the whole face falls to the oversized
+        // face:range fallback. Give the vertices a real working tolerance so the
+        // curve+parameter edge builder can still bind them to the exact authored
+        // trim interval. (Mirrors the full-topology/hasTrimCurves path, which
+        // already builds edges from vertexPositions.)
+        std::vector<TopoDS_Vertex> sharedVerts(data.vertexPositions.size());
+        {
+            // A tolerance comfortably above the STEP producer's positional noise
+            // (~1e-4 vs the observed few-ulp..1e-6 residuals) so MakeEdge with
+            // explicit params accepts the vertex without over-inflating it.
+            const double vtxTol =
+                std::max(1.0e-4, data.intersectTol3d * 10.0);
+            BRep_Builder vb;
+            for (size_t vi = 0; vi < data.vertexPositions.size(); ++vi) {
+                const GfVec3d& p = data.vertexPositions[vi];
+                vb.MakeVertex(sharedVerts[vi],
+                              gp_Pnt(p[0], p[1], p[2]), vtxTol);
+            }
+        }
         {
             size_t eCP = 0, eKnot = 0, eW = 0;   // NURBS packing offsets
             size_t nurbE = 0, lineE = 0, circE = 0, ellE = 0;
@@ -903,6 +963,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             const bool analyticSurf =
                 surface->IsKind(STANDARD_TYPE(Geom_ElementarySurface));
 
+            const int _st = _stOf(surface);   // HDOCCT_TRIM_HIST surface class
+            if (_histOn) _faceSeen[_st]++;
+
             size_t faceIdx = faceStart + fi;
             size_t numLoops = (faceIdx < data.faceLoopCount.size())
                 ? data.faceLoopCount[faceIdx] : 0;
@@ -930,7 +993,27 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             TopoDS_Face finalFace;
             bool haveFace = false;
 
-            if (attemptTrim) {
+            // Two-pass analytic trim: pass 0 attaches projected pcurves
+            // (GeomProjLib::Curve2d); if the healed face is rejected, pass 1
+            // rebuilds the same wire pcurve-LESS and lets MakeFace +
+            // BuildCurves3d + SameParameter compute the pcurves in the face
+            // context. The projection wins for most bands but produces a
+            // degenerate pcurve for some (partial cylinders, holed disks) where
+            // the in-context computation succeeds -- and vice versa -- so trying
+            // both recovers faces that either route alone would drop to the
+            // oversized fallback. NURBS uses only pass 0 (projection is its only
+            // UV source). Pass 1 is restricted to NON-pole analytic surfaces
+            // (cylinder/cone/plane): sphere/torus poles rely on the projected
+            // pcurve + FixAddNaturalBound path, and a pcurve-less retry there
+            // meshes the full sphere to nothing (empty mesh).
+            const bool poleSurfaceEarly =
+                surface->IsKind(STANDARD_TYPE(Geom_SphericalSurface)) ||
+                surface->IsKind(STANDARD_TYPE(Geom_ToroidalSurface));
+            const int nTrimPasses = (analyticSurf && !poleSurfaceEarly) ? 2 : 1;
+            for (int trimPass = 0;
+                 trimPass < nTrimPasses && !haveFace && attemptTrim;
+                 ++trimPass) {
+              const bool doProject = (trimPass == 0);
               try {
                 bool built = false, ok = true;
                 TopoDS_Face trimmedFace;
@@ -955,19 +1038,68 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                             ok = false; break;
                         }
                         // Analytic curves are infinite/periodic — bound them by
-                        // the authored edge:range parameter interval.
+                        // the authored edge:range parameter interval, and build
+                        // them BETWEEN the shared boundary vertices so the loop
+                        // closes (see sharedVerts above). The vertex-bounded
+                        // builder keeps the exact authored trim (params) while
+                        // giving consecutive edges a common vertex identity.
                         TopoDS_Edge edge;
+                        bool builtEdge = false;
+                        // Resolve this edge's two shared vertices (if authored).
+                        const TopoDS_Vertex* v1 = nullptr;
+                        const TopoDS_Vertex* v2 = nullptr;
+                        if (edgeIdx < data.edgeVertexIndices.size()) {
+                            const GfVec2i& vidx =
+                                data.edgeVertexIndices[edgeIdx];
+                            if (vidx[0] >= 0 && vidx[1] >= 0 &&
+                                (size_t)vidx[0] < sharedVerts.size() &&
+                                (size_t)vidx[1] < sharedVerts.size()) {
+                                v1 = &sharedVerts[vidx[0]];
+                                v2 = &sharedVerts[vidx[1]];
+                            }
+                        }
                         if (edgeIsAnalytic[edgeIdx] &&
                             2 * edgeIdx + 1 < data.edgeRange.size()) {
-                            BRepBuilderAPI_MakeEdge em(edge3dCurves[edgeIdx],
-                                data.edgeRange[2 * edgeIdx],
-                                data.edgeRange[2 * edgeIdx + 1]);
-                            if (!em.IsDone()) { ok = false; break; }
-                            edge = em.Edge();
+                            const double r0 = data.edgeRange[2 * edgeIdx];
+                            const double r1 = data.edgeRange[2 * edgeIdx + 1];
+                            // Preferred: shared vertices + exact params.
+                            if (v1 && v2) {
+                                BRepBuilderAPI_MakeEdge em(
+                                    edge3dCurves[edgeIdx], *v1, *v2, r0, r1);
+                                if (em.IsDone()) {
+                                    edge = em.Edge(); builtEdge = true;
+                                } else {
+                                    // Params disagree with vertices past tol:
+                                    // let OCCT derive params from the shared
+                                    // vertices (still closes the loop).
+                                    BRepBuilderAPI_MakeEdge em2(
+                                        edge3dCurves[edgeIdx], *v1, *v2);
+                                    if (em2.IsDone()) {
+                                        edge = em2.Edge(); builtEdge = true;
+                                    }
+                                }
+                            }
+                            if (!builtEdge) {
+                                // No authored vertices: fall back to the legacy
+                                // curve+params edge (fresh, unshared vertices).
+                                BRepBuilderAPI_MakeEdge em(
+                                    edge3dCurves[edgeIdx], r0, r1);
+                                if (!em.IsDone()) { ok = false; break; }
+                                edge = em.Edge(); builtEdge = true;
+                            }
                         } else {
-                            BRepBuilderAPI_MakeEdge em(edge3dCurves[edgeIdx]);
-                            if (!em.IsDone()) { ok = false; break; }
-                            edge = em.Edge();
+                            if (v1 && v2) {
+                                BRepBuilderAPI_MakeEdge em(
+                                    edge3dCurves[edgeIdx], *v1, *v2);
+                                if (em.IsDone()) {
+                                    edge = em.Edge(); builtEdge = true;
+                                }
+                            }
+                            if (!builtEdge) {
+                                BRepBuilderAPI_MakeEdge em(edge3dCurves[edgeIdx]);
+                                if (!em.IsDone()) { ok = false; break; }
+                                edge = em.Edge(); builtEdge = true;
+                            }
                         }
                         // Attach an exact pcurve (3D->2D projection) so curved
                         // faces mesh. Projected for analytic AND NURBS surfaces:
@@ -975,9 +1107,14 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         // trimmed/holed NURBS face must derive its UV placement
                         // from the 3D edge or OCCT cannot cut the hole. Null-
                         // guarded, so a failed projection simply carries no
-                        // pcurve and the fallbacks handle it.
-                        if (analyticSurf ||
-                            surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))) {
+                        // pcurve and the fallbacks handle it. NOTE: for some
+                        // analytic bands (partial cylinders, holed disks)
+                        // GeomProjLib::Curve2d yields a degenerate pcurve and the
+                        // face is rejected; those are recovered by the
+                        // pcurve-less retry after the heal below.
+                        if (doProject &&
+                            (analyticSurf ||
+                             surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface)))) {
                             Standard_Real f, l;
                             Handle(Geom_Curve) c3 =
                                 BRep_Tool::Curve(edge, f, l);
@@ -989,6 +1126,8 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                                     bb.UpdateEdge(edge, pc, surface,
                                         TopLoc_Location(),
                                         data.intersectTol3d);
+                                } else if (trimPass == 0) {
+                                    HIST(_st, FS_PROJNULL);
                                 }
                             }
                         }
@@ -999,13 +1138,18 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         wireMaker.Add(edge);
                     }
                     currentEU += numEU;
-                    if (!ok || !wireMaker.IsDone()) { ok = false; break; }
+                    if (!ok || !wireMaker.IsDone()) {
+                        if (!wireMaker.IsDone()) HIST(_st, FS_WIRE);
+                        ok = false; break;
+                    }
                     TopoDS_Wire wire = wireMaker.Wire();
 
                     if (li == 0) {
                         BRepBuilderAPI_MakeFace faceMaker(surface, wire,
                                                           Standard_True);
-                        if (!faceMaker.IsDone()) { ok = false; break; }
+                        if (!faceMaker.IsDone()) {
+                            HIST(_st, FS_MKFACE_OUTER); ok = false; break;
+                        }
                         trimmedFace = faceMaker.Face();
                         built = true;
                     } else {
@@ -1016,7 +1160,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         // Consume as-built, matching the hasTrimCurves path
                         // (which likewise dropped its former hole.Reverse()).
                         BRepBuilderAPI_MakeFace faceMaker(trimmedFace, wire);
-                        if (!faceMaker.IsDone()) { ok = false; break; }
+                        if (!faceMaker.IsDone()) {
+                            HIST(_st, FS_MKFACE_INNER); ok = false; break;
+                        }
                         trimmedFace = faceMaker.Face();
                     }
                 }
@@ -1028,13 +1174,15 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     bool poleSurface =
                         surface->IsKind(STANDARD_TYPE(Geom_SphericalSurface)) ||
                         surface->IsKind(STANDARD_TYPE(Geom_ToroidalSurface));
-                    if (!analyticSurf) {
-                        // A NURBS hole wire's pcurve came from projection above;
-                        // synthesize any missing 3D curves and reconcile before
-                        // healing so the hole cuts cleanly (mirrors the
-                        // hasTrimCurves path's BuildCurves3d/SameParameter).
-                        BRepLib::BuildCurves3d(trimmedFace, data.intersectTol3d);
-                    }
+                    // Synthesize any missing 3D/2D curves and reconcile before
+                    // healing so holes cut and analytic bands close. For NURBS
+                    // this reconciles the projected hole pcurve (mirrors the
+                    // hasTrimCurves path). For ANALYTIC surfaces the edges were
+                    // left pcurve-less above; MakeFace(surface, wire) computed
+                    // the pcurves in-context, and this pass reconciles them --
+                    // the robust route that fixes the partial-band / holed-disk
+                    // faces GeomProjLib::Curve2d mis-projected.
+                    BRepLib::BuildCurves3d(trimmedFace, data.intersectTol3d);
                     ShapeFix_Face fix(trimmedFace);
                     fix.FixAddNaturalBoundMode() =
                         (analyticSurf && poleSurface) ? Standard_True
@@ -1059,6 +1207,24 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     if (BRepCheck_Analyzer(trimmedFace).IsValid()) {
                         finalFace = trimmedFace;
                         haveFace = true;
+                        HIST(_st, FS_TRIM_OK);
+                    }
+                    // Only tally the miss once both passes are exhausted.
+                    if (!haveFace && trimPass == nTrimPasses - 1) {
+                        HIST(_st, FS_ANALYZER);
+                        if (_histOn) {
+                            double us = -1.0, vs = -1.0;
+                            if (2*faceIdx+1 < data.faceRange.size()) {
+                                us = data.faceRange[2*faceIdx+1][0] -
+                                     data.faceRange[2*faceIdx][0];
+                                vs = data.faceRange[2*faceIdx+1][1] -
+                                     data.faceRange[2*faceIdx][1];
+                            }
+                            fprintf(stderr,
+                              "  ANALYZ-FAIL face=%zu st=%s loops=%zu "
+                              "uspan=%.4f vspan=%.4f\n",
+                              faceIdx, _stName[_st], numLoops, us, vs);
+                        }
                     }
                 }
               } catch (const Standard_Failure&) {
@@ -1088,6 +1254,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                             if (BRepCheck_Analyzer(pff).IsValid()) {
                                 finalFace = pff;
                                 haveFace = true;
+                                HIST(_st, FS_FALLBACK_PARAM);
                             }
                         }
                     } catch (const Standard_Failure&) {}
@@ -1149,13 +1316,56 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                             haveFace = true;
                         }
                     }
+                    if (haveFace) HIST(_st, FS_FALLBACK_RANGE);
                 } catch (const Standard_Failure&) {}
             }
             if (haveFace) {
                 faces.push_back(applyFaceuseOrientation(finalFace, fi));
                 faceNeedsFlip.push_back(false);
+            } else {
+                HIST(_st, FS_SKIP);
             }
         }
+
+        // ---- HDOCCT_TRIM_HIST report -----------------------------------------
+        if (_histOn) {
+            fprintf(stderr,
+              "\n===== HDOCCT ANALYTIC TRIM HISTOGRAM (!hasTrimCurves) =====\n");
+            fprintf(stderr, "%-9s %6s | %8s %8s %8s %8s %8s %8s %8s %8s %8s\n",
+                "surface","seen",
+                "trimOK","parmFB","rangeFB","skip","projN","wireX",
+                "mkfOut","mkfIn","analyz");
+            long tot[FS_N] = {0}; long totSeen = 0;
+            for (int s = 0; s < ST_N; ++s) {
+                if (_faceSeen[s] == 0 &&
+                    _hist[s][FS_TRIM_OK]==0 && _hist[s][FS_SKIP]==0) continue;
+                fprintf(stderr,
+                  "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld\n",
+                  _stName[s], _faceSeen[s],
+                  _hist[s][FS_TRIM_OK], _hist[s][FS_FALLBACK_PARAM],
+                  _hist[s][FS_FALLBACK_RANGE], _hist[s][FS_SKIP],
+                  _hist[s][FS_PROJNULL], _hist[s][FS_WIRE],
+                  _hist[s][FS_MKFACE_OUTER], _hist[s][FS_MKFACE_INNER],
+                  _hist[s][FS_ANALYZER]);
+                totSeen += _faceSeen[s];
+                for (int f = 0; f < FS_N; ++f) tot[f] += _hist[s][f];
+            }
+            fprintf(stderr,
+              "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld\n",
+              "TOTAL", totSeen,
+              tot[FS_TRIM_OK], tot[FS_FALLBACK_PARAM], tot[FS_FALLBACK_RANGE],
+              tot[FS_SKIP], tot[FS_PROJNULL], tot[FS_WIRE],
+              tot[FS_MKFACE_OUTER], tot[FS_MKFACE_INNER], tot[FS_ANALYZER]);
+            fprintf(stderr,
+              "  legend: trimOK=wire-trim accepted; parmFB=analytic face:range "
+              "param fallback; rangeFB=untrimmed natural/range fallback; "
+              "skip=no face built; projN=Curve2d null; wireX=MakeWire !done; "
+              "mkfOut/mkfIn=MakeFace !done; analyz=BRepCheck rejected\n");
+            fprintf(stderr,
+              "===========================================================\n\n");
+        }
+        #undef HIST
+        // ---- end report ------------------------------------------------------
     } else {
         // Full topology path with pcurves available
         size_t numEdges = data.edgeCurveVertexCount.size();
@@ -1421,6 +1631,20 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     compoundBuilder.MakeCompound(compound);
     for (const auto& face : faces) {
         compoundBuilder.Add(compound, face);
+    }
+
+    // EXPERIMENTAL (env HDOCCT_SEW=1): sew the now-trimmed faces so shared
+    // curved edges mesh once and the per-side crack pattern collapses. Off by
+    // default -- sewing welds vertices (changes fixture vert counts) and can
+    // reorient faces, so it stays gated behind an env flag pending validation.
+    if (getenv("HDOCCT_SEW") != nullptr) {
+        try {
+            BRepBuilderAPI_Sewing sew(data.intersectTol3d);
+            for (const auto& face : faces) sew.Add(face);
+            sew.Perform();
+            TopoDS_Shape sewn = sew.SewedShape();
+            if (!sewn.IsNull()) return sewn;
+        } catch (const Standard_Failure&) {}
     }
 
     return compound;
