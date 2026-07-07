@@ -970,8 +970,14 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                             edge = em.Edge();
                         }
                         // Attach an exact pcurve (3D->2D projection) so curved
-                        // analytic faces mesh. NURBS keeps legacy behaviour.
-                        if (analyticSurf) {
+                        // faces mesh. Projected for analytic AND NURBS surfaces:
+                        // curveUv is optional (proposal #109), so a pcurve-less
+                        // trimmed/holed NURBS face must derive its UV placement
+                        // from the 3D edge or OCCT cannot cut the hole. Null-
+                        // guarded, so a failed projection simply carries no
+                        // pcurve and the fallbacks handle it.
+                        if (analyticSurf ||
+                            surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))) {
                             Standard_Real f, l;
                             Handle(Geom_Curve) c3 =
                                 BRep_Tool::Curve(edge, f, l);
@@ -1003,7 +1009,12 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         trimmedFace = faceMaker.Face();
                         built = true;
                     } else {
-                        wire.Reverse();  // inner loops = holes
+                        // Inner loops are authored CW (opposite the CCW outer)
+                        // per the material-on-left convention; the edgeuse
+                        // orientationType applied above (edge.Reverse for
+                        // "opposite") already wound them to cut the hole.
+                        // Consume as-built, matching the hasTrimCurves path
+                        // (which likewise dropped its former hole.Reverse()).
                         BRepBuilderAPI_MakeFace faceMaker(trimmedFace, wire);
                         if (!faceMaker.IsDone()) { ok = false; break; }
                         trimmedFace = faceMaker.Face();
@@ -1017,6 +1028,13 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     bool poleSurface =
                         surface->IsKind(STANDARD_TYPE(Geom_SphericalSurface)) ||
                         surface->IsKind(STANDARD_TYPE(Geom_ToroidalSurface));
+                    if (!analyticSurf) {
+                        // A NURBS hole wire's pcurve came from projection above;
+                        // synthesize any missing 3D curves and reconcile before
+                        // healing so the hole cuts cleanly (mirrors the
+                        // hasTrimCurves path's BuildCurves3d/SameParameter).
+                        BRepLib::BuildCurves3d(trimmedFace, data.intersectTol3d);
+                    }
                     ShapeFix_Face fix(trimmedFace);
                     fix.FixAddNaturalBoundMode() =
                         (analyticSurf && poleSurface) ? Standard_True
@@ -1025,10 +1043,20 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     fix.Perform();
                     trimmedFace = fix.Face();
                     BRepLib::SameParameter(trimmedFace, data.intersectTol3d);
-                    // Analytic faces are validity-checked so invalid singular
-                    // caps are skipped cleanly; NURBS keeps legacy behaviour.
-                    if (!analyticSurf ||
-                        BRepCheck_Analyzer(trimmedFace).IsValid()) {
+                    // Validity-check NURBS trims too (was analytic-only): a
+                    // projection that produced a malformed hole falls through to
+                    // the fallbacks instead of emitting a masked bad face.
+                    // Analytic acceptance is unchanged (it already required
+                    // validity via the !analyticSurf==false short-circuit).
+                    // NOTE: a seam-split analytic lune (sphere authored as two
+                    // half-lune faces, e.g. testSphere) whose boundary wire is
+                    // only meridians cannot close without the degenerate
+                    // pole/seam edges that authored pcurves would supply, so its
+                    // pcurve-less twin under-covers (half sphere). Spheres
+                    // authored as a single natural-bound face (testAnalyticSphere)
+                    // render correctly pcurve-less; this is an authoring-form
+                    // limitation, documented as an xfail twin.
+                    if (BRepCheck_Analyzer(trimmedFace).IsValid()) {
                         finalFace = trimmedFace;
                         haveFace = true;
                     }
