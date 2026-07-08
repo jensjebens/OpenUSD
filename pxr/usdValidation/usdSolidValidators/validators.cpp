@@ -27,6 +27,7 @@
 #include "pxr/usdValidation/usdValidation/timeRange.h"
 #include "pxr/usdValidation/usdValidation/validator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <set>
@@ -168,9 +169,25 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
                 2 * numBreps, extent.size()));
     }
 
-    // BA.010: brep:intersectTol3d values must be positive.
+    // BA.010: brep:intersectTol3d values must be positive and finite. A
+    // non-finite tolerance (NaN/Inf) silently breaks every tolerance-based rule
+    // downstream: NaN fails every comparison (so an authored NaN slips past the
+    // <= 0.0 test here), and downstream fallbacks such as BA.240's
+    // "(!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9" would carry a poisoned
+    // tolerance into endpoint/degeneracy checks. Flag the finiteness violation
+    // explicitly and separately from the non-positive case (a NaN is neither
+    // "positive" nor "<= 0.0", so the ordering test alone cannot catch it).
     for (size_t i = 0; i < tol.size(); ++i) {
-        if (tol[i] <= 0.0) {
+        if (!std::isfinite(tol[i])) {
+            errors.emplace_back(
+                UsdSolidValidationErrorNameTokens->nonFiniteIntersectTol3d,
+                UsdValidationErrorType::Error, _PrimSites(usdPrim),
+                TfStringPrintf(
+                    "BrepArray <%s>: brep:intersectTol3d[%zu] = %g is not "
+                    "finite; the intersection tolerance must be a finite "
+                    "positive number.",
+                    usdPrim.GetPath().GetText(), i, tol[i]));
+        } else if (tol[i] <= 0.0) {
             errors.emplace_back(
                 UsdSolidValidationErrorNameTokens->nonPositiveIntersectTol3d,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
@@ -1536,6 +1553,110 @@ _BrepArrayDataTypes(const UsdPrim &usdPrim,
           "BA.326", true },
         { "brep:shellPoint:point:position", SdfValueTypeNames->Point3dArray,
           "BA.327", true },
+        // BA.062: analytic geometry attribute types. A production STEP->UsdSolid
+        // conversion authored analytic axes/positions with wrong roles/precision
+        // (e.g. float3[] instead of a double-precision 3-vector) and the scalar
+        // parameters with wrong scalar types; those "type" mistakes previously
+        // sailed through with no data-type diagnostic (a wrong-typed axis reads
+        // back as an empty GfVec3d array, so only a misleading
+        // InconsistentAnalyticSurfaceCount fired, if anything). The vec3-role
+        // families (origin/center/axis/refDirection) use the same lenient
+        // point3d/vector3d/double3 policy as the position attributes above: the
+        // goal is catching float-precision or non-3-vector mistakes, not role
+        // churn. The scalar families (radii, semiAngle) must be double[].
+        //
+        // NURBS surface/edge families are intentionally omitted here: their data
+        // types are already owned by BrepArrayNurbs (_CheckNurbType, BA.471 /
+        // BA.371 / BA.416). Only authored attributes are checked (absence is the
+        // Authorship validator's job).
+        // --- analytic surfaces: plane / cylinder / cone / sphere / torus ---
+        { "brep:surface:plane:origin", SdfValueTypeNames->Point3dArray,
+          "BA.062", true },
+        { "brep:surface:plane:axis", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:plane:refDirection", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:cylinder:origin", SdfValueTypeNames->Point3dArray,
+          "BA.062", true },
+        { "brep:surface:cylinder:axis", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:cylinder:refDirection", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:cylinder:radius", SdfValueTypeNames->DoubleArray,
+          "BA.062" },
+        { "brep:surface:cone:origin", SdfValueTypeNames->Point3dArray,
+          "BA.062", true },
+        { "brep:surface:cone:axis", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:cone:refDirection", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:cone:radius", SdfValueTypeNames->DoubleArray,
+          "BA.062" },
+        { "brep:surface:cone:semiAngle", SdfValueTypeNames->DoubleArray,
+          "BA.062" },
+        { "brep:surface:sphere:center", SdfValueTypeNames->Point3dArray,
+          "BA.062", true },
+        { "brep:surface:sphere:axis", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:sphere:refDirection", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:sphere:radius", SdfValueTypeNames->DoubleArray,
+          "BA.062" },
+        { "brep:surface:torus:origin", SdfValueTypeNames->Point3dArray,
+          "BA.062", true },
+        { "brep:surface:torus:axis", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:torus:refDirection", SdfValueTypeNames->Vector3dArray,
+          "BA.062", true },
+        { "brep:surface:torus:majorRadius", SdfValueTypeNames->DoubleArray,
+          "BA.062" },
+        { "brep:surface:torus:minorRadius", SdfValueTypeNames->DoubleArray,
+          "BA.062" },
+        // --- analytic 3D curves: line / circle / ellipse (edge3d + wireEdge3d) ---
+        { "brep:edge3dLine:curve3d:line:origin", SdfValueTypeNames->Point3dArray,
+          "BA.062", true },
+        { "brep:edge3dLine:curve3d:line:direction",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:wireEdge3dLine:curve3d:line:origin",
+          SdfValueTypeNames->Point3dArray, "BA.062", true },
+        { "brep:wireEdge3dLine:curve3d:line:direction",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:edge3dCircle:curve3d:circle:center",
+          SdfValueTypeNames->Point3dArray, "BA.062", true },
+        { "brep:edge3dCircle:curve3d:circle:axis",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:edge3dCircle:curve3d:circle:refDirection",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:edge3dCircle:curve3d:circle:radius",
+          SdfValueTypeNames->DoubleArray, "BA.062" },
+        { "brep:wireEdge3dCircle:curve3d:circle:center",
+          SdfValueTypeNames->Point3dArray, "BA.062", true },
+        { "brep:wireEdge3dCircle:curve3d:circle:axis",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:wireEdge3dCircle:curve3d:circle:refDirection",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:wireEdge3dCircle:curve3d:circle:radius",
+          SdfValueTypeNames->DoubleArray, "BA.062" },
+        { "brep:edge3dEllipse:curve3d:ellipse:center",
+          SdfValueTypeNames->Point3dArray, "BA.062", true },
+        { "brep:edge3dEllipse:curve3d:ellipse:axis",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:edge3dEllipse:curve3d:ellipse:refDirection",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:edge3dEllipse:curve3d:ellipse:xRadius",
+          SdfValueTypeNames->DoubleArray, "BA.062" },
+        { "brep:edge3dEllipse:curve3d:ellipse:yRadius",
+          SdfValueTypeNames->DoubleArray, "BA.062" },
+        { "brep:wireEdge3dEllipse:curve3d:ellipse:center",
+          SdfValueTypeNames->Point3dArray, "BA.062", true },
+        { "brep:wireEdge3dEllipse:curve3d:ellipse:axis",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:wireEdge3dEllipse:curve3d:ellipse:refDirection",
+          SdfValueTypeNames->Vector3dArray, "BA.062", true },
+        { "brep:wireEdge3dEllipse:curve3d:ellipse:xRadius",
+          SdfValueTypeNames->DoubleArray, "BA.062" },
+        { "brep:wireEdge3dEllipse:curve3d:ellipse:yRadius",
+          SdfValueTypeNames->DoubleArray, "BA.062" },
     };
     // point3d / vector3d / double3 all carry GfVec3d; the SimReady producer
     // authors positions as vector3d[] while the schema declares point3d[], so
@@ -2605,7 +2726,25 @@ _BrepArraySpans(const UsdPrim &usdPrim,
         }
     }
 
-    // BA.570/571: circle/ellipse edge & wireEdge parameter spans.
+    // BA.570/571: circle/ellipse edge & wireEdge parameter spans. A periodic
+    // (circle/ellipse) 3D curve is 2*pi-periodic, so an edge's parameter span
+    // (range[max] - range[min]) must not exceed one full period plus tolerance.
+    // A real STEP->UsdSolid conversion authored truncated-pi domains that were
+    // only caught at the face (surface) level (BA.560-565); the edge-parametric
+    // span must be bounded too. Reversed ranges (max < min, hence a negative
+    // span) are owned by BrepArrayRanges (BA.235/BA.275, InvalidEdgeRangeOrder /
+    // InvalidWireEdgeRangeOrder) and are not re-flagged here.
+    //
+    // Tolerance: mirror BA.240 -- use the first authored brep:intersectTol3d if
+    // present and positive, else 1e-9, floored at the analytic domain tolerance
+    // so the bound is never tighter than the surface-domain checks above (an
+    // intersectTol3d of 1e-9 must not turn a benign floating-point overshoot
+    // into a false positive on an otherwise-conformant full-period edge).
+    const VtArray<double> spanTol
+        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
+    const double tol3d
+        = (!spanTol.empty() && spanTol[0] > 0.0) ? spanTol[0] : 1e-9;
+    const double spanAllow = std::max(tol3d, _DomainTol);
     const TfToken circle("BrepCurve3dCircleAPI");
     const TfToken ellipse("BrepCurve3dEllipseAPI");
     struct Kind {
@@ -2626,23 +2765,25 @@ _BrepArraySpans(const UsdPrim &usdPrim,
         }
         for (size_t ei = 0; ei < numE; ++ei) {
             const double span = kind.range[2 * ei + 1] - kind.range[2 * ei];
-            if (kind.curveType[ei] == circle && span > _TwoPi + _DomainTol) {
+            if (kind.curveType[ei] == circle && span > _TwoPi + spanAllow) {
                 _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->curveParamSpanExceeded,
+                     UsdSolidValidationErrorNameTokens->edgeRangeSpanExceeded,
                      usdPrim,
                      TfStringPrintf("[BA.570] BrepArray <%s>: circle %s %zu "
-                                    "parameter span %g exceeds 2*pi.",
+                                    "parameter span %g exceeds one period "
+                                    "(2*pi) within tolerance %g.",
                                     usdPrim.GetPath().GetText(), kind.label, ei,
-                                    span));
+                                    span, spanAllow));
             } else if (kind.curveType[ei] == ellipse
-                       && span > _TwoPi + _DomainTol) {
+                       && span > _TwoPi + spanAllow) {
                 _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->curveParamSpanExceeded,
+                     UsdSolidValidationErrorNameTokens->edgeRangeSpanExceeded,
                      usdPrim,
                      TfStringPrintf("[BA.571] BrepArray <%s>: ellipse %s %zu "
-                                    "parameter span %g exceeds 2*pi.",
+                                    "parameter span %g exceeds one period "
+                                    "(2*pi) within tolerance %g.",
                                     usdPrim.GetPath().GetText(), kind.label, ei,
-                                    span));
+                                    span, spanAllow));
             }
         }
     }

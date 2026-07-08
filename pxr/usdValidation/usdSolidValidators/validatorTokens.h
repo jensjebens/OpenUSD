@@ -49,6 +49,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((missingBrepAttributes, "MissingBrepAttributes"))                         \
     ((inconsistentBrepArraySizes, "InconsistentBrepArraySizes"))               \
     ((nonPositiveIntersectTol3d, "NonPositiveIntersectTol3d"))                 \
+    ((nonFiniteIntersectTol3d, "NonFiniteIntersectTol3d"))                     \
     ((invalidExtentOrder, "InvalidExtentOrder"))                               \
     /* BrepArrayTopology */                                                    \
     ((inconsistentRegionArraySizes, "InconsistentRegionArraySizes"))           \
@@ -111,6 +112,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((surfaceDomainSpanExceeded, "SurfaceDomainSpanExceeded"))                 \
     ((sphereVDomainOutOfBounds, "SphereVDomainOutOfBounds"))                   \
     ((curveParamSpanExceeded, "CurveParamSpanExceeded"))                       \
+    ((edgeRangeSpanExceeded, "EdgeRangeSpanExceeded"))                         \
     /* BrepArrayAnalyticCurves */                                              \
     ((analyticCurveArraySizeMismatch, "AnalyticCurveArraySizeMismatch"))       \
     ((analyticCurveNonPositiveRadius, "AnalyticCurveNonPositiveRadius"))       \

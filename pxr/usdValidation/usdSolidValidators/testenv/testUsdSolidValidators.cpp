@@ -324,6 +324,67 @@ def Xform "World"
         uniform int2[] edge:vertexIndices = [(1, 0), (1, 2)]
         uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
     }
+
+    # BA.062 (BrepArrayDataTypes): analytic geometry attributes authored with
+    # the wrong value type. A production STEP->UsdSolid conversion authored
+    # analytic axes/positions with wrong precision/role and scalar parameters
+    # with the wrong scalar type; those "type" mistakes previously produced no
+    # data-type diagnostic. Here the cylinder axis is a float3[] (not a
+    # double-precision 3-vector) and the radius is a float[] (not double[]).
+    # BrepArrayDataTypes must flag both.
+    def BrepArray "BadAnalyticTypes"
+    {
+        uniform token[] face:surfaceType = ["BrepSurfaceCylinderAPI"]
+        uniform point3d[] brep:surface:cylinder:origin = [(0, 0, 0)]
+        uniform float3[] brep:surface:cylinder:axis = [(0, 0, 1)]
+        uniform vector3d[] brep:surface:cylinder:refDirection = [(1, 0, 0)]
+        uniform float[] brep:surface:cylinder:radius = [3.0]
+    }
+
+    # The SAME cylinder authored with conformant types, including the
+    # point3d/vector3d role-aliases the lenient policy accepts. BrepArrayDataTypes
+    # must NOT flag any of these.
+    def BrepArray "GoodAnalyticTypes"
+    {
+        uniform token[] face:surfaceType = ["BrepSurfaceCylinderAPI"]
+        uniform point3d[] brep:surface:cylinder:origin = [(0, 0, 0)]
+        uniform vector3d[] brep:surface:cylinder:axis = [(0, 0, 1)]
+        uniform vector3d[] brep:surface:cylinder:refDirection = [(1, 0, 0)]
+        uniform double[] brep:surface:cylinder:radius = [3.0]
+    }
+
+    # BA.570 (BrepArraySpans, EdgeRangeSpanExceeded): a periodic circle edge
+    # whose parameter span (0 .. 2*pi + 0.1) exceeds one full period. Edge 1 is a
+    # healthy quarter-circle. Only edge 0 must be flagged.
+    def BrepArray "BadEdgeRangeSpan"
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
+        uniform double[] edge:range = [0, 6.383185307179586, 0, 1.5707963267948966]
+    }
+
+    # The SAME two circle edges authored honestly: edge 0 is a full circle
+    # (span exactly 2*pi) and edge 1 a quarter arc. Neither exceeds a period, so
+    # BrepArraySpans must NOT flag EdgeRangeSpanExceeded.
+    def BrepArray "GoodEdgeRangeSpan"
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
+        uniform double[] edge:range = [0, 6.283185307179586, 0, 1.5707963267948966]
+    }
+
+    # BA.010 (BrepArrayStructure, NonFiniteIntersectTol3d): a non-finite
+    # (NaN via 0/0... here authored as inf) intersection tolerance. A non-finite
+    # tolerance silently poisons every tolerance-based rule downstream; it is
+    # neither "positive" nor "<= 0.0", so the ordering check alone cannot catch
+    # it. BrepArrayStructure must flag NonFiniteIntersectTol3d, and must NOT
+    # additionally report NonPositiveIntersectTol3d for the same entry.
+    def BrepArray "NonFiniteTol"
+    {
+        uniform double[] brep:intersectTol3d = [inf]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
+        uniform uint[] brep:regionCount = [1]
+    }
 }
 )usda";
 
@@ -396,6 +457,102 @@ TestBrepArrayStructure()
         const UsdValidationErrorVector errors = validator->Validate(prim);
         TF_AXIOM(_HasError(errors, ".MissingBrepAttributes"));
         TF_AXIOM(_HasError(errors, ".InconsistentBrepArraySizes"));
+    }
+}
+
+static void
+TestBrepArrayStructureNonFiniteTol()
+{
+    // BA.010: a non-finite brep:intersectTol3d must be flagged with the
+    // NonFiniteIntersectTol3d error (and NOT double-flagged as non-positive),
+    // while a valid finite positive tolerance stays clean.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayStructure);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+
+    {
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/NonFiniteTol"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_HasError(errors, ".NonFiniteIntersectTol3d"));
+        // A non-finite value must not ALSO be reported as non-positive.
+        TF_AXIOM(!_HasError(errors, ".NonPositiveIntersectTol3d"));
+    }
+    {
+        // Positive case: GoodCylinder authors no intersectTol3d, and the
+        // BadStructure prim's -1.0 tolerance is the non-positive (not
+        // non-finite) case, so it must NOT trip the finiteness check.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/BadStructure"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(!_HasError(errors, ".NonFiniteIntersectTol3d"));
+        TF_AXIOM(_HasError(errors, ".NonPositiveIntersectTol3d"));
+    }
+}
+
+static void
+TestBrepArrayDataTypes()
+{
+    // BA.062: analytic geometry attribute types. A wrong-precision axis
+    // (float3[]) and a wrong scalar radius (float[]) must be flagged with
+    // InvalidAttributeDataType; the conformant cylinder (using the accepted
+    // point3d/vector3d role-aliases and double[]) must stay clean.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayDataTypes);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+
+    {
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/BadAnalyticTypes"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        // The float3[] axis and the float[] radius are both wrong.
+        TF_AXIOM(_CountError(errors, ".InvalidAttributeDataType") == 2);
+    }
+    {
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/GoodAnalyticTypes"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(!_HasError(errors, ".InvalidAttributeDataType"));
+    }
+}
+
+static void
+TestBrepArraySpans()
+{
+    // BA.570/571: a periodic circle/ellipse edge whose parameter span exceeds
+    // one period (2*pi) within tolerance must be flagged EdgeRangeSpanExceeded;
+    // a full-period (exactly 2*pi) edge must stay clean.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArraySpans);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+
+    {
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/BadEdgeRangeSpan"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        // Exactly the over-period edge 0, not the quarter-arc edge 1.
+        TF_AXIOM(_CountError(errors, ".EdgeRangeSpanExceeded") == 1);
+    }
+    {
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/GoodEdgeRangeSpan"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(!_HasError(errors, ".EdgeRangeSpanExceeded"));
     }
 }
 
@@ -682,6 +839,9 @@ main()
 {
     TestRegistration();
     TestBrepArrayStructure();
+    TestBrepArrayStructureNonFiniteTol();
+    TestBrepArrayDataTypes();
+    TestBrepArraySpans();
     TestBrepArrayTopology();
     TestBrepArrayTokenValues();
     TestBrepArrayRanges();

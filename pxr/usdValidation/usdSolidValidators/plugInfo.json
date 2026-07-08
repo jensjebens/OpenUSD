@@ -4,7 +4,7 @@
             "Info": {
                 "Validators": {
                     "BrepArrayStructure": {
-                        "doc": "Validates Brep-level attributes of a UsdSolid BrepArray: required attributes are authored, the brep:intersectTol3d, brep:regionCount and brep:extent array sizes are mutually consistent with the number of Breps, intersectTol3d values are positive, and each brep:extent bounding box is min<=max ordered.",
+                        "doc": "Validates Brep-level attributes of a UsdSolid BrepArray: required attributes are authored, the brep:intersectTol3d, brep:regionCount and brep:extent array sizes are mutually consistent with the number of Breps, intersectTol3d values are finite and positive (a non-finite NaN/Inf tolerance would silently poison every tolerance-based downstream rule), and each brep:extent bounding box is min<=max ordered.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -67,7 +67,7 @@
                         ]
                     },
                     "BrepArrayDataTypes": {
-                        "doc": "Validates that authored attributes of a UsdSolid BrepArray (including the BrepPointAPI vertexPoint/shellPoint position attributes) use the correct USD value types.",
+                        "doc": "Validates that authored attributes of a UsdSolid BrepArray use the correct USD value types. Covers the flat-packed topology arrays, the BrepPointAPI vertexPoint/shellPoint positions, and the analytic geometry families (plane/cylinder/cone/sphere/torus surfaces and line/circle/ellipse 3D curves): origin/center/axis/refDirection accept the point3d/vector3d/double3 role-aliases (flagging float-precision or non-3-vector mistakes), while radii and semiAngle must be double[]. NURBS families are validated by BrepArrayNurbs, not here.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -112,7 +112,7 @@
                         ]
                     },
                     "BrepArraySpans": {
-                        "doc": "Validates parametric-domain limits on analytic geometry of a UsdSolid BrepArray: periodic surface/curve domains (sphere/cylinder/cone/torus faces, circle/ellipse edges) span at most 2*pi, and sphere latitude lies within [-pi/2, pi/2].",
+                        "doc": "Validates parametric-domain limits on analytic geometry of a UsdSolid BrepArray: periodic surface/curve domains (sphere/cylinder/cone/torus faces, circle/ellipse edge and wireEdge parameter ranges) span at most one period (2*pi), and sphere latitude lies within [-pi/2, pi/2]. The periodic edge-range span bound is tolerance-aware, using the authored brep:intersectTol3d (BA.240 fallback) floored at the analytic domain tolerance.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
