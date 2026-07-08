@@ -124,6 +124,35 @@ EXPECTED_VERT_COUNTS = {
     # 7.8.1.
     'testFullPeriodTorusSeamSplit.usda': 562,
     'testFullPeriodSphereBandSeamSplit.usda': 196,
+    # testMixedSurfaces is a capped cylinder (r=3, z in [0,5]) whose two lateral
+    # walls are analytic half-cylinders (BrepSurfaceCylinderAPI) and whose two
+    # caps are NURBS planar patches (BrepSurfaceNurbAPI), with the
+    # face:surfaceType families INTERLEAVED [nurb, cylinder, nurb, cylinder]. It
+    # pins the mixed-family surface-array PACKING: the builder indexes each
+    # per-family array (surface:nurb:*, surface:cylinder:*) by a face's ordinal
+    # WITHIN its family, so a reader that walks the NURBS arrays with a single
+    # all-NURBS cursor (the class that failed a real-CAD prim with 9 NURBS among
+    # 581 analytic faces in the SMLib reader) grabs the wrong slot and mis-builds
+    # the solid. Correct packing meshes both walls as r=3 half-cylinders and both
+    # caps as z=0/z=5 patches -> this deterministic vert count, a positive signed
+    # volume, and an exact [-3,3]x[-3,3]x[0,5] bbox. NOTE: the NURBS caps render
+    # UNTRIMMED (full 6x6 squares) because of a separate hdOcct gap -- a
+    # single-loop NURBS face trimmed only by analytic 3D edges (no authored
+    # curveUv) is never wire-trimmed (brepBuilder.cpp attemptTrim = analyticSurf
+    # || numLoops>1); see test_MixedSurfaces_CapsTrimmed (expectedFailure) and
+    # the fixture header. Re-baselined Linux GCC 13 + OCCT 7.8.1.
+    'testMixedSurfaces.usda': 64,
+    # testMixedCurvesWithPcurves is one NURBS planar sheet whose single outer
+    # trim loop mixes CURVE families with AUTHORED pcurves: two lines
+    # (BrepCurve3dLineAPI), one NURBS edge (BrepCurve3dNurbAPI), one circle arc
+    # (BrepCurve3dCircleAPI). It exercises the hasTrimCurves (pcurve) branch with
+    # analytic 3D edges present alongside a NURBS edge -- the mixed edge-family
+    # packing whose per-edgeuse fallback (edges[] built NURBS-only) would drop an
+    # analytic edge if a pcurve failed (documented in brepBuilder.cpp; not
+    # triggered here because every pcurve is valid). Region = rectangle
+    # [0,4]x[0,3] plus a left semicircular bulge; trimmed area ~15.53.
+    # Re-baselined Linux GCC 13 + OCCT 7.8.1.
+    'testMixedCurvesWithPcurves.usda': 18,
 }
 
 PRIM_PATHS = {
@@ -155,6 +184,8 @@ PRIM_PATHS = {
     'testFullPeriodTorusSeamSplit.usda': '/World/FullTorus',
     'testFullPeriodSphereBand.usda': '/World/SphereBand',
     'testFullPeriodSphereBandSeamSplit.usda': '/World/SphereBand',
+    'testMixedSurfaces.usda': '/World/MixedSurfaces',
+    'testMixedCurvesWithPcurves.usda': '/World/MixedCurves',
 }
 
 # Closed solids: signed volume must be positive (outward winding).
@@ -454,6 +485,17 @@ def _planar_area_at_z(stage, z, tol=1e-4):
                           ux * vy - uy * vx)
             area += 0.5 * math.sqrt(cx * cx + cy * cy + cz * cz)
     return area
+
+
+def _mesh_bbox(stage):
+    """Axis-aligned bbox of all mesh points: ((xmin,ymin,zmin),(xmax,...))."""
+    xs, ys, zs = [], [], []
+    for mesh in _meshes(stage):
+        for p in mesh.GetPointsAttr().Get():
+            xs.append(p[0]); ys.append(p[1]); zs.append(p[2])
+    if not xs:
+        return None
+    return ((min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs)))
 
 
 def _total_surface_area(stage):
@@ -764,6 +806,100 @@ class TestAnalyticSurfaceArea(unittest.TestCase):
         # face:range fallback. Distinct from testFullSphere (pole-touching). Pins
         # the fallback as CORRECT (meshed area matches the analytic band).
         self._check_area('testFullPeriodSphereBand.usda')
+
+
+class TestMixedFamilyPacking(unittest.TestCase):
+    """A single prim mixing analytic and NURBS SURFACE families packs correctly.
+
+    testMixedSurfaces is a capped cylinder (r=3, z in [0,5]) whose two lateral
+    walls are analytic half-cylinders (BrepSurfaceCylinderAPI) and whose two
+    caps are NURBS planar patches (BrepSurfaceNurbAPI). The face:surfaceType
+    families are INTERLEAVED [nurb, cylinder, nurb, cylinder], so the per-family
+    surface arrays (surface:nurb:* holds the caps at family-ordinals 0,1;
+    surface:cylinder:* holds the walls at ordinals 0,1) can only be resolved by
+    indexing each face by its ordinal WITHIN its family. A consumer that walks
+    the NURBS arrays with one all-NURBS positional cursor -- the packing class
+    that broke a real-CAD prim carrying 9 NURBS among 581 analytic faces in the
+    SMLib USD reader (with an intermittent access violation) -- reads the wall
+    slot for the top cap and mis-builds the solid. Correct packing meshes both
+    walls as r=3 half-cylinders and both caps at z=0/z=5: a positive signed
+    volume and an exact [-3,3]x[-3,3]x[0,5] bbox. Geometry/packing-based; the
+    vert-count regression is pinned in EXPECTED_VERT_COUNTS.
+    """
+
+    def test_MixedSurfaces_Packing(self):
+        stage = _tessellate_fixture('testMixedSurfaces.usda')
+        meshes = _meshes(stage)
+        self.assertTrue(meshes, "testMixedSurfaces: no meshes produced")
+        # Positive signed volume: a mis-packed (naive all-NURBS cursor) solid
+        # either fails to build the wall faces or inverts, collapsing this.
+        for mesh in meshes:
+            vol = _signed_volume(mesh.GetPointsAttr().Get(),
+                                 mesh.GetFaceVertexCountsAttr().Get(),
+                                 mesh.GetFaceVertexIndicesAttr().Get())
+            self.assertGreater(
+                vol, 0.0,
+                f"testMixedSurfaces: signed volume {vol} <= 0 "
+                f"(mixed-family surface packing mis-resolved)")
+        # Exact cylinder bbox: the walls (cylinder family) drive x,y = +/-3 and
+        # the caps (NURBS family) drive z = 0 and 5. A cursor that read a
+        # cylinder's params into a NURBS cap slot (or vice versa) would move
+        # these bounds.
+        bbox = _mesh_bbox(stage)
+        self.assertIsNotNone(bbox, "testMixedSurfaces: empty mesh")
+        (xmin, ymin, zmin), (xmax, ymax, zmax) = bbox
+        for got, exp, name in ((xmin, -3.0, 'xmin'), (xmax, 3.0, 'xmax'),
+                               (ymin, -3.0, 'ymin'), (ymax, 3.0, 'ymax'),
+                               (zmin, 0.0, 'zmin'), (zmax, 5.0, 'zmax')):
+            self.assertAlmostEqual(
+                got, exp, delta=0.05,
+                msg=f"testMixedSurfaces: {name} {got:.4f} != {exp:.1f} "
+                    f"(mixed-family surface packing mis-resolved)")
+
+    def test_MixedCurvesWithPcurves_Area(self):
+        # One NURBS sheet trimmed by a loop mixing line/NURBS/circle 3D edges,
+        # each with an authored pcurve. The pcurve (hasTrimCurves) branch builds
+        # every wire edge from its 2D pcurve, so the mixed 3D-edge families never
+        # reach the NURBS-only edges[] fallback -- the sheet meshes to its exact
+        # trimmed region: rectangle [0,4]x[0,3] (area 12) plus the left
+        # semicircular bulge (pi*1.5^2/2). Geometry-based, OCCT-meshing
+        # independent. A regression that dropped the analytic (line/circle) edges
+        # would shrink or open the region and move this area.
+        stage = _tessellate_fixture('testMixedCurvesWithPcurves.usda')
+        expected = 12.0 + 0.5 * math.pi * 1.5 * 1.5
+        area = _total_surface_area(stage)
+        self.assertAlmostEqual(
+            area, expected, delta=0.2,
+            msg=f"mixed-curve sheet area {area:.3f} != {expected:.3f} "
+                f"(a mixed 3D-edge family was dropped?)")
+
+    @unittest.expectedFailure
+    def test_MixedSurfaces_CapsTrimmed(self):
+        # KNOWN hdOcct GAP (mirror of the pcurve-branch edges[] gap): a
+        # single-loop NURBS face trimmed only by analytic 3D edges (no authored
+        # curveUv) is never wire-trimmed. brepBuilder.cpp gates the analytic
+        # derive-trim path on `attemptTrim = analyticSurf || numLoops > 1`, so a
+        # single-loop NURBS cap bounded by a circle edge falls straight to the
+        # untrimmed natural-bounds fallback and renders as its full 6x6 control
+        # square (HDOCCT_TRIM_HIST shows nurbs -> rangeFB). The two analytic
+        # cylinder walls trim fine (trimOK), so this fixture isolates exactly the
+        # NURBS-surface + analytic-3D-edge derive case. Correct behavior would
+        # trim each cap to the r=3 disk and mesh a watertight solid of volume
+        # pi*r^2*L = pi*9*5 = ~141.37; today the untrimmed square caps leave a
+        # non-watertight mesh whose divergence-theorem volume reads ~33.3.
+        # Flips to XPASS if the derive path learns to wire-trim single-loop NURBS
+        # faces, prompting a baseline + EXPECTED_VERT_COUNTS update. Fix is a
+        # design change to the NURBS trim routing (affects the pcurve-less
+        # derivedTrims twins), not a surgical one -- tracked as a finding, not
+        # patched here.
+        stage = _tessellate_fixture('testMixedSurfaces.usda')
+        for mesh in _meshes(stage):
+            vol = _signed_volume(mesh.GetPointsAttr().Get(),
+                                 mesh.GetFaceVertexCountsAttr().Get(),
+                                 mesh.GetFaceVertexIndicesAttr().Get())
+            self.assertAlmostEqual(
+                vol, math.pi * 9.0 * 5.0, delta=3.0,
+                msg=f"trimmed capped-cylinder volume {vol:.2f} != ~141.37")
 
 
 if __name__ == '__main__':

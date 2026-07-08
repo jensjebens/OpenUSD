@@ -1459,6 +1459,26 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         // ---- end report ------------------------------------------------------
     } else {
         // Full topology path with pcurves available
+        //
+        // LATENT GAP (mixed 3D-edge families): edges[] below is sized and packed
+        // ONLY from the NURBS 3D-curve strata (edgeCurveVertexCount), so its
+        // index space is "NURBS edges in order", NOT the global edge index. Every
+        // wire is normally built from the authored 2D pcurve (the useTrim path
+        // ~40 lines down), so this only matters in the per-edgeuse FALLBACK that
+        // fires when a pcurve is absent or its MakeEdge fails: that fallback reads
+        // edges[edgeIdx] with a GLOBAL edgeIdx (edgeuse:edgeIndex). If any edge in
+        // the prim is ANALYTIC (BrepCurve3dLineAPI / BrepCurve3dCircleAPI /
+        // BrepCurve3dEllipseAPI), two things break together -- the global index no
+        // longer aligns with the NURBS-only edges[] packing, AND analytic edges
+        // have no edges[] entry at all -- so the fallback yields a null/mismatched
+        // edge and that edgeuse is silently dropped from the wire (face lost).
+        // The !hasTrimCurves branch above builds edges per-family with separate
+        // line/circle/ellipse/nurb cursors and dispatches on edge:curveType; this
+        // branch does not. testMixedCurvesWithPcurves.usda pins the healthy case
+        // (analytic + NURBS 3D edges with VALID pcurves -> fallback never taken);
+        // the fix, if the fallback ever needs to serve analytic edges, is to build
+        // edges[] over ALL edges dispatched on edge:curveType (mirroring the
+        // !hasTrimCurves per-family builder) and index it by global edge id.
         size_t numEdges = data.edgeCurveVertexCount.size();
         size_t edgeCPOffset = 0;
         size_t edgeKnotOffset = 0;
