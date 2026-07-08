@@ -6,6 +6,10 @@
 
 #include "brepBuilder.h"
 
+// BRepTools::UVBounds — used by the ring-artifact guard (debt register row 2.2)
+// to read a trimmed face's actual parametric span.
+#include <BRepTools.hxx>
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -970,7 +974,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         enum { FS_EDGE3D=0, FS_PROJNULL, FS_WIRE, FS_MKFACE_OUTER,
                FS_MKFACE_INNER, FS_ANALYZER, FS_FALLBACK_PARAM,
                FS_FALLBACK_PARAM_OK, FS_FALLBACK_RANGE, FS_SKIP, FS_TRIM_OK,
-               FS_RANGE_DISCARD, FS_CHORD, FS_NULL_SURF,
+               FS_RANGE_DISCARD, FS_CHORD, FS_NULL_SURF, FS_RING_GUARD,
                FS_N };
         // Accumulate across all Breps of the whole build.
         static long _hist[ST_N][FS_N] = {{0}};
@@ -1483,10 +1487,69 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     // authored as a single natural-bound face (testAnalyticSphere)
                     // render correctly pcurve-less; this is an authoring-form
                     // limitation, documented as an xfail twin.
+                    bool _ringReject = false;
                     if (BRepCheck_Analyzer(trimmedFace).IsValid()) {
-                        finalFace = trimmedFace;
-                        haveFace = true;
-                        HIST(_st, FS_TRIM_OK);
+                        // Ring-artifact guard (debt register row 2.2 / KUKA
+                        // fillets). A trimmed analytic face on a PERIODIC surface
+                        // (cone u / cylinder u / sphere / torus u+v) can be
+                        // accepted by the analyzer yet cover the FULL 2*pi period
+                        // when the authored window is only a thin sliver -- e.g.
+                        // KUKA body_5 face 3116: a torus fillet with authored
+                        // face:range u=[0.121,0.130] (uspan 0.009 rad) whose inner
+                        // loop is a single full-circle edge [0,2*pi]; MakeFace then
+                        // builds the whole torus revolution and the mesh renders a
+                        // huge ring 3456 mm beyond brep:extent. Detect a face whose
+                        // accepted UV span in a periodic direction reaches nearly
+                        // the full period (> 5 rad) while the authored window there
+                        // is a thin sliver (< 0.5 rad): a >10x, up-to-full-period
+                        // over-cover no legitimate trim produces. Reject it so the
+                        // parametric face:range fallback below rebuilds the tight
+                        // authored window. Verified: silent on the whole clean
+                        // corpus (toolbox has zero such faces -> committed-fixture
+                        // numbers unchanged), and on KUKA it removes the rings on
+                        // every affected body with none made worse (body_5
+                        // out-of-extent 509 -> 8, body_3 798 -> 0, body_2
+                        // 781 -> 2, all back-to-back deterministic).
+                        if (analyticSurf &&
+                            2*faceIdx+1 < data.faceRange.size()) {
+                            Standard_Real fu0,fu1,fv0,fv1;
+                            BRepTools::UVBounds(trimmedFace, fu0,fu1,fv0,fv1);
+                            const double au = data.faceRange[2*faceIdx+1][0] -
+                                              data.faceRange[2*faceIdx][0];
+                            const double av = data.faceRange[2*faceIdx+1][1] -
+                                              data.faceRange[2*faceIdx][1];
+                            const double slivTol = 0.5;   // thin-authored (rad)
+                            const double fullTol = 5.0;   // near-full period (rad)
+                            const bool ringU = surface->IsUPeriodic() &&
+                                au < slivTol && (fu1-fu0) > fullTol;
+                            const bool ringV = surface->IsVPeriodic() &&
+                                av < slivTol && (fv1-fv0) > fullTol;
+                            if (ringU || ringV) {
+                                _ringReject = true;
+                                HIST(_st, FS_RING_GUARD);
+                                static std::atomic<bool> _warnedRing{false};
+                                if (!_warnedRing.exchange(true)) {
+                                    TF_WARN("hdOcct: Brep %zu face %zu: trimmed "
+                                      "analytic face covers the full periodic "
+                                      "revolution (%.2f rad) though its authored "
+                                      "face:range is a thin sliver (%.4f rad) -- "
+                                      "the wire wrapped the whole surface. "
+                                      "Rejecting the over-covered trim; the "
+                                      "parametric face:range fallback rebuilds the "
+                                      "authored window (debt register row 2.2). "
+                                      "Further occurrences counted in "
+                                      "HDOCCT_TRIM_HIST ringGuard.",
+                                      brepIndex, faceIdx,
+                                      ringU ? (fu1-fu0) : (fv1-fv0),
+                                      ringU ? au : av);
+                                }
+                            }
+                        }
+                        if (!_ringReject) {
+                            finalFace = trimmedFace;
+                            haveFace = true;
+                            HIST(_st, FS_TRIM_OK);
+                        }
                     }
                     // Only tally the miss once both passes are exhausted.
                     if (!haveFace && trimPass == nTrimPasses - 1) {
@@ -1691,10 +1754,11 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
               "\n===== HDOCCT ANALYTIC TRIM HISTOGRAM (!hasTrimCurves) =====\n");
             fprintf(stderr,
                 "%-9s %6s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s "
-                "%8s\n",
+                "%8s %8s\n",
                 "surface","seen",
                 "trimOK","parmOK","parmFB","rangeFB","skip","projN","wireX",
-                "mkfOut","mkfIn","analyz","rngDisc","chord","nullSrf");
+                "mkfOut","mkfIn","analyz","rngDisc","chord","nullSrf",
+                "ringGrd");
             long tot[FS_N] = {0}; long totSeen = 0;
             for (int s = 0; s < ST_N; ++s) {
                 if (_faceSeen[s] == 0 &&
@@ -1702,7 +1766,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     _hist[s][FS_NULL_SURF]==0) continue;
                 fprintf(stderr,
                   "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld "
-                  "%8ld %8ld %8ld %8ld\n",
+                  "%8ld %8ld %8ld %8ld %8ld\n",
                   _stName[s], _faceSeen[s],
                   _hist[s][FS_TRIM_OK], _hist[s][FS_FALLBACK_PARAM_OK],
                   _hist[s][FS_FALLBACK_PARAM],
@@ -1711,19 +1775,20 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                   _hist[s][FS_MKFACE_OUTER], _hist[s][FS_MKFACE_INNER],
                   _hist[s][FS_ANALYZER],
                   _hist[s][FS_RANGE_DISCARD], _hist[s][FS_CHORD],
-                  _hist[s][FS_NULL_SURF]);
+                  _hist[s][FS_NULL_SURF], _hist[s][FS_RING_GUARD]);
                 totSeen += _faceSeen[s];
                 for (int f = 0; f < FS_N; ++f) tot[f] += _hist[s][f];
             }
             fprintf(stderr,
               "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld "
-              "%8ld %8ld %8ld\n",
+              "%8ld %8ld %8ld %8ld\n",
               "TOTAL", totSeen,
               tot[FS_TRIM_OK], tot[FS_FALLBACK_PARAM_OK], tot[FS_FALLBACK_PARAM],
               tot[FS_FALLBACK_RANGE],
               tot[FS_SKIP], tot[FS_PROJNULL], tot[FS_WIRE],
               tot[FS_MKFACE_OUTER], tot[FS_MKFACE_INNER], tot[FS_ANALYZER],
-              tot[FS_RANGE_DISCARD], tot[FS_CHORD], tot[FS_NULL_SURF]);
+              tot[FS_RANGE_DISCARD], tot[FS_CHORD], tot[FS_NULL_SURF],
+              tot[FS_RING_GUARD]);
             fprintf(stderr,
               "  legend: trimOK=wire-trim accepted; parmOK=full-window analytic "
               "face:range param route (closed surface, correct by design); "
@@ -1734,7 +1799,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
               "rngDisc=analytic edge lost its authored range (verts-only "
               "rescue, row 6); chord=curved edge replaced by a straight chord "
               "(row 7); nullSrf=face skipped, per-family surface array "
-              "under-packed (row 18)\n");
+              "under-packed (row 18); ringGrd=full-period analytic trim rejected "
+              "(thin authored window over-covered the whole revolution, row 2.2)"
+              "\n");
             fprintf(stderr,
               "===========================================================\n\n");
         }
