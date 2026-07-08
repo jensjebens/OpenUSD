@@ -55,7 +55,12 @@ class Brep:
     def usda(self, name):
         L=["#usda 1.0",""]
         L.append('def Xform "World"\n(\n    defaultPrim = "World"\n    upAxis = "Y"\n)\n{')
-        L.append(f'    def BrepArray "{name}"\n    {{')
+        L.append(f'    def BrepArray "{name}" (')
+        L.append('        prepend apiSchemas = ["BrepPointAPI:vertexPoint", '
+                 '"BrepCurve3dNurbAPI:edge3dNurb", "BrepCurveUvNurbAPI", '
+                 '"BrepSurfaceNurbAPI"]')
+        L.append('    )')
+        L.append('    {')
         a=L.append
         def arr(t,n,vals): a(f"        uniform {t}[] {n} = [{', '.join(vals)}]")
         def pts(ps): return [f"({fmt(p[0])}, {fmt(p[1])}, {fmt(p[2])})" for p in ps]
@@ -64,39 +69,63 @@ class Brep:
         def toks(xs): return [f'"{x}"' for x in xs]
         def i2(xs): return [f"({a_},{b_})" for (a_,b_) in xs]
 
-        # Void-included form (issue #68): infinite void region first, then the
-        # solid; faceuses grouped by shell with an explicit faceuse:faceIndex.
-        # self.faceuses holds interleaved [outward, complement] pairs per face.
+        # A depressed plane is an open sheet (a plane with a cylindrical
+        # pocket), not a closed solid, so it is modelled as a SINGLE voidRegion
+        # whose one shell holds every faceuse. Labelling any shell a solidRegion
+        # would make BrepArraySolidClosure (BA.590) flag the sheet's single-use
+        # boundary edges as an open solid. self.faceuses holds interleaved
+        # [outward, complement] pairs per face; both orientations of every face
+        # live in the one void shell (faceuse:faceIndex repeats the face list).
         nF=len(self.faceuses)//2
         outward=[self.faceuses[2*i]["o"] for i in range(nF)]
         complement=[self.faceuses[2*i+1]["o"] for i in range(nF)]
-        arr("uint","brep:regionCount",["2"])
-        arr("uint","region:shellCount",["1","1"])
-        arr("token","region:type",toks(["voidRegion","solidRegion"]))
-        arr("uint","shell:faceuseCount",[str(nF),str(nF)])
-        arr("uint","shell:wireEdgeCount",["0","0"])
-        arr("token","shell:pointType",toks(["none","none"]))
+        # brep-level scalars (one Brep). extent = geometric bbox of the vertices.
+        xs=[p[0] for p in self.verts]; ys=[p[1] for p in self.verts]
+        zs=[p[2] for p in self.verts]
+        ext=[(min(xs),min(ys),min(zs)),(max(xs),max(ys),max(zs))]
+        arr("double3","brep:extent",pts(ext))
+        arr("double","brep:intersectTol3d",["0.000001"])
+        arr("uint","brep:regionCount",["1"])
+        arr("uint","region:shellCount",["1"])
+        arr("token","region:type",toks(["voidRegion"]))
+        arr("uint","shell:faceuseCount",[str(2*nF)])
+        arr("uint","shell:wireEdgeCount",["0"])
+        arr("token","shell:pointType",toks(["none"]))
         arr("uint","faceuse:faceIndex",nums(list(range(nF))+list(range(nF))))
         arr("token","faceuse:orientationType",toks(outward+complement))
         arr("uint","face:loopCount",nums([f["lc"] for f in self.faces]))
         arr("token","face:surfaceType",toks(["BrepSurfaceNurbAPI"]*len(self.faces)))
-        # face:range = 2 double2 per face (uMin,uMax),(vMin,vMax)
+        arr("token","face:trimType",toks(["general"]*len(self.faces)))
+        # face:range = 2 double2 per face: (uMin,vMin),(uMax,vMax) -- the pair
+        # ordering BA.155/160 (BrepArrayRanges) checks for non-degeneracy.
         fr=[]
         for f in self.faces:
             (u0,u1),(v0,v1)=f["range"]
-            fr+= [f"({fmt(u0)}, {fmt(u1)})", f"({fmt(v0)}, {fmt(v1)})"]
+            fr+= [f"({fmt(u0)}, {fmt(v0)})", f"({fmt(u1)}, {fmt(v1)})"]
         arr("double2","face:range",fr)
         arr("uint","loop:edgeuseCount",nums(self.loops))
         arr("uint","loop:vertexIndex",["0"]*len(self.loops))
         arr("uint","edgeuse:edgeIndex",nums([e["edge"] for e in self.edgeuses]))
         arr("uint","edgeuse:nextRadialEUIndex",nums([e["next"] for e in self.edgeuses]))
         arr("token","edgeuse:orientationType",toks([e["o"] for e in self.edgeuses]))
-        arr("token","edgeuse:thisRadialEntryType",toks([e["entry"] for e in self.edgeuses]))
+        # thisRadialEntryType: the first edgeuse to reference an edge enters the
+        # radial ring at "topEntry"; its twin enters at "bottomEntry". Single-use
+        # boundary edges stay "topEntry". (Per-edgeuse e["entry"] documents intent.)
+        _seen=set(); _entry=[]
+        for e in self.edgeuses:
+            _entry.append("bottomEntry" if e["edge"] in _seen else "topEntry")
+            _seen.add(e["edge"])
+        arr("token","edgeuse:thisRadialEntryType",toks(_entry))
         arr("int2","edge:vertexIndices",i2([e["v"] for e in self.edges]))
         arr("token","edge:curveType",toks(["BrepCurve3dNurbAPI"]*len(self.edges)))
         er=[]
         for e in self.edges: er+= [fmt(e["range"][0]), fmt(e["range"][1])]
         arr("double","edge:range",er)
+        # No wire (dangling) edges on this sheet; author the arrays empty so the
+        # wireEdge family is present and self-consistent (sum(shell:wireEdgeCount)=0).
+        arr("token","wireEdge:curveType",[])
+        arr("int2","wireEdge:vertexIndices",[])
+        arr("double","wireEdge:range",[])
         arr("token","vertex:pointType",toks(["BrepPointAPI"]*len(self.verts)))
         arr("point3d","brep:vertexPoint:point:position",pts(self.verts))
 
