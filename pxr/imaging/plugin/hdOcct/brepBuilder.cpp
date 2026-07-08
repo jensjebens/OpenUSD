@@ -1427,6 +1427,22 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         (analyticSurf && poleSurface) ? Standard_True
                                                       : Standard_False;
                     fix.FixWireMode() = Standard_True;
+                    // Disable ShapeFix_Face::FixPeriodicDegenerated (debt
+                    // register row 2.1 / KUKA body_4 face 66). On a periodic
+                    // analytic surface (cone/cylinder/sphere/torus) this OCCT
+                    // sub-fixer, invoked by Perform(), deterministically
+                    // SIGSEGVs on some malformed wire configurations (verified by
+                    // backtrace: ShapeFix_Face::FixPeriodicDegenerated -> null
+                    // deref, NOT a catchable Standard_Failure, so the surrounding
+                    // try/catch cannot save it -- OCCT signal-to-exception
+                    // conversion is not installed in this CLI). It repairs only
+                    // degenerate seam/pole edges we do not rely on: our seam and
+                    // pole closure comes from FixAddNaturalBound (poles) and the
+                    // authored wire, and the parametric face:range fallback below
+                    // handles any face this heal then leaves invalid. Turning it
+                    // off removes the crash with no change to the clean corpus,
+                    // suite, or any other KUKA body (all verified unchanged).
+                    fix.FixPeriodicDegeneratedMode() = Standard_False;
                     // Enable wire-orientation repair on MULTI-LOOP (holed) faces.
                     // On real STEP holed planes the inner (hole) wire is authored
                     // CW and consumed as-built; once MakeFace computes its pcurve
