@@ -51,6 +51,18 @@ EXPECTED_VERT_COUNTS = {
     'testCubeWithHole.usda': 148,
     'testCylinder.usda': 124,
     'testDepressedPlane.usda': 122,
+    # testDepressedPlaneSeamSplit is the SAME depressed plane authored under the
+    # proposed producer convention "split full-period periodic faces at the
+    # seam": the full-period (u=0..2pi) cylindrical well wall is split at the
+    # seam and at u=pi into two half-period wall faces. A reader that
+    # mis-tessellates full-period faces (e.g. SMLib on the unsplit twin) can then
+    # verify the convention with zero reader changes; hdOcct (full-period
+    # capable) meshes the split form to the SAME trimmed areas as the unsplit
+    # twin (see test_DepressedPlaneSeamSplit_Pocket) -- proving the split
+    # encoding does not regress a full-period consumer. The extra u=pi seam edges
+    # + two half-walls raise the vert count (122 -> 136); re-baselined Linux GCC
+    # 13 + OCCT 7.8.1.
+    'testDepressedPlaneSeamSplit.usda': 136,
     # testFilletedCube was regenerated degenerate-edge-free: the earlier form
     # closed each of the 8 cube-corner spherical blends with a zero-length
     # corner edge (all control vertices equal), which BrepArrayDegenerateEdges
@@ -79,6 +91,7 @@ PRIM_PATHS = {
     'testCubeWithHole.usda': '/World/CubeWithHole',
     'testCylinder.usda': '/World/Cylinder',
     'testDepressedPlane.usda': '/World/DepressedPlane',
+    'testDepressedPlaneSeamSplit.usda': '/World/DepressedPlane',
     'testFilletedCube.usda': '/World/FilletedCube',
     'testFilletedCubeWithHole.usda': '/World/FilletedCubeWithHole',
     'testPlane.usda': '/World/Plane',
@@ -235,6 +248,9 @@ class TestTessellationVertexCounts(unittest.TestCase):
 
     def test_DepressedPlane(self):
         self._check_fixture('testDepressedPlane.usda')
+
+    def test_DepressedPlaneSeamSplit(self):
+        self._check_fixture('testDepressedPlaneSeamSplit.usda')
 
     def test_FilletedCube(self):
         self._check_fixture('testFilletedCube.usda')
@@ -442,6 +458,22 @@ class TestTrimmedFaceArea(unittest.TestCase):
                                msg=f"pocket top area {top:.2f}")
         self.assertAlmostEqual(bottom, math.pi * 9.0, delta=2.0,
                                msg=f"pocket bottom cap area {bottom:.2f}")
+
+    def test_DepressedPlaneSeamSplit_Pocket(self):
+        # Seam-split twin: the SAME depressed plane with the full-period well
+        # wall split at the seam (u=0/2pi) and at u=pi into two half-period wall
+        # faces. This asserts the split encoding meshes to the SAME trimmed areas
+        # as the unsplit twin (test_DepressedPlane_Pocket) -- a permanent
+        # split==unsplit equivalence gate on a full-period-capable consumer,
+        # complementing the SMLib cross-kernel proof that the split form lets a
+        # full-period-limited reader get exact numbers with no reader changes.
+        stage = _tessellate_fixture('testDepressedPlaneSeamSplit.usda')
+        top = _planar_area_at_z(stage, 0.0)
+        bottom = _planar_area_at_z(stage, -5.0)
+        self.assertAlmostEqual(top, 400.0 - math.pi * 9.0, delta=2.0,
+                               msg=f"seam-split pocket top area {top:.2f}")
+        self.assertAlmostEqual(bottom, math.pi * 9.0, delta=2.0,
+                               msg=f"seam-split pocket bottom cap area {bottom:.2f}")
 
 
 class TestTessellationErrorHandling(unittest.TestCase):
