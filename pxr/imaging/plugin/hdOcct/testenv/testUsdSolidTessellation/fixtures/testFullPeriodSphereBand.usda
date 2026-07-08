@@ -1,0 +1,66 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+)
+
+# testFullPeriodSphereBand -- ONE sphere face spanning the full major period
+# u=[0,2pi] with a latitude band v=[-pi/4, pi/4] (NOT pole-touching), R=5. This
+# is the full-period sphere-band residual: distinct from testFullSphere (which
+# is the pole-TOUCHING whole sphere via a meridian seam) -- here both v-limits
+# are ordinary latitude circles and the u-boundary is a seam. Like testFullSphere
+# it renders via the PARAMETRIC face:range fallback (a full major sweep cannot be
+# bounded by the wire alone), and the fallback is CORRECT here: the meshed area
+# matches the analytic band 2*pi*R^2*(sin v1 - sin v0) = 2*pi*25*sqrt(2) ~= 222.1.
+# Wired as a normal assertion (not expectedFailure) because the fallback is right;
+# a fix/regression of the full-period path moves the area and flips this test.
+#
+# sphere: radius R=5, axis +Z, center origin. Boundary: two latitude circles at
+# v=+/-pi/4 (radius R*cos(pi/4)=3.5355 in planes z=+/-3.5355), plus a meridian
+# seam at u=0 (a circle arc of radius R=5 in the x-z plane from angle -pi/4 to
+# pi/4). v is measured from the equator, within [-pi/2, pi/2] (BA sphere domain).
+
+def Xform "World"
+{
+    def BrepArray "SphereBand" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dCircleAPI:edge3dCircle", "BrepSurfaceSphereAPI"]
+    )
+    {
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1), (0, 0, 1), (0, -1, 0)]
+        uniform point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, -3.5355339059327378), (0, 0, 3.5355339059327378), (0, 0, 0)]
+        uniform double[] brep:edge3dCircle:curve3d:circle:radius = [3.5355339059327378, 3.5355339059327378, 5]
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0), (1, 0, 0)]
+        uniform double3[] brep:extent = [(-5, -5, -3.5355339059327378), (5, 5, 3.5355339059327378)]
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform uint[] brep:regionCount = [1]
+        uniform vector3d[] brep:surface:sphere:axis = [(0, 0, 1)]
+        uniform point3d[] brep:surface:sphere:center = [(0, 0, 0)]
+        uniform double[] brep:surface:sphere:radius = [5]
+        uniform vector3d[] brep:surface:sphere:refDirection = [(1, 0, 0)]
+        uniform point3d[] brep:vertexPoint:point:position = [(3.5355339059327378, 0, -3.5355339059327378), (3.5355339059327378, 0, 3.5355339059327378)]
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
+        uniform double[] edge:range = [0, 6.2831853071795862, 0, 6.2831853071795862, -0.78539816339744828, 0.78539816339744828]
+        uniform int2[] edge:vertexIndices = [(0, 0), (1, 1), (0, 1)]
+        uniform uint[] edgeuse:edgeIndex = [0, 2, 1, 2]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 3, 2, 1]
+        uniform token[] edgeuse:orientationType = ["same", "same", "opposite", "opposite"]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "bottomEntry"]
+        uniform uint[] face:loopCount = [1]
+        uniform double2[] face:range = [(0, -0.78539816339744828), (6.2831853071795862, 0.78539816339744828)]
+        uniform token[] face:surfaceType = ["BrepSurfaceSphereAPI"]
+        uniform token[] face:trimType = ["general"]
+        uniform uint[] faceuse:faceIndex = [0, 0]
+        uniform token[] faceuse:orientationType = ["same", "opposite"]
+        uniform uint[] loop:edgeuseCount = [4]
+        uniform uint[] loop:vertexIndex = [0]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["voidRegion"]
+        uniform uint[] shell:faceuseCount = [2]
+        uniform token[] shell:pointType = ["none"]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform int2[] wireEdge:vertexIndices = []
+        uniform double[] wireEdge:range = []
+    }
+}

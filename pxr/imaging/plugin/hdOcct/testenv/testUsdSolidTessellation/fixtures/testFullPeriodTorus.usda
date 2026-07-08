@@ -1,0 +1,71 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+)
+
+# testFullPeriodTorus -- ONE torus face spanning the full major period
+# u = [0, 2pi], with a partial minor band v = [0, pi] (the outer half of the
+# tube). This is the full-period torus residual class seen in real CAD output
+# (6 such faces in the toolbox): a periodic face whose u-boundary is a seam, not
+# a trimming wire. Like testFullSphere, it renders via the PARAMETRIC face:range
+# fallback -- the boundary wire (two full v-circles + a meridian seam) cannot by
+# itself bound a full major sweep, so the builder falls back to the face:range
+# rectangle in (u,v).
+#
+# This test PINS the current observed behavior: the fallback meshes the band to
+# its true torus area 2*pi*r*(R*(v1-v0) + r*(sin v1 - sin v0)) with R=5, r=2,
+# v in [0,pi] => ~197.39. If someone fixes or regresses the full-period path the
+# area moves and this test flips loudly. The current area is CORRECT (matches
+# the analytic band), so it is wired as a normal assertion, not expectedFailure.
+#
+# torus: majorRadius R=5, minorRadius r=2, axis +Z, center origin.
+# Boundary: v=0 circle (radius R+r=7 in z=0 plane) and v=pi circle
+# (radius R-r=3 in z=0 plane); u-seam meridian at u=0 is a small circle
+# (radius r=2, center (R,0,0)=(5,0,0), in the x-z plane).
+
+def Xform "World"
+{
+    def BrepArray "FullTorus" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dCircleAPI:edge3dCircle", "BrepSurfaceTorusAPI"]
+    )
+    {
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1), (0, 0, 1), (0, 1, 0)]
+        uniform point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0), (0, 0, 0), (5, 0, 0)]
+        uniform double[] brep:edge3dCircle:curve3d:circle:radius = [7, 3, 2]
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0), (1, 0, 0)]
+        uniform double3[] brep:extent = [(-7, -7, 0), (7, 7, 2)]
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform uint[] brep:regionCount = [1]
+        uniform vector3d[] brep:surface:torus:axis = [(0, 0, 1)]
+        uniform double[] brep:surface:torus:majorRadius = [5]
+        uniform double[] brep:surface:torus:minorRadius = [2]
+        uniform point3d[] brep:surface:torus:origin = [(0, 0, 0)]
+        uniform vector3d[] brep:surface:torus:refDirection = [(1, 0, 0)]
+        uniform point3d[] brep:vertexPoint:point:position = [(7, 0, 0), (3, 0, 0)]
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
+        uniform double[] edge:range = [0, 6.2831853071795862, 0, 6.2831853071795862, 0, 3.1415926535897931]
+        uniform int2[] edge:vertexIndices = [(0, 0), (1, 1), (0, 1)]
+        uniform uint[] edgeuse:edgeIndex = [0, 2, 1, 2]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 3, 2, 1]
+        uniform token[] edgeuse:orientationType = ["same", "same", "opposite", "opposite"]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "bottomEntry"]
+        uniform uint[] face:loopCount = [1]
+        uniform double2[] face:range = [(0, 0), (6.2831853071795862, 3.1415926535897931)]
+        uniform token[] face:surfaceType = ["BrepSurfaceTorusAPI"]
+        uniform token[] face:trimType = ["general"]
+        uniform uint[] faceuse:faceIndex = [0, 0]
+        uniform token[] faceuse:orientationType = ["same", "opposite"]
+        uniform uint[] loop:edgeuseCount = [4]
+        uniform uint[] loop:vertexIndex = [0]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["voidRegion"]
+        uniform uint[] shell:faceuseCount = [2]
+        uniform token[] shell:pointType = ["none"]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform int2[] wireEdge:vertexIndices = []
+        uniform double[] wireEdge:range = []
+    }
+}
