@@ -48,13 +48,20 @@ None of the flags were converter indexing bugs — the per-Brep slice/emit
 indices were already correct; every flag was a downstream consequence of a
 missing family, the missing tolerance, or the truncated domain limits.
 
-Known residuals (tracked, not asserted by tests): 6 full-period torus/sphere
-faces render via the parametric fallback; per-face tessellation cracks remain
-unless the env-gated `HDOCCT_SEW=1` sewing path is enabled (which also
-guarantees outward orientation per solid). The two most complex parts (handle,
-lock body) keep ~2% geometric boundary edges from per-edge-minted vertices with
-no sew — pre-existing and unrelated to these completions (the completions
-lowered it from 3–4.5% and removed the non-manifold artifacts).
+Known residuals (tracked, not asserted by tests): the 6 full-period
+torus/sphere faces render via the parametric face:range fallback by design —
+they carry a full-2π seam rather than a wire, so there is no 3D-edge loop to
+trim against, and the parametric path is the correct route for them (not a
+defect; see the `test_FullPeriodTorus`/`test_FullPeriodSphereBand` cases in the
+52-test suite). Per-face tessellation cracks remain unless the env-gated
+`HDOCCT_SEW=1` sewing path is enabled (which also guarantees outward
+orientation per solid); sewing stays env-gated because it welds vertices and so
+changes fixture vertex counts, which the baseline suite pins. The two most
+complex parts (handle, lock body) keep a small geometric boundary-edge fraction
+from per-edge-minted vertices when unsewed — the committed baseline is 0.127%
+average boundary edges plain / 0.091% with sew, pre-existing and unrelated to
+these completions (the completions lowered it from 3–4.5% and removed the
+non-manifold artifacts).
 
 Provenance: converted by the reference STEP reader
 (`step_to_usdsolid.py`, PR #58 references) extended with assembly-graph
