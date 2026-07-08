@@ -135,13 +135,15 @@ EXPECTED_VERT_COUNTS = {
     # 581 analytic faces in the SMLib reader) grabs the wrong slot and mis-builds
     # the solid. Correct packing meshes both walls as r=3 half-cylinders and both
     # caps as z=0/z=5 patches -> this deterministic vert count, a positive signed
-    # volume, and an exact [-3,3]x[-3,3]x[0,5] bbox. NOTE: the NURBS caps render
-    # UNTRIMMED (full 6x6 squares) because of a separate hdOcct gap -- a
-    # single-loop NURBS face trimmed only by analytic 3D edges (no authored
-    # curveUv) is never wire-trimmed (brepBuilder.cpp attemptTrim = analyticSurf
-    # || numLoops>1); see test_MixedSurfaces_CapsTrimmed (expectedFailure) and
-    # the fixture header. Re-baselined Linux GCC 13 + OCCT 7.8.1.
-    'testMixedSurfaces.usda': 64,
+    # volume, and an exact [-3,3]x[-3,3]x[0,5] bbox. Re-baselined 64 -> 108 when
+    # the derive-trim gate widened to single-loop NURBS faces: the two NURBS caps
+    # now wire-trim to r=3 disks (was full 6x6 squares) and the solid meshes
+    # watertight at signed volume ~140 (~pi*9*5); see test_MixedSurfaces_CapsTrimmed
+    # (now a normal passing assertion). The fixture's two cap faceuse:orientationType
+    # entries were also corrected (they were authored for a +Z cap normal, but the
+    # cap CP ordering gives -Z, so both caps meshed inward). Re-baselined Linux GCC
+    # 13 + OCCT 7.8.1.
+    'testMixedSurfaces.usda': 108,
     # testMixedCurvesWithPcurves is one NURBS planar sheet whose single outer
     # trim loop mixes CURVE families with AUTHORED pcurves: two lines
     # (BrepCurve3dLineAPI), one NURBS edge (BrepCurve3dNurbAPI), one circle arc
@@ -694,12 +696,26 @@ class TestTessellationErrorHandling(unittest.TestCase):
 # See fixtures/derivedTrims/README.md.
 PCURVELESS_TWIN_VERTS = {
     'testCubeNoPcurves.usda': 24,
-    'testCylinderNoPcurves.usda': 72,
+    # Re-baselined 72 -> 124 when single-loop NURBS faces gained the derive-trim
+    # route (brepBuilder attemptTrim widened to any face with boundary edges).
+    # The four NURBS cylinder panels formerly fell back to their oversized
+    # control-net bounds (signed volume +307.0, ~8% over the true pi*9*10 =
+    # 282.7); wire-trimming them to the authored circle/line edges brings the
+    # twin to +280.6 / area 244.24 -- matching its authored-pcurve sibling
+    # testCylinder (+281.0 / 244.24, also 124 verts) to 3 sig figs. Geometry is
+    # strictly better; the vert count now equals the pcurve original.
+    'testCylinderNoPcurves.usda': 124,
     'testConeNoPcurves.usda': 106,
     'testFilletedCubeNoPcurves.usda': 512,
     'testCubeWithHoleNoPcurves.usda': 148,
     'testPlaneWithHoleNoPcurves.usda': 33,
-    'testDepressedPlaneNoPcurves.usda': 97,
+    # Re-baselined 97 -> 214 with the widened derive-trim gate. The pocket's
+    # single-loop NURBS faces formerly used oversized natural bounds (signed
+    # volume -153.5, ~9% past the true pocket); wire-trimming them yields -136.8,
+    # within 2.6% of the authored-pcurve original testDepressedPlane (-140.5),
+    # i.e. closer to truth. The extra verts are the properly-subdivided pocket
+    # walls. Geometry improved; count re-baselined deliberately.
+    'testDepressedPlaneNoPcurves.usda': 214,
 }
 
 
@@ -873,25 +889,21 @@ class TestMixedFamilyPacking(unittest.TestCase):
             msg=f"mixed-curve sheet area {area:.3f} != {expected:.3f} "
                 f"(a mixed 3D-edge family was dropped?)")
 
-    @unittest.expectedFailure
     def test_MixedSurfaces_CapsTrimmed(self):
-        # KNOWN hdOcct GAP (mirror of the pcurve-branch edges[] gap): a
-        # single-loop NURBS face trimmed only by analytic 3D edges (no authored
-        # curveUv) is never wire-trimmed. brepBuilder.cpp gates the analytic
-        # derive-trim path on `attemptTrim = analyticSurf || numLoops > 1`, so a
-        # single-loop NURBS cap bounded by a circle edge falls straight to the
-        # untrimmed natural-bounds fallback and renders as its full 6x6 control
-        # square (HDOCCT_TRIM_HIST shows nurbs -> rangeFB). The two analytic
-        # cylinder walls trim fine (trimOK), so this fixture isolates exactly the
-        # NURBS-surface + analytic-3D-edge derive case. Correct behavior would
-        # trim each cap to the r=3 disk and mesh a watertight solid of volume
-        # pi*r^2*L = pi*9*5 = ~141.37; today the untrimmed square caps leave a
-        # non-watertight mesh whose divergence-theorem volume reads ~33.3.
-        # Flips to XPASS if the derive path learns to wire-trim single-loop NURBS
-        # faces, prompting a baseline + EXPECTED_VERT_COUNTS update. Fix is a
-        # design change to the NURBS trim routing (affects the pcurve-less
-        # derivedTrims twins), not a surgical one -- tracked as a finding, not
-        # patched here.
+        # A single-loop NURBS cap trimmed only by an analytic circle 3D edge (no
+        # authored curveUv) now wire-trims to the r=3 disk. brepBuilder.cpp
+        # widened the derive-trim gate from `attemptTrim = analyticSurf ||
+        # numLoops > 1` to also cover single-loop NURBS faces that carry boundary
+        # edges (any face with a non-empty loop attempts the wire-trim, with the
+        # analyzer-reject -> two-pass-retry -> natural-bounds ladder as the safety
+        # net). HDOCCT_TRIM_HIST now shows both caps as nurbs -> trimOK. The two
+        # analytic cylinder walls also trim (trimOK), so the capped cylinder
+        # meshes watertight at signed volume pi*r^2*L = pi*9*5 ~= 141.37 (chord
+        # deflection on the walls leaves ~140). Was an expectedFailure at ~33.3
+        # (untrimmed 6x6 square caps); flipped to a normal assertion once the
+        # derive path learned to wire-trim single-loop NURBS faces. The fixture's
+        # two cap faceuse:orientationType entries were also corrected (see the
+        # fixture header) -- they had inverted signs that meshed both caps inward.
         stage = _tessellate_fixture('testMixedSurfaces.usda')
         for mesh in _meshes(stage):
             vol = _signed_volume(mesh.GetPointsAttr().Get(),
