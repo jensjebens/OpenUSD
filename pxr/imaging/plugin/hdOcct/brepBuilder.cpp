@@ -729,15 +729,25 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         if (faceIdx >= faceStart) surfaces.push_back(surf);
     }
 
-    // Build faces as untrimmed NURBS surfaces.
+    // Build trimmed faces. Two branches follow, selected by whether the prim
+    // authored 2D trim curves (BrepCurveUvNurbAPI pcurves):
     //
-    // When BrepCurveUvNurbAPI data is absent (no pcurves), we build untrimmed
-    // faces from natural surface parameter bounds. Faces with multiple loops
-    // (indicating trim curves we can't reconstruct) are skipped — they are
-    // typically planar end-caps that would render as oversized rectangles.
+    //   hasTrimCurves == true  -> "full topology" branch (else, below). Each
+    //     wire edge is built directly from its authored 2D pcurve on the
+    //     surface, giving an exact trim; a per-edgeuse edges[] 3D-curve source
+    //     is prepared as the fallback for any edgeuse whose pcurve is absent or
+    //     fails to build.
     //
-    // TODO: When BrepCurveUvNurbAPI data IS available, reconstruct full
-    // edge topology with pcurves for proper trimmed tessellation.
+    //   hasTrimCurves == false -> "derive from 3D edges" branch (Ladder B, the
+    //     if-block below). No pcurves are authored, so each face is trimmed from
+    //     its loops' 3D edges: analytic (line/circle/ellipse) and NURBS edge
+    //     curves are built, projected to pcurves where possible, and the face is
+    //     wire-trimmed. A failure ladder (analyzer-reject -> two-pass retry ->
+    //     parametric face:range / natural-bounds fallback, with a parametric
+    //     pole-closure for singular apex/pole faces) is the safety net.
+    //
+    // Both branches handle single- and multi-loop faces (holes/pockets) and
+    // both apply the authored faceuse:orientationType via applyFaceuseOrientation.
     bool hasTrimCurves = !data.trimCurveControlVertices.empty();
 
     std::vector<TopoDS_Face> faces;
