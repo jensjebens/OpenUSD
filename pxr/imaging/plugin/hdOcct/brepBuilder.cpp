@@ -64,6 +64,8 @@
 #include <TColStd_Array2OfReal.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shell.hxx>
@@ -1709,7 +1711,37 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             for (const auto& face : faces) sew.Add(face);
             sew.Perform();
             TopoDS_Shape sewn = sew.SewedShape();
-            if (!sewn.IsNull()) return sewn;
+            if (!sewn.IsNull()) {
+                // A residual mis-oriented face (e.g. an untrimmed full-period
+                // fallback patch) can seed the sewn shell inside-out, flipping
+                // the WHOLE solid's normals. For a closed shell orientation is
+                // decidable: signed volume must be positive. Measure each
+                // closed shell and reverse it when negative, so every sewn
+                // solid renders outward regardless of per-face residuals.
+                TopoDS_Compound oriented;
+                BRep_Builder ob;
+                ob.MakeCompound(oriented);
+                for (TopExp_Explorer se(sewn, TopAbs_SHELL);
+                     se.More(); se.Next()) {
+                    TopoDS_Shell shell = TopoDS::Shell(se.Current());
+                    // Divergence-theorem volume of the shell itself: the sign
+                    // stays meaningful for a mostly-closed shell (residual
+                    // cracks perturb magnitude, not sign), so do not require
+                    // topological closedness.
+                    try {
+                        GProp_GProps props;
+                        BRepGProp::VolumeProperties(shell, props);
+                        if (props.Mass() < 0.0) shell.Reverse();
+                    } catch (const Standard_Failure&) {}
+                    ob.Add(oriented, shell);
+                }
+                // Preserve any faces sewing left outside a shell.
+                for (TopExp_Explorer fe(sewn, TopAbs_FACE, TopAbs_SHELL);
+                     fe.More(); fe.Next()) {
+                    ob.Add(oriented, fe.Current());
+                }
+                return oriented;
+            }
         } catch (const Standard_Failure&) {}
     }
 

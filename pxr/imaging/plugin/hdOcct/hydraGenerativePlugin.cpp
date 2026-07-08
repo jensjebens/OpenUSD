@@ -241,6 +241,47 @@ UsdSolidTessellationProcedural::GetChildPrim(
             HdRetainedTypedSampledDataSource<TfToken>::New(
                 HdPrimvarSchemaTokens->point));
 
+    // displayColor for Storm shading: use the source BrepArray prim's authored
+    // constant primvars:displayColor when present (e.g. per-part colors from a
+    // CAD assembly conversion); fall back to the bright-metallic-grey default.
+    VtArray<GfVec3f> displayColor(1, GfVec3f(0.85f, 0.87f, 0.9f));
+    if (inputScene) {
+        const HdSceneIndexPrim srcPrim =
+            inputScene->GetPrim(_GetProceduralPrimPath());
+        if (srcPrim.dataSource) {
+            if (HdPrimvarsSchema pvs =
+                    HdPrimvarsSchema::GetFromParent(srcPrim.dataSource)) {
+                if (HdPrimvarSchema pv =
+                        pvs.GetPrimvar(HdTokens->displayColor)) {
+                    if (HdSampledDataSourceHandle vds = pv.GetPrimvarValue()) {
+                        const VtValue v = vds->GetValue(0.0f);
+                        if (v.IsHolding<VtArray<GfVec3f>>()) {
+                            const VtArray<GfVec3f> authored =
+                                v.UncheckedGet<VtArray<GfVec3f>>();
+                            if (!authored.empty()) {
+                                // Constant interpolation on the output mesh:
+                                // take the first (dominant) authored color.
+                                displayColor =
+                                    VtArray<GfVec3f>(1, authored[0]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    HdContainerDataSourceHandle displayColorPvDs =
+        HdRetainedContainerDataSource::New(
+            HdPrimvarSchemaTokens->primvarValue,
+            HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                displayColor),
+            HdPrimvarSchemaTokens->interpolation,
+            HdRetainedTypedSampledDataSource<TfToken>::New(
+                HdPrimvarSchemaTokens->constant),
+            HdPrimvarSchemaTokens->role,
+            HdRetainedTypedSampledDataSource<TfToken>::New(
+                HdPrimvarSchemaTokens->color));
+
     HdContainerDataSourceHandle primvarsDs;
     if (!mesh.normals.empty()) {
         HdContainerDataSourceHandle normalsPvDs =
@@ -255,39 +296,11 @@ UsdSolidTessellationProcedural::GetChildPrim(
                 HdRetainedTypedSampledDataSource<TfToken>::New(
                     HdPrimvarSchemaTokens->normal));
 
-        // displayColor for Storm shading (bright metallic grey)
-        VtArray<GfVec3f> displayColor(1, GfVec3f(0.85f, 0.87f, 0.9f));
-        HdContainerDataSourceHandle displayColorPvDs =
-            HdRetainedContainerDataSource::New(
-                HdPrimvarSchemaTokens->primvarValue,
-                HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
-                    displayColor),
-                HdPrimvarSchemaTokens->interpolation,
-                HdRetainedTypedSampledDataSource<TfToken>::New(
-                    HdPrimvarSchemaTokens->constant),
-                HdPrimvarSchemaTokens->role,
-                HdRetainedTypedSampledDataSource<TfToken>::New(
-                    HdPrimvarSchemaTokens->color));
-
         primvarsDs = HdRetainedContainerDataSource::New(
             HdTokens->points, pointsPvDs,
             HdTokens->normals, normalsPvDs,
             HdTokens->displayColor, displayColorPvDs);
     } else {
-        // displayColor for Storm shading (bright metallic grey)
-        VtArray<GfVec3f> displayColor(1, GfVec3f(0.85f, 0.87f, 0.9f));
-        HdContainerDataSourceHandle displayColorPvDs =
-            HdRetainedContainerDataSource::New(
-                HdPrimvarSchemaTokens->primvarValue,
-                HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
-                    displayColor),
-                HdPrimvarSchemaTokens->interpolation,
-                HdRetainedTypedSampledDataSource<TfToken>::New(
-                    HdPrimvarSchemaTokens->constant),
-                HdPrimvarSchemaTokens->role,
-                HdRetainedTypedSampledDataSource<TfToken>::New(
-                    HdPrimvarSchemaTokens->color));
-
         primvarsDs = HdRetainedContainerDataSource::New(
             HdTokens->points, pointsPvDs,
             HdTokens->displayColor, displayColorPvDs);
