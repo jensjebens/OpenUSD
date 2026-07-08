@@ -835,7 +835,8 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             {"plane","cylinder","cone","sphere","torus","nurbs","other"};
         enum { FS_EDGE3D=0, FS_PROJNULL, FS_WIRE, FS_MKFACE_OUTER,
                FS_MKFACE_INNER, FS_ANALYZER, FS_FALLBACK_PARAM,
-               FS_FALLBACK_RANGE, FS_SKIP, FS_TRIM_OK, FS_N };
+               FS_FALLBACK_PARAM_OK, FS_FALLBACK_RANGE, FS_SKIP, FS_TRIM_OK,
+               FS_N };
         // Accumulate across all Breps of the whole build.
         static long _hist[ST_N][FS_N] = {{0}};
         static long _faceSeen[ST_N] = {0};
@@ -1322,7 +1323,23 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                             if (BRepCheck_Analyzer(pff).IsValid()) {
                                 finalFace = pff;
                                 haveFace = true;
-                                HIST(_st, FS_FALLBACK_PARAM);
+                                // Classify: a face whose authored face:range
+                                // equals the surface's FULL natural parameter
+                                // window is a complete closed analytic surface
+                                // (a full torus/sphere) with no boundary edges
+                                // to wire-trim -- the parametric route is the
+                                // CORRECT one, not a trim failure. Count it as
+                                // parmOK. A face:range strictly inside the
+                                // natural bounds is a real trim that failed to
+                                // build a wire and fell back oversized: parmFB.
+                                Standard_Real nu0, nu1, nv0, nv1;
+                                surface->Bounds(nu0, nu1, nv0, nv1);
+                                const double we = 1e-3;   // window tolerance
+                                const bool fullWindow =
+                                    uvLo[0] <= nu0 + we && uvHi[0] >= nu1 - we &&
+                                    uvLo[1] <= nv0 + we && uvHi[1] >= nv1 - we;
+                                HIST(_st, fullWindow ? FS_FALLBACK_PARAM_OK
+                                                     : FS_FALLBACK_PARAM);
                             }
                         }
                     } catch (const Standard_Failure&) {}
@@ -1399,18 +1416,21 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         if (_histOn) {
             fprintf(stderr,
               "\n===== HDOCCT ANALYTIC TRIM HISTOGRAM (!hasTrimCurves) =====\n");
-            fprintf(stderr, "%-9s %6s | %8s %8s %8s %8s %8s %8s %8s %8s %8s\n",
+            fprintf(stderr,
+                "%-9s %6s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n",
                 "surface","seen",
-                "trimOK","parmFB","rangeFB","skip","projN","wireX",
+                "trimOK","parmOK","parmFB","rangeFB","skip","projN","wireX",
                 "mkfOut","mkfIn","analyz");
             long tot[FS_N] = {0}; long totSeen = 0;
             for (int s = 0; s < ST_N; ++s) {
                 if (_faceSeen[s] == 0 &&
                     _hist[s][FS_TRIM_OK]==0 && _hist[s][FS_SKIP]==0) continue;
                 fprintf(stderr,
-                  "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld\n",
+                  "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld "
+                  "%8ld\n",
                   _stName[s], _faceSeen[s],
-                  _hist[s][FS_TRIM_OK], _hist[s][FS_FALLBACK_PARAM],
+                  _hist[s][FS_TRIM_OK], _hist[s][FS_FALLBACK_PARAM_OK],
+                  _hist[s][FS_FALLBACK_PARAM],
                   _hist[s][FS_FALLBACK_RANGE], _hist[s][FS_SKIP],
                   _hist[s][FS_PROJNULL], _hist[s][FS_WIRE],
                   _hist[s][FS_MKFACE_OUTER], _hist[s][FS_MKFACE_INNER],
@@ -1419,14 +1439,17 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 for (int f = 0; f < FS_N; ++f) tot[f] += _hist[s][f];
             }
             fprintf(stderr,
-              "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld\n",
+              "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld\n",
               "TOTAL", totSeen,
-              tot[FS_TRIM_OK], tot[FS_FALLBACK_PARAM], tot[FS_FALLBACK_RANGE],
+              tot[FS_TRIM_OK], tot[FS_FALLBACK_PARAM_OK], tot[FS_FALLBACK_PARAM],
+              tot[FS_FALLBACK_RANGE],
               tot[FS_SKIP], tot[FS_PROJNULL], tot[FS_WIRE],
               tot[FS_MKFACE_OUTER], tot[FS_MKFACE_INNER], tot[FS_ANALYZER]);
             fprintf(stderr,
-              "  legend: trimOK=wire-trim accepted; parmFB=analytic face:range "
-              "param fallback; rangeFB=untrimmed natural/range fallback; "
+              "  legend: trimOK=wire-trim accepted; parmOK=full-window analytic "
+              "face:range param route (closed surface, correct by design); "
+              "parmFB=sub-window param fallback (real trim that failed); "
+              "rangeFB=untrimmed natural/range fallback; "
               "skip=no face built; projN=Curve2d null; wireX=MakeWire !done; "
               "mkfOut/mkfIn=MakeFace !done; analyz=BRepCheck rejected\n");
             fprintf(stderr,
