@@ -7,8 +7,12 @@
 #include "brepBuilder.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
+#include <string>
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/token.h"
@@ -302,6 +306,36 @@ Handle(Geom2d_BSplineCurve) _MakeBSplineCurve2d(
 /// (see the two ellipse dispatch sites; debt register rows 5 and 32).
 constexpr double _halfPi = 1.5707963267948966;
 
+/// Period-normalize an authored parameter interval onto a periodic 3D curve's
+/// own domain. USD authors an edge:range in the producer's parameterization;
+/// on a periodic analytic curve (circle/ellipse) that interval can sit a whole
+/// number of periods off OCCT's domain (its FirstParameter..FirstParameter+Period
+/// window), or straddle the seam (e.g. an arc authored [3pi/2, 5pi/2] whose start
+/// is one period high). BRepBuilderAPI_MakeEdge(curve, v1, v2, r0, r1) then
+/// reports !IsDone and the caller discards the range, letting OCCT re-derive the
+/// parameters from the two endpoint vertices -- which on a periodic curve picks
+/// whichever of the two candidate arcs OCCT prefers, silently taking the WRONG
+/// (often complementary) arc. Shifting the whole interval by an integer number of
+/// periods so r0 lands in [first, first+period) preserves the authored arc length
+/// and orientation (r1-r0 is unchanged) and lets the exact-param build succeed
+/// (debt register row 6). Returns true and writes the shifted [r0,r1] when the
+/// curve is periodic; false (leaving r0/r1 untouched) otherwise.
+bool _PeriodNormalizeRange(const Handle(Geom_Curve)& curve,
+                           double& r0, double& r1)
+{
+    if (curve.IsNull() || !curve->IsPeriodic()) return false;
+    const double period = curve->Period();
+    if (!(period > 0.0)) return false;
+    const double first = curve->FirstParameter();
+    // Number of whole periods r0 sits above `first`; shift the pair down by it.
+    const double n = std::floor((r0 - first) / period);
+    if (n != 0.0) {
+        r0 -= n * period;
+        r1 -= n * period;
+    }
+    return true;
+}
+
 /// Convert an authored cone v-parameter (AXIAL distance -- height along the
 /// axis, the UsdSolid BrepSurfaceConeAPI convention) to OCCT's Geom_ConicalSurface
 /// v-parameter (SLANT distance along the generator): v_slant = v_axial / cos(semiAngle).
@@ -428,11 +462,10 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
         return attr.Get(&out);
     };
 
-    // Brep-level
-    VtArray<double> tolArray;
-    if (_GetAttr("brep:intersectTol3d", tolArray) && !tolArray.empty()) {
-        data->intersectTol3d = tolArray[0];
-    }
+    // Brep-level. brep:intersectTol3d authors one tolerance per Brep in the
+    // array; keep the whole array and resolve per-Brep in _BuildSingleBrep
+    // (debt register row 17), rather than collapsing to entry [0] for all Breps.
+    _GetAttr("brep:intersectTol3d", data->intersectTol3d);
     _GetAttr("brep:regionCount", data->regionCount);
 
     // Region
@@ -587,6 +620,17 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         return TopoDS_Shape();
     }
 
+    // Resolve THIS Brep's 3D intersection tolerance from the per-Brep array with
+    // a last-entry clamp: a producer may author one shared tolerance for a
+    // multi-Brep array (array shorter than the Brep count) or one per Brep. An
+    // empty array falls back to the 1e-6 lenient-reader default (brepBuilder.h)
+    // (debt register row 17).
+    const double intersectTol3d =
+        data.intersectTol3d.empty()
+            ? 1e-6
+            : data.intersectTol3d[std::min(brepIndex,
+                                           data.intersectTol3d.size() - 1)];
+
     // Compute shell start for this Brep's regions
     size_t shellStart = 0;
     for (size_t i = 0; i < regionStart && i < data.regionShellCount.size(); ++i) {
@@ -648,6 +692,25 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                       gp_Dir(rd[0], rd[1], rd[2]));
     };
 
+    // Observability for the surface dispatch (debt register rows 12 + 18).
+    //   _warnedSurfType   -- unknown face:surfaceType tokens already warned for
+    //                        this Brep (warn once per unrecognized token).
+    //   _warnedUnderpack  -- known families whose per-type surface array ran out
+    //                        (warn once per family; the face becomes null-surface
+    //                        and is skipped below -- previously silent).
+    // A null surface is left in `surfaces` (never skipped in the vector) so the
+    // per-face index stays aligned with faceRange / loops downstream.
+    std::set<std::string> _warnedSurfType, _warnedUnderpack;
+    size_t _nullSurfFaces = 0;
+    auto warnUnderpack = [&](const char* family, size_t have, size_t need) {
+        if (_warnedUnderpack.insert(family).second) {
+            TF_WARN("hdOcct: Brep %zu: %s surface array under-packed "
+                    "(have %zu, face #%zu needs one more); affected faces are "
+                    "skipped (null surface). Counted in HDOCCT_TRIM_HIST "
+                    "nullSrf.", brepIndex, family, have, need);
+        }
+    };
+
     for (size_t faceIdx = 0;
          faceIdx < faceStart + numFaces &&
          faceIdx < data.faceSurfaceType.size(); ++faceIdx) {
@@ -665,6 +728,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                            gp_Dir(rd[0], rd[1], rd[2]));
                 surf = new Geom_CylindricalSurface(
                     ax3, data.surfaceCylinderRadius[cylFace]);
+            } else {
+                warnUnderpack("cylinder",
+                              data.surfaceCylinderRadius.size(), cylFace);
             }
             ++cylFace;
         } else if (stype.GetString() == "BrepSurfacePlaneAPI") {
@@ -672,6 +738,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 surf = new Geom_Plane(mkAx3(data.surfacePlaneOrigin[planeFace],
                     data.surfacePlaneAxis[planeFace],
                     data.surfacePlaneRefDir[planeFace]));
+            } else {
+                warnUnderpack("plane",
+                              data.surfacePlaneOrigin.size(), planeFace);
             }
             ++planeFace;
         } else if (stype.GetString() == "BrepSurfaceConeAPI") {
@@ -682,6 +751,8 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                           data.surfaceConeRefDir[coneFace]),
                     data.surfaceConeSemiAngle[coneFace],
                     data.surfaceConeRadius[coneFace]);
+            } else {
+                warnUnderpack("cone", data.surfaceConeRadius.size(), coneFace);
             }
             ++coneFace;
         } else if (stype.GetString() == "BrepSurfaceSphereAPI") {
@@ -691,6 +762,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                           data.surfaceSphereAxis[sphereFace],
                           data.surfaceSphereRefDir[sphereFace]),
                     data.surfaceSphereRadius[sphereFace]);
+            } else {
+                warnUnderpack("sphere",
+                              data.surfaceSphereRadius.size(), sphereFace);
             }
             ++sphereFace;
         } else if (stype.GetString() == "BrepSurfaceTorusAPI") {
@@ -701,10 +775,15 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                           data.surfaceTorusRefDir[torusFace]),
                     data.surfaceTorusMajorRadius[torusFace],
                     data.surfaceTorusMinorRadius[torusFace]);
+            } else {
+                warnUnderpack("torus",
+                              data.surfaceTorusMajorRadius.size(), torusFace);
             }
             ++torusFace;
-        } else {
-            // BrepSurfaceNurbAPI (default)
+        } else if (stype.GetString() == "BrepSurfaceNurbAPI") {
+            // NURBS is now an EXPLICIT token match (was the catch-all default).
+            // An unrecognized token no longer silently consumes a NURBS slot and
+            // desyncs every later NURBS face (debt register row 12).
             if (nurbFace < data.surfaceUVertexCount.size()) {
                 int uCnt = data.surfaceUVertexCount[nurbFace];
                 int vCnt = data.surfaceVVertexCount[nurbFace];
@@ -722,11 +801,29 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     uKnots, numUKnots, vKnots, numVKnots, weights, numW);
                 surfCPOffset += numCPs; surfUKnotOffset += numUKnots;
                 surfVKnotOffset += numVKnots; surfWeightOffset += numCPs;
+            } else {
+                warnUnderpack("nurb", data.surfaceUVertexCount.size(), nurbFace);
             }
             ++nurbFace;
+        } else {
+            // Unknown surfaceType token: consume NOTHING (advance no per-family
+            // cursor) and leave the surface null, so the per-family packing stays
+            // aligned for later faces. The null face is skipped by the trim
+            // builders below (which already `continue` on a null surface). Warn
+            // once per unrecognized token per Brep (debt register row 12).
+            if (_warnedSurfType.insert(stype.GetString()).second) {
+                TF_WARN("hdOcct: Brep %zu face #%zu: unknown face:surfaceType "
+                        "'%s'; face skipped (no surface built) and no surface "
+                        "array consumed. Add an explicit branch if this type is "
+                        "supported.", brepIndex, faceIdx,
+                        stype.GetString().c_str());
+            }
         }
 
-        if (faceIdx >= faceStart) surfaces.push_back(surf);
+        if (faceIdx >= faceStart) {
+            if (surf.IsNull()) ++_nullSurfFaces;
+            surfaces.push_back(surf);
+        }
     }
 
     // Build trimmed faces. Two branches follow, selected by whether the prim
@@ -873,6 +970,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         enum { FS_EDGE3D=0, FS_PROJNULL, FS_WIRE, FS_MKFACE_OUTER,
                FS_MKFACE_INNER, FS_ANALYZER, FS_FALLBACK_PARAM,
                FS_FALLBACK_PARAM_OK, FS_FALLBACK_RANGE, FS_SKIP, FS_TRIM_OK,
+               FS_RANGE_DISCARD, FS_CHORD, FS_NULL_SURF,
                FS_N };
         // Accumulate across all Breps of the whole build.
         static long _hist[ST_N][FS_N] = {{0}};
@@ -888,6 +986,12 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             return ST_OTHER;
         };
         #define HIST(st, fs) do { if (_histOn) _hist[(st)][(fs)]++; } while(0)
+        // Roll the faces already skipped for a null (under-packed / unknown)
+        // surface into the histogram (debt register row 18). They never reach
+        // _stOf below because a null surface `continue`s the trim loop, so tally
+        // them here under ST_OTHER.
+        if (_histOn && _nullSurfFaces > 0)
+            _hist[ST_OTHER][FS_NULL_SURF] += (long)_nullSurfFaces;
         // ---- end instrumentation setup ---------------------------------------
 
         // Surface-only path: trim each face with its 3D edge curves.
@@ -927,7 +1031,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             // (~1e-4 vs the observed few-ulp..1e-6 residuals) so MakeEdge with
             // explicit params accepts the vertex without over-inflating it.
             const double vtxTol =
-                std::max(1.0e-4, data.intersectTol3d * 10.0);
+                std::max(1.0e-4, intersectTol3d * 10.0);
             BRep_Builder vb;
             for (size_t vi = 0; vi < data.vertexPositions.size(); ++vi) {
                 const GfVec3d& p = data.vertexPositions[vi];
@@ -938,6 +1042,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         {
             size_t eCP = 0, eKnot = 0, eW = 0;   // NURBS packing offsets
             size_t nurbE = 0, lineE = 0, circE = 0, ellE = 0;
+            std::set<std::string> _warnedEdgeType;   // row 12, once per token
             for (size_t ei = 0; ei < numEdgesTotal; ++ei) {
                 const std::string ct = data.edgeCurveType[ei].GetString();
                 try {
@@ -981,8 +1086,10 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         }
                     }
                     ++ellE;
-                } else {
-                    // BrepCurve3dNurbAPI (default)
+                } else if (ct == "BrepCurve3dNurbAPI") {
+                    // NURBS is an EXPLICIT token match (was the catch-all
+                    // default). An unrecognized token no longer consumes a NURBS
+                    // slot and desyncs every later NURBS edge (register row 12).
                     if (nurbE < data.edgeCurveVertexCount.size()) {
                         int ncp = data.edgeCurveVertexCount[nurbE];
                         int ord = data.edgeCurveOrder[nurbE];
@@ -998,6 +1105,19 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         eCP += ncp; eKnot += nk; eW += ncp;
                     }
                     ++nurbE;
+                } else {
+                    // Unknown edge:curveType: consume NOTHING (advance no cursor)
+                    // and leave edge3dCurves[ei] null so later per-family packing
+                    // stays aligned. The null edge fails its boundary wire loudly
+                    // via the null-edge guard below (register rows 12 + 2). Warn
+                    // once per unrecognized token per Brep.
+                    if (_warnedEdgeType.insert(ct).second) {
+                        TF_WARN("hdOcct: Brep %zu edge %zu: unknown edge:"
+                                "curveType '%s'; leaving the edge null (its "
+                                "boundary wire will fail). Add an explicit "
+                                "branch if this type is supported.",
+                                brepIndex, ei, ct.c_str());
+                    }
                 }
                 } catch (const Standard_Failure&) {
                     // Malformed edge curve: leave it null; the face build skips.
@@ -1152,13 +1272,49 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                                 if (em.IsDone()) {
                                     edge = em.Edge(); builtEdge = true;
                                 } else {
-                                    // Params disagree with vertices past tol:
-                                    // let OCCT derive params from the shared
-                                    // vertices (still closes the loop).
-                                    BRepBuilderAPI_MakeEdge em2(
-                                        edge3dCurves[edgeIdx], *v1, *v2);
-                                    if (em2.IsDone()) {
-                                        edge = em2.Edge(); builtEdge = true;
+                                    // Exact-param build failed. On a periodic
+                                    // curve the authored range may sit a whole
+                                    // number of periods off OCCT's domain (or
+                                    // straddle the seam); shift it into range and
+                                    // retry WITH params before discarding it --
+                                    // discarding lets OCCT re-derive params from
+                                    // the endpoints, which can silently select
+                                    // the wrong (complementary) arc (row 6).
+                                    double nr0 = r0, nr1 = r1;
+                                    if (_PeriodNormalizeRange(
+                                            edge3dCurves[edgeIdx], nr0, nr1) &&
+                                        (nr0 != r0 || nr1 != r1)) {
+                                        BRepBuilderAPI_MakeEdge emp(
+                                            edge3dCurves[edgeIdx],
+                                            *v1, *v2, nr0, nr1);
+                                        if (emp.IsDone()) {
+                                            edge = emp.Edge(); builtEdge = true;
+                                        }
+                                    }
+                                    if (!builtEdge) {
+                                        // Range rescue exhausted: let OCCT derive
+                                        // params from the shared vertices. This
+                                        // loses the authored arc on a periodic
+                                        // curve, so tally + warn once per build.
+                                        BRepBuilderAPI_MakeEdge em2(
+                                            edge3dCurves[edgeIdx], *v1, *v2);
+                                        if (em2.IsDone()) {
+                                            edge = em2.Edge(); builtEdge = true;
+                                            HIST(_st, FS_RANGE_DISCARD);
+                                            static std::atomic<bool> _warned{false};
+                                            if (!_warned.exchange(true)) {
+                                                TF_WARN("hdOcct: Brep %zu face "
+                                                  "%zu: analytic edge %zu range "
+                                                  "[%g,%g] rejected by OCCT; "
+                                                  "rebuilt from endpoint "
+                                                  "vertices (authored arc may be "
+                                                  "lost on a periodic curve, "
+                                                  "row 6). Further occurrences "
+                                                  "counted in HDOCCT_TRIM_HIST "
+                                                  "rngDisc.", brepIndex, faceIdx,
+                                                  edgeIdx, r0, r1);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1208,7 +1364,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                                     BRep_Builder bb;
                                     bb.UpdateEdge(edge, pc, surface,
                                         TopLoc_Location(),
-                                        data.intersectTol3d);
+                                        intersectTol3d);
                                 } else if (trimPass == 0) {
                                     HIST(_st, FS_PROJNULL);
                                 }
@@ -1265,7 +1421,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     // the pcurves in-context, and this pass reconciles them --
                     // the robust route that fixes the partial-band / holed-disk
                     // faces GeomProjLib::Curve2d mis-projected.
-                    BRepLib::BuildCurves3d(trimmedFace, data.intersectTol3d);
+                    BRepLib::BuildCurves3d(trimmedFace, intersectTol3d);
                     ShapeFix_Face fix(trimmedFace);
                     fix.FixAddNaturalBoundMode() =
                         (analyticSurf && poleSurface) ? Standard_True
@@ -1297,7 +1453,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     // so a mis-wound hole is flipped rather than dropped.
                     if (fixOrient) fix.FixOrientation();
                     trimmedFace = fix.Face();
-                    BRepLib::SameParameter(trimmedFace, data.intersectTol3d);
+                    BRepLib::SameParameter(trimmedFace, intersectTol3d);
                     // Validity-check NURBS trims too (was analytic-only): a
                     // projection that produced a malformed hole falls through to
                     // the fallbacks instead of emitting a masked bad face.
@@ -1398,7 +1554,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 if (uvHi[0] > uvLo[0] && pfv1 > pfv0) {
                     try {
                         BRepBuilderAPI_MakeFace pf(surface, uvLo[0], uvHi[0],
-                            pfv0, pfv1, data.intersectTol3d);
+                            pfv0, pfv1, intersectTol3d);
                         if (pf.IsDone()) {
                             ShapeFix_Face fx(pf.Face());
                             fx.Perform();
@@ -1481,7 +1637,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         if (validRange && subWindow) {
                             BRepBuilderAPI_MakeFace rf(surface,
                                 uvLo[0], uvHi[0], rfv0, rfv1,
-                                data.intersectTol3d);
+                                intersectTol3d);
                             if (rf.IsDone()) {
                                 ShapeFix_Face fx(rf.Face());
                                 fx.Perform();
@@ -1496,7 +1652,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     }
                     if (!builtRanged) {
                         BRepBuilderAPI_MakeFace faceMaker(
-                            surface, data.intersectTol3d);
+                            surface, intersectTol3d);
                         if (faceMaker.IsDone()) {
                             finalFace = faceMaker.Face();
                             haveFace = true;
@@ -1518,41 +1674,51 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             fprintf(stderr,
               "\n===== HDOCCT ANALYTIC TRIM HISTOGRAM (!hasTrimCurves) =====\n");
             fprintf(stderr,
-                "%-9s %6s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s\n",
+                "%-9s %6s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s "
+                "%8s\n",
                 "surface","seen",
                 "trimOK","parmOK","parmFB","rangeFB","skip","projN","wireX",
-                "mkfOut","mkfIn","analyz");
+                "mkfOut","mkfIn","analyz","rngDisc","chord","nullSrf");
             long tot[FS_N] = {0}; long totSeen = 0;
             for (int s = 0; s < ST_N; ++s) {
                 if (_faceSeen[s] == 0 &&
-                    _hist[s][FS_TRIM_OK]==0 && _hist[s][FS_SKIP]==0) continue;
+                    _hist[s][FS_TRIM_OK]==0 && _hist[s][FS_SKIP]==0 &&
+                    _hist[s][FS_NULL_SURF]==0) continue;
                 fprintf(stderr,
                   "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld "
-                  "%8ld\n",
+                  "%8ld %8ld %8ld %8ld\n",
                   _stName[s], _faceSeen[s],
                   _hist[s][FS_TRIM_OK], _hist[s][FS_FALLBACK_PARAM_OK],
                   _hist[s][FS_FALLBACK_PARAM],
                   _hist[s][FS_FALLBACK_RANGE], _hist[s][FS_SKIP],
                   _hist[s][FS_PROJNULL], _hist[s][FS_WIRE],
                   _hist[s][FS_MKFACE_OUTER], _hist[s][FS_MKFACE_INNER],
-                  _hist[s][FS_ANALYZER]);
+                  _hist[s][FS_ANALYZER],
+                  _hist[s][FS_RANGE_DISCARD], _hist[s][FS_CHORD],
+                  _hist[s][FS_NULL_SURF]);
                 totSeen += _faceSeen[s];
                 for (int f = 0; f < FS_N; ++f) tot[f] += _hist[s][f];
             }
             fprintf(stderr,
-              "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld\n",
+              "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld "
+              "%8ld %8ld %8ld\n",
               "TOTAL", totSeen,
               tot[FS_TRIM_OK], tot[FS_FALLBACK_PARAM_OK], tot[FS_FALLBACK_PARAM],
               tot[FS_FALLBACK_RANGE],
               tot[FS_SKIP], tot[FS_PROJNULL], tot[FS_WIRE],
-              tot[FS_MKFACE_OUTER], tot[FS_MKFACE_INNER], tot[FS_ANALYZER]);
+              tot[FS_MKFACE_OUTER], tot[FS_MKFACE_INNER], tot[FS_ANALYZER],
+              tot[FS_RANGE_DISCARD], tot[FS_CHORD], tot[FS_NULL_SURF]);
             fprintf(stderr,
               "  legend: trimOK=wire-trim accepted; parmOK=full-window analytic "
               "face:range param route (closed surface, correct by design); "
               "parmFB=sub-window param fallback (real trim that failed); "
               "rangeFB=untrimmed natural/range fallback; "
               "skip=no face built; projN=Curve2d null; wireX=MakeWire !done; "
-              "mkfOut/mkfIn=MakeFace !done; analyz=BRepCheck rejected\n");
+              "mkfOut/mkfIn=MakeFace !done; analyz=BRepCheck rejected; "
+              "rngDisc=analytic edge lost its authored range (verts-only "
+              "rescue, row 6); chord=curved edge replaced by a straight chord "
+              "(row 7); nullSrf=face skipped, per-family surface array "
+              "under-packed (row 18)\n");
             fprintf(stderr,
               "===========================================================\n\n");
         }
@@ -1593,6 +1759,13 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         // fallback source is now populated for analytic edges.
         static const bool _fbHistOn = (getenv("HDOCCT_TRIM_HIST") != nullptr);
         long _fbAnalyticEdges = 0, _fbNurbEdges = 0;
+        // Lossy-rung counters for this branch (HDOCCT_TRIM_HIST spirit):
+        //   rangeDiscard -- an analytic edge whose exact-param build failed and
+        //     was rebuilt from endpoint vertices, dropping the authored range
+        //     (can pick the wrong arc on a periodic curve, row 6);
+        //   chord -- a curved edge that could be built no other way and was
+        //     replaced by a straight chord between its endpoints (row 7).
+        long _fbRangeDiscardEdges = 0, _fbChordEdges = 0;
 
         auto mkAx2b = [](const GfVec3d& c, const GfVec3d& n, const GfVec3d& vx) {
             return gp_Ax2(gp_Pnt(c[0], c[1], c[2]),
@@ -1601,6 +1774,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         };
 
         std::vector<TopoDS_Edge> edges(numEdgesGlobal);
+        std::set<std::string> _warnedEdgeTypeA;   // row 12, once per token
 
         for (size_t ei = 0; ei < numEdgesGlobal; ++ei) {
             // Endpoints (shared authored vertices), bounded by the authored
@@ -1673,8 +1847,10 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     }
                 }
                 ++ellE;
-            } else {
-                // BrepCurve3dNurbAPI (default): NURBS-family cursor + packing.
+            } else if (ct == "BrepCurve3dNurbAPI") {
+                // NURBS-family cursor + packing (EXPLICIT token match now, was
+                // the catch-all default). An unrecognized token no longer
+                // consumes a NURBS slot and desyncs later NURBS edges (row 12).
                 if (nurbE < data.edgeCurveVertexCount.size()) {
                     int numCPs = data.edgeCurveVertexCount[nurbE];
                     int order = data.edgeCurveOrder[nurbE];
@@ -1694,6 +1870,17 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     edgeWeightOffset += numCPs;
                 }
                 ++nurbE;
+            } else {
+                // Unknown edge:curveType: consume NOTHING (advance no cursor),
+                // leave c3 null. The fallback edges[ei] stays null and the wire
+                // that references it fails loudly via the null-edge guard below
+                // (register rows 12 + 2). Warn once per token per Brep.
+                if (!ct.empty() && _warnedEdgeTypeA.insert(ct).second) {
+                    TF_WARN("hdOcct: Brep %zu edge %zu: unknown edge:curveType "
+                            "'%s'; leaving the fallback edge null. Add an "
+                            "explicit branch if this type is supported.",
+                            brepIndex, ei, ct.c_str());
+                }
             }
 
             if (!c3.IsNull()) {
@@ -1704,11 +1891,42 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     BRepBuilderAPI_MakeEdge em(c3, p1, p2, r0, r1);
                     if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
                 }
+                if (!built && haveVerts && haveRange) {
+                    // Exact-param build failed. Before discarding the authored
+                    // range, period-normalize it onto the curve's own domain and
+                    // retry WITH params: a periodic curve (circle/ellipse) can
+                    // carry a range a whole number of periods off OCCT's window,
+                    // or straddling the seam. Only if that also fails do we drop
+                    // the range (below), which on a periodic curve can silently
+                    // select the wrong arc (row 6).
+                    double nr0 = r0, nr1 = r1;
+                    if (_PeriodNormalizeRange(c3, nr0, nr1) &&
+                        (nr0 != r0 || nr1 != r1)) {
+                        BRepBuilderAPI_MakeEdge em(c3, p1, p2, nr0, nr1);
+                        if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                    }
+                }
                 if (!built && haveVerts) {
-                    // Params disagree with the vertices past tolerance: let OCCT
-                    // derive params from the shared endpoints.
+                    // Range rescue exhausted: derive params from the shared
+                    // endpoints. This discards the authored range, so on a
+                    // periodic curve OCCT may pick the complementary arc. Count +
+                    // warn once (row 6).
                     BRepBuilderAPI_MakeEdge em(c3, p1, p2);
-                    if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                    if (em.IsDone()) {
+                        edges[ei] = em.Edge(); built = true;
+                        if (haveRange) {
+                            ++_fbRangeDiscardEdges;
+                            static std::atomic<bool> _warnedRD{false};
+                            if (!_warnedRD.exchange(true)) {
+                                TF_WARN("hdOcct: Brep %zu edge %zu: range [%g,%g] "
+                                  "rejected by OCCT; rebuilt from endpoint "
+                                  "vertices (authored arc may be lost on a "
+                                  "periodic curve, row 6). Further occurrences "
+                                  "counted in HDOCCT_TRIM_HIST.",
+                                  brepIndex, ei, r0, r1);
+                            }
+                        }
+                    }
                 }
                 if (!built && haveRange) {
                     BRepBuilderAPI_MakeEdge em(c3, r0, r1);
@@ -1719,10 +1937,25 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
                 }
                 if (!built && haveVerts) {
-                    // Last resort: a straight segment between the endpoints, so
-                    // the wire can still close (matches the legacy NURBS path).
+                    // Last resort: no builder accepted the authored 3D curve, so
+                    // replace this (curved) edge with the straight chord between
+                    // its endpoints purely to let the boundary wire close. This
+                    // changes the boundary geometry (a real curve becomes a line),
+                    // so count + warn once (row 7).
                     BRepBuilderAPI_MakeEdge em(p1, p2);
-                    if (em.IsDone()) edges[ei] = em.Edge();
+                    if (em.IsDone()) {
+                        edges[ei] = em.Edge();
+                        ++_fbChordEdges;
+                        static std::atomic<bool> _warnedChord{false};
+                        if (!_warnedChord.exchange(true)) {
+                            TF_WARN("hdOcct: Brep %zu edge %zu (%s): authored 3D "
+                              "curve could not be built by any range/vertex "
+                              "route; replaced by a straight chord to close the "
+                              "wire (boundary geometry altered, row 7). Further "
+                              "occurrences counted in HDOCCT_TRIM_HIST.",
+                              brepIndex, ei, ct.c_str());
+                        }
+                    }
                 }
             }
             } catch (const Standard_Failure&) {
@@ -1734,8 +1967,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         if (_fbHistOn) {
             fprintf(stderr,
               "  HDOCCT fallback edges[] built: analytic=%ld nurb=%ld "
-              "(global edge count=%zu)\n",
-              _fbAnalyticEdges, _fbNurbEdges, numEdgesGlobal);
+              "rangeDiscard=%ld chord=%ld (global edge count=%zu)\n",
+              _fbAnalyticEdges, _fbNurbEdges,
+              _fbRangeDiscardEdges, _fbChordEdges, numEdgesGlobal);
         }
 
         // Per-edgeuse offsets into the packed curveUv (trim) arrays.
@@ -1749,8 +1983,28 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             trimCPOff[i + 1] = trimCPOff[i] + tvc;
             trimKOff[i + 1]  = trimKOff[i] + tvc + tord;
         }
+        // curveUv is positionally packed one 2D pcurve per edgeuse, so the
+        // per-edgeuse indexing (trimCPOff[euIdx]) is only valid when exactly one
+        // pcurve was authored per edgeuse. If the authored count does not match
+        // the edgeuse count, the entire pcurve set is discarded and every face
+        // falls to the 3D-edge trim path. That gate is required (a mismatched
+        // count means the positional mapping is unknowable), but the whole-set
+        // discard was silent -- warn once, citing the counts, so a truncated or
+        // over-authored curveUv array (BA.375) is visible (debt register row 22).
         const bool useTrim = (numTrim == data.edgeuseEdgeIndex.size()) &&
                              !data.trimCurveControlVertices.empty();
+        if (!useTrim && numTrim != 0 &&
+            numTrim != data.edgeuseEdgeIndex.size()) {
+            static std::atomic<bool> _warnedUseTrim{false};
+            if (!_warnedUseTrim.exchange(true)) {
+                TF_WARN("hdOcct: Brep %zu: curveUv pcurve count (%zu) != edgeuse "
+                        "count (%zu); discarding the ENTIRE authored pcurve set "
+                        "and trimming every face from its 3D edges instead "
+                        "(positional packing requires an exact 1:1 match; see "
+                        "BA.375, debt register row 22).",
+                        brepIndex, numTrim, data.edgeuseEdgeIndex.size());
+            }
+        }
 
         // Build faces with edge loops + pcurves
         size_t loopStart = 0;
@@ -1885,7 +2139,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 fu0 = uvLo[0]; fu1 = uvHi[0]; fv0 = uvLo[1]; fv1 = uvHi[1];
                 singularFace = hasVertexLoop ||
                     _FaceRangeTouchesPole(surface, fu0, fu1, fv0, fv1,
-                                          data.intersectTol3d);
+                                          intersectTol3d);
             }
 
             TopoDS_Face finalFace;
@@ -1913,8 +2167,8 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     // pcurve-built edges carry no 3D curve and leave
                     // SameParameter unset; synthesize/reconcile both before
                     // the face is handed to the mesher.
-                    BRepLib::BuildCurves3d(face, data.intersectTol3d);
-                    BRepLib::SameParameter(face, data.intersectTol3d,
+                    BRepLib::BuildCurves3d(face, intersectTol3d);
+                    BRepLib::SameParameter(face, intersectTol3d,
                                            Standard_True);
                     finalFace = face;
                     haveFace = true;
@@ -1937,7 +2191,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 (!haveFace || _FaceMeshTris(finalFace) <= 2)) {
                 const bool hadSliver = haveFace;   // a collapsed wire face
                 TopoDS_Face pf = _MakeParametricPoleFace(
-                    surface, fu0, fu1, fv0, fv1, data.intersectTol3d);
+                    surface, fu0, fu1, fv0, fv1, intersectTol3d);
                 if (!pf.IsNull()) {
                     finalFace = pf; haveFace = true;
                 } else if (hadSliver) {
@@ -1986,7 +2240,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     // reorient faces, so it stays gated behind an env flag pending validation.
     if (getenv("HDOCCT_SEW") != nullptr) {
         try {
-            BRepBuilderAPI_Sewing sew(data.intersectTol3d);
+            BRepBuilderAPI_Sewing sew(intersectTol3d);
             for (const auto& face : faces) sew.Add(face);
             sew.Perform();
             TopoDS_Shape sewn = sew.SewedShape();

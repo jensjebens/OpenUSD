@@ -61,7 +61,12 @@ private:
     struct _BrepData {
         // Counts
         VtArray<unsigned int> regionCount;
-        double intersectTol3d = 1e-6;
+        // Per-Brep 3D intersection tolerance (brep:intersectTol3d authors one
+        // entry per Brep in the array). Resolved per Brep in _BuildSingleBrep
+        // with a last-entry clamp; empty means "use the 1e-6 reader fallback"
+        // (debt register row 17). Previously collapsed to entry [0] for every
+        // Brep.
+        VtArray<double> intersectTol3d;
 
         // Region
         VtArray<unsigned int> regionShellCount;
