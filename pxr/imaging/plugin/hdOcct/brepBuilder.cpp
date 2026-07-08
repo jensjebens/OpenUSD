@@ -296,6 +296,12 @@ Handle(Geom2d_BSplineCurve) _MakeBSplineCurve2d(
     }
 }
 
+/// Half of pi. Used as the frame-rotation angle applied to a Geom_Ellipse whose
+/// authored xRadius < yRadius (OCCT requires major >= minor) and, with a sign
+/// flip, as the matching remap of that ellipse's authored edge:range parameter
+/// (see the two ellipse dispatch sites; debt register rows 5 and 32).
+constexpr double _halfPi = 1.5707963267948966;
+
 /// Convert an authored cone v-parameter (AXIAL distance -- height along the
 /// axis, the UsdSolid BrepSurfaceConeAPI convention) to OCCT's Geom_ConicalSurface
 /// v-parameter (SLANT distance along the generator): v_slant = v_axial / cos(semiAngle).
@@ -887,6 +893,10 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         size_t numEdgesTotal = data.edgeCurveType.size();
         std::vector<Handle(Geom_Curve)> edge3dCurves(numEdgesTotal);
         std::vector<bool> edgeIsAnalytic(numEdgesTotal, false);
+        // An xr<yr ellipse's frame is rotated +pi/2 (OCCT major>=minor), which
+        // shifts its parameterization; the authored edge:range must then be
+        // remapped by -pi/2 where it is consumed below (debt register row 5).
+        std::vector<bool> edgeEllipseSwapped(numEdgesTotal, false);
 
         // Shared boundary vertices, one TopoDS_Vertex per authored vertex index
         // (brep:vertexPoint:point:position). Building each analytic edge between
@@ -949,12 +959,15 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         gp_Ax2 ax = mkAx2(data.edgeEllipseCenter[ellE],
                                           data.edgeEllipseAxis[ellE],
                                           data.edgeEllipseRefDir[ellE]);
-                        // OCCT requires major >= minor; rotate frame if not.
+                        // OCCT requires major >= minor; rotate frame +pi/2 if
+                        // not, and flag the edge so its authored edge:range is
+                        // remapped by -pi/2 at consumption (debt register row 5).
                         if (xr >= yr) {
                             edge3dCurves[ei] = new Geom_Ellipse(ax, xr, yr);
                         } else {
-                            ax.Rotate(ax.Axis(), 1.5707963267948966);
+                            ax.Rotate(ax.Axis(), _halfPi);
                             edge3dCurves[ei] = new Geom_Ellipse(ax, yr, xr);
+                            edgeEllipseSwapped[ei] = true;
                         }
                     }
                     ++ellE;
@@ -1115,8 +1128,13 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         }
                         if (edgeIsAnalytic[edgeIdx] &&
                             2 * edgeIdx + 1 < data.edgeRange.size()) {
-                            const double r0 = data.edgeRange[2 * edgeIdx];
-                            const double r1 = data.edgeRange[2 * edgeIdx + 1];
+                            double r0 = data.edgeRange[2 * edgeIdx];
+                            double r1 = data.edgeRange[2 * edgeIdx + 1];
+                            // xr<yr ellipse: the +pi/2 frame rotation applied at
+                            // construction shifts params by -pi/2 (row 5).
+                            if (edgeEllipseSwapped[edgeIdx]) {
+                                r0 -= _halfPi; r1 -= _halfPi;
+                            }
                             // Preferred: shared vertices + exact params.
                             if (v1 && v2) {
                                 BRepBuilderAPI_MakeEdge em(
@@ -1591,8 +1609,10 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 }
             }
             const bool haveRange = 2 * ei + 1 < data.edgeRange.size();
-            const double r0 = haveRange ? data.edgeRange[2 * ei] : 0.0;
-            const double r1 = haveRange ? data.edgeRange[2 * ei + 1] : 0.0;
+            // Mutable: an xr<yr ellipse whose frame we rotate by +pi/2 below
+            // needs its authored range remapped by -pi/2 to stay on the same arc.
+            double r0 = haveRange ? data.edgeRange[2 * ei] : 0.0;
+            double r1 = haveRange ? data.edgeRange[2 * ei + 1] : 0.0;
 
             const std::string ct = ei < data.edgeCurveType.size()
                 ? data.edgeCurveType[ei].GetString() : std::string();
@@ -1630,8 +1650,16 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     if (xr >= yr) {
                         c3 = new Geom_Ellipse(ax, xr, yr);
                     } else {
-                        ax.Rotate(ax.Axis(), 1.5707963267948966);
+                        // OCCT requires major >= minor, so swap the radii and
+                        // rotate the frame +pi/2. That rotation reparametrizes
+                        // the ellipse: a point at authored param t now sits at
+                        // t - pi/2 in the rotated frame, so shift the authored
+                        // edge:range to match, else MakeEdge(c3,p1,p2,r0,r1)
+                        // selects the wrong (often complementary) arc on a
+                        // partial-arc ellipse (debt register row 5).
+                        ax.Rotate(ax.Axis(), _halfPi);
                         c3 = new Geom_Ellipse(ax, yr, xr);
+                        if (haveRange) { r0 -= _halfPi; r1 -= _halfPi; }
                     }
                 }
                 ++ellE;

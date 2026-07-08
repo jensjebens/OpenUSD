@@ -189,6 +189,7 @@ PRIM_PATHS = {
     'testMixedSurfaces.usda': '/World/MixedSurfaces',
     'testMixedCurvesWithPcurves.usda': '/World/MixedCurves',
     'testForcedFallbackCone.usda': '/World/FallbackCone',
+    'testEllipseXrLtYrArc.usda': '/World/EllipseSector',
 }
 
 # Closed solids: signed volume must be positive (outward winding).
@@ -967,6 +968,47 @@ class TestForcedFallbackCone(unittest.TestCase):
                                msg=f"cone apex z {zmax:.3f} != 10")
         self.assertAlmostEqual(rmax, 5.0, delta=0.1,
                                msg=f"cone base radius {rmax:.3f} != 5 (foreshortened)")
+
+
+class TestEllipseXrLtYrPartialArc(unittest.TestCase):
+    """xr<yr ellipse frame-swap: authored edge:range remapped by -pi/2.
+
+    testEllipseXrLtYrArc is a planar (z=0) three-quarter elliptical sector:
+    center -> straight to (0,4) -> 270-degree ellipse arc (xRadius=2, yRadius=4,
+    param t=pi/2..2pi through (-2,0),(0,-4)) -> straight to (2,0) -> back to
+    center, authored WITHOUT curveUv (derived-trim ellipse path). Because
+    xRadius < yRadius, OCCT's major>=minor requirement forces the builder to
+    swap the radii and rotate the frame +pi/2, which reparametrizes the ellipse;
+    the authored edge:range must then be remapped by -pi/2 so the intended arc
+    is selected (debt register row 5). This pins the correct 3/4 sector:
+    area = (3/4)*pi*xr*yr = 6*pi ~= 18.85 and bbox x=[-2,2], y=[-4,4]. It is a
+    conformance + characterization fixture for the ellipse-swap path; a
+    full-period ellipse would be insensitive to the shift, so a partial arc is
+    used to exercise arc selection.
+    """
+
+    def test_EllipseXrLtYr_ThreeQuarterSector(self):
+        stage = _tessellate_fixture('testEllipseXrLtYrArc.usda')
+        expected = 0.75 * math.pi * 2.0 * 4.0   # ~= 18.85
+        area = _total_surface_area(stage)
+        self.assertGreater(area, 0.0, "empty mesh")
+        self.assertAlmostEqual(
+            area, expected, delta=0.4,
+            msg=f"ellipse sector area {area:.3f} != {expected:.3f} "
+                f"(wrong arc selected? a quarter sector meshes ~6.28)")
+        # bbox: the 270-degree arc reaches -xr,+xr in X and -yr,+yr in Y. A
+        # collapsed quarter arc would leave x>=0, y>=0 only.
+        bbox = _mesh_bbox(stage)
+        self.assertIsNotNone(bbox, "empty mesh")
+        (xmin, ymin, _), (xmax, ymax, _) = bbox
+        self.assertAlmostEqual(xmin, -2.0, delta=0.1,
+                               msg=f"sector xmin {xmin:.3f} != -2 (arc?)")
+        self.assertAlmostEqual(xmax, 2.0, delta=0.1,
+                               msg=f"sector xmax {xmax:.3f} != 2")
+        self.assertAlmostEqual(ymin, -4.0, delta=0.1,
+                               msg=f"sector ymin {ymin:.3f} != -4 (arc?)")
+        self.assertAlmostEqual(ymax, 4.0, delta=0.1,
+                               msg=f"sector ymax {ymax:.3f} != 4")
 
 
 if __name__ == '__main__':

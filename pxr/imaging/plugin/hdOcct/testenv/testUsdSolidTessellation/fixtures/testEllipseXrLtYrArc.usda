@@ -1,0 +1,68 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+    doc = """Planar face (z=0) trimmed by a 270-degree arc of an ellipse whose
+xRadius (2) < yRadius (4), authored WITHOUT curveUv (pcurves) so it exercises the
+derived-trim (!hasTrimCurves) ellipse edge path. OCCT's Geom_Ellipse requires
+major>=minor, so the builder swaps the radii and rotates the frame +pi/2; that
+reparametrizes the ellipse, so the authored edge:range must be remapped by -pi/2
+(debt register row 5). The loop is a THREE-QUARTER elliptical sector: center
+(0,0,0) -> straight to (0,4,0) -> 270-degree arc [ellipse param t=pi/2..2pi]
+sweeping through (-2,0),(0,-4) to (2,0,0) -> straight back to center. Correct arc
+selection meshes the 3/4 sector, area = (3/4)*pi*xr*yr = 6*pi ~= 18.85, bbox
+x=[-2,2] y=[-4,4]. WITHOUT the range remap, the authored params no longer land on
+the endpoints, so OCCT recovers the SHORT (90-degree) arc from the vertices
+instead, collapsing the region to the 1-quadrant quarter (area 2*pi ~= 6.28, bbox
+x=[0,2] y=[0,4]). The area+bbox assertions in TestEllipseXrLtYrPartialArc
+distinguish the two. A full-period ellipse would be insensitive to the shift; the
+long partial arc is what exposes the complementary-arc ambiguity.
+"""
+)
+
+def Xform "World"
+{
+    def BrepArray "EllipseSector" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dLineAPI:edge3dLine", "BrepCurve3dEllipseAPI:edge3dEllipse", "BrepSurfacePlaneAPI"]
+    )
+    {
+        uniform point3d[] brep:edge3dLine:curve3d:line:origin = [(0, 0, 0), (2, 0, 0)]
+        uniform vector3d[] brep:edge3dLine:curve3d:line:direction = [(0, 1, 0), (-1, 0, 0)]
+        uniform point3d[] brep:edge3dEllipse:curve3d:ellipse:center = [(0, 0, 0)]
+        uniform vector3d[] brep:edge3dEllipse:curve3d:ellipse:axis = [(0, 0, 1)]
+        uniform vector3d[] brep:edge3dEllipse:curve3d:ellipse:refDirection = [(1, 0, 0)]
+        uniform double[] brep:edge3dEllipse:curve3d:ellipse:xRadius = [2]
+        uniform double[] brep:edge3dEllipse:curve3d:ellipse:yRadius = [4]
+        uniform double3[] brep:extent = [(-2, -4, 0), (2, 4, 0)]
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform uint[] brep:regionCount = [1]
+        uniform vector3d[] brep:surface:plane:axis = [(0, 0, 1)]
+        uniform point3d[] brep:surface:plane:origin = [(0, 0, 0)]
+        uniform vector3d[] brep:surface:plane:refDirection = [(1, 0, 0)]
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (0, 4, 0), (2, 0, 0)]
+        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dEllipseAPI", "BrepCurve3dLineAPI"]
+        uniform double[] edge:range = [0, 4, 1.5707963267948966, 6.2831853071795862, 0, 2]
+        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 0)]
+        uniform uint[] edgeuse:edgeIndex = [0, 1, 2]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 1, 2]
+        uniform token[] edgeuse:orientationType = ["same", "same", "same"]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry"]
+        uniform uint[] face:loopCount = [1]
+        uniform double2[] face:range = [(-2, -4), (2, 4)]
+        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI"]
+        uniform token[] face:trimType = ["general"]
+        uniform uint[] faceuse:faceIndex = [0, 0]
+        uniform token[] faceuse:orientationType = ["same", "opposite"]
+        uniform uint[] loop:edgeuseCount = [3]
+        uniform uint[] loop:vertexIndex = [0]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["voidRegion"]
+        uniform uint[] shell:faceuseCount = [2]
+        uniform token[] shell:pointType = ["none"]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform double[] wireEdge:range = []
+        uniform int2[] wireEdge:vertexIndices = []
+    }
+}
