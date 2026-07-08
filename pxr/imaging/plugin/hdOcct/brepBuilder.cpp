@@ -988,13 +988,41 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
 
             // Build a trimmed face from the loops' 3D edge wires.
             //
-            // Analytic (elementary) surfaces use the full path for any loop
-            // count: edges bounded by edge:range, exact pcurve projection, and a
-            // validity check. NURBS surfaces keep legacy behaviour — only
-            // multi-loop faces are wire-trimmed (without pcurve projection), and
-            // single-loop faces fall through to natural bounds — because the
-            // authored curveUv path is the correct route for trimmed NURBS.
-            const bool attemptTrim = analyticSurf || numLoops > 1;
+            // Any face carrying a non-empty boundary loop attempts the wire-trim
+            // (with the failure ladders below -- analyzer reject -> two-pass
+            // retry -> parametric/natural-bounds fallback -- as the safety net).
+            // This covers analytic (elementary) surfaces for any loop count AND
+            // single-loop NURBS faces trimmed only by analytic 3D edges (real
+            // CAD trims a NURBS face with line/circle/ellipse 3D edges and no
+            // authored curveUv -- production STEP commonly omits pcurves).
+            //
+            // The single-loop NURBS case was formerly excluded (attemptTrim =
+            // analyticSurf || numLoops > 1) on the finding that 3D-wire trimming
+            // under-meshed BSpline surfaces. That calculus changed: the derive
+            // path now projects exact pcurves onto BSpline surfaces too
+            // (GeomProjLib::Curve2d, gated below on analyticSurf ||
+            // IsKind(Geom_BSplineSurface)), reconciles via BRepLib::BuildCurves3d
+            // + SameParameter, and validity-checks the NURBS trim -- the same
+            // route that made the holed pcurve-less NURBS twins work. A NURBS
+            // trim that still fails the analyzer falls through to the ranged /
+            // natural-bounds fallback exactly as before, so an already-consistent
+            // planar NURBS face (whose control net already equals its trim) is
+            // unchanged geometrically.
+            //
+            // "Boundary edges present" is required so a rule-428 degenerate
+            // vertex-loop (a zero-edgeuse pole/apex marker) does NOT attempt a
+            // wire-trim it cannot build -- that would pre-empt the parametric
+            // pole-closure fallback. Sum this face's loop edgeuse counts.
+            size_t faceEdgeuseTotal = 0;
+            for (size_t l = 0; l < numLoops; ++l) {
+                size_t gl = loopStartIdx + l;
+                if (gl < data.loopEdgeuseCount.size())
+                    faceEdgeuseTotal += data.loopEdgeuseCount[gl];
+            }
+            const bool faceHasBoundaryEdges = faceEdgeuseTotal > 0;
+            const bool attemptTrim =
+                analyticSurf || numLoops > 1 ||
+                (numLoops == 1 && faceHasBoundaryEdges);
 
             TopoDS_Face finalFace;
             bool haveFace = false;
@@ -1346,10 +1374,19 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 }
             }
 
-            // Untrimmed fallback: single-loop NURBS faces (legacy) and faces
-            // with no boundary loops fall back to the surface parameter bounds.
-            // Faces that had edges but failed to trim are skipped (no garbage
-            // geometry).
+            // Untrimmed fallback: single-loop NURBS faces and faces with no
+            // boundary loops fall back to the surface parameter bounds. This is
+            // also the SAFETY NET for a single-loop NURBS face whose wire-trim
+            // was attempted (the widened attemptTrim gate) but failed the
+            // analyzer: it degrades to the same ranged/natural-bounds face it
+            // rendered before, rather than being dropped. Analytic faces that
+            // attempted trim and failed are still SKIPPED (no garbage geometry) --
+            // their legitimate pole/seam cases are already served by the
+            // parametric face:range fallback above, so a genuine analytic trim
+            // failure must not emit an oversized patch. Multi-loop (holed) NURBS
+            // faces are likewise NOT opened to this fallback: an un-holed
+            // oversized patch is exactly the BRepCheck_BadOrientationOfSubshape
+            // failure mode the FixOrientation pass exists to avoid.
             //
             // When no curveUv (pcurve) is authored the natural surface bounds
             // are the only 2D window available. If the authored face:range is a
@@ -1360,7 +1397,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             // exceeds) the natural bounds this is a no-op and we keep the
             // untrimmed natural-bounds face, so already-consistent fixtures are
             // unaffected.
-            if (!haveFace && (!attemptTrim || numLoops == 0)) {
+            if (!haveFace &&
+                (!attemptTrim || numLoops == 0 ||
+                 (!analyticSurf && numLoops == 1))) {
                 try {
                     bool builtRanged = false;
                     if (2 * faceIdx + 1 < data.faceRange.size()) {
@@ -1458,76 +1497,173 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         #undef HIST
         // ---- end report ------------------------------------------------------
     } else {
-        // Full topology path with pcurves available
+        // Full topology path with pcurves available.
         //
-        // LATENT GAP (mixed 3D-edge families): edges[] below is sized and packed
-        // ONLY from the NURBS 3D-curve strata (edgeCurveVertexCount), so its
-        // index space is "NURBS edges in order", NOT the global edge index. Every
-        // wire is normally built from the authored 2D pcurve (the useTrim path
-        // ~40 lines down), so this only matters in the per-edgeuse FALLBACK that
-        // fires when a pcurve is absent or its MakeEdge fails: that fallback reads
-        // edges[edgeIdx] with a GLOBAL edgeIdx (edgeuse:edgeIndex). If any edge in
-        // the prim is ANALYTIC (BrepCurve3dLineAPI / BrepCurve3dCircleAPI /
-        // BrepCurve3dEllipseAPI), two things break together -- the global index no
-        // longer aligns with the NURBS-only edges[] packing, AND analytic edges
-        // have no edges[] entry at all -- so the fallback yields a null/mismatched
-        // edge and that edgeuse is silently dropped from the wire (face lost).
-        // The !hasTrimCurves branch above builds edges per-family with separate
-        // line/circle/ellipse/nurb cursors and dispatches on edge:curveType; this
-        // branch does not. testMixedCurvesWithPcurves.usda pins the healthy case
-        // (analytic + NURBS 3D edges with VALID pcurves -> fallback never taken);
-        // the fix, if the fallback ever needs to serve analytic edges, is to build
-        // edges[] over ALL edges dispatched on edge:curveType (mirroring the
-        // !hasTrimCurves per-family builder) and index it by global edge id.
-        size_t numEdges = data.edgeCurveVertexCount.size();
+        // edges[] is the per-edgeuse FALLBACK's 3D-edge source: it fires when an
+        // authored 2D pcurve is absent or its MakeEdge fails (the useTrim path
+        // ~40 lines down), and reads edges[edgeIdx] with a GLOBAL edgeIdx
+        // (edgeuse:edgeIndex). It is therefore built over ALL edges, sized and
+        // indexed by the GLOBAL edge index (edge:curveType.size()), dispatching
+        // on edge:curveType with separate per-family cursors -- mirroring the
+        // !hasTrimCurves branch's analytic dispatch. (Previously edges[] was
+        // sized/packed ONLY from the NURBS 3D-curve strata (edgeCurveVertexCount)
+        // and indexed by the NURBS ordinal, so on a prim mixing analytic edges
+        // (line/circle/ellipse) with NURBS the global index no longer aligned AND
+        // analytic edges had no entry at all -- the fallback dropped those
+        // edgeuses and lost the face. testMixedCurvesWithPcurves.usda exercises
+        // the mixed line/circle/NURBS case with valid pcurves so the fallback is
+        // not normally taken; this build makes the fallback correct if it ever
+        // is, and matches the same cross-kernel packing class the SMLib reader
+        // hit on real CAD with 9 NURBS among 581 analytic edges.)
+        size_t numEdgesGlobal = data.edgeCurveType.size();
         size_t edgeCPOffset = 0;
         size_t edgeKnotOffset = 0;
         size_t edgeWeightOffset = 0;
+        // Per-family ordinal cursors (each analytic family + NURBS is packed in
+        // its own array in edge order; advance the cursor for the family each
+        // GLOBAL edge belongs to, exactly as the !hasTrimCurves builder does).
+        size_t nurbE = 0, lineE = 0, circE = 0, ellE = 0;
 
-        std::vector<TopoDS_Edge> edges(numEdges);
+        // Env-gated counter (HDOCCT_TRIM_HIST spirit): how many analytic edges
+        // this branch built for the fallback. Non-zero on a mixed-family prim
+        // that actually authored analytic 3D edges alongside NURBS; the useTrim
+        // path still normally consumes the pcurves, so this only proves the
+        // fallback source is now populated for analytic edges.
+        static const bool _fbHistOn = (getenv("HDOCCT_TRIM_HIST") != nullptr);
+        long _fbAnalyticEdges = 0, _fbNurbEdges = 0;
 
-        for (size_t ei = 0; ei < numEdges; ++ei) {
-            int numCPs = data.edgeCurveVertexCount[ei];
-            int order = data.edgeCurveOrder[ei];
-            int numKnots = numCPs + order;
+        auto mkAx2b = [](const GfVec3d& c, const GfVec3d& n, const GfVec3d& vx) {
+            return gp_Ax2(gp_Pnt(c[0], c[1], c[2]),
+                          gp_Dir(n[0], n[1], n[2]),
+                          gp_Dir(vx[0], vx[1], vx[2]));
+        };
 
-            const GfVec3d* cps = data.edgeCurveControlVertices.cdata()
-                                 + edgeCPOffset;
-            const double* knots = data.edgeCurveKnots.cdata() + edgeKnotOffset;
-            const double* weights = (!data.edgeCurveWeights.empty())
-                ? data.edgeCurveWeights.cdata() + edgeWeightOffset : nullptr;
-            int numW = (!data.edgeCurveWeights.empty()) ? numCPs : 0;
+        std::vector<TopoDS_Edge> edges(numEdgesGlobal);
 
-            auto curve = _MakeBSplineCurve(cps, numCPs, order, knots, numKnots,
-                                           weights, numW);
-
-            if (!curve.IsNull()) {
-                auto vertIdx = data.edgeVertexIndices[ei];
-                gp_Pnt p1(data.vertexPositions[vertIdx[0]][0],
-                          data.vertexPositions[vertIdx[0]][1],
-                          data.vertexPositions[vertIdx[0]][2]);
-                gp_Pnt p2(data.vertexPositions[vertIdx[1]][0],
-                          data.vertexPositions[vertIdx[1]][1],
-                          data.vertexPositions[vertIdx[1]][2]);
-
-                double paramMin = data.edgeRange[ei * 2];
-                double paramMax = data.edgeRange[ei * 2 + 1];
-
-                BRepBuilderAPI_MakeEdge edgeMaker(curve, p1, p2,
-                                                   paramMin, paramMax);
-                if (edgeMaker.IsDone()) {
-                    edges[ei] = edgeMaker.Edge();
-                } else {
-                    BRepBuilderAPI_MakeEdge fallback(p1, p2);
-                    if (fallback.IsDone()) {
-                        edges[ei] = fallback.Edge();
-                    }
+        for (size_t ei = 0; ei < numEdgesGlobal; ++ei) {
+            // Endpoints (shared authored vertices), bounded by the authored
+            // edge:range interval -- both indexed by the GLOBAL edge id ei.
+            const bool haveVerts = ei < data.edgeVertexIndices.size();
+            gp_Pnt p1, p2;
+            if (haveVerts) {
+                const GfVec2i& vidx = data.edgeVertexIndices[ei];
+                if (vidx[0] >= 0 && vidx[1] >= 0 &&
+                    (size_t)vidx[0] < data.vertexPositions.size() &&
+                    (size_t)vidx[1] < data.vertexPositions.size()) {
+                    const GfVec3d& a = data.vertexPositions[vidx[0]];
+                    const GfVec3d& b = data.vertexPositions[vidx[1]];
+                    p1 = gp_Pnt(a[0], a[1], a[2]);
+                    p2 = gp_Pnt(b[0], b[1], b[2]);
                 }
             }
+            const bool haveRange = 2 * ei + 1 < data.edgeRange.size();
+            const double r0 = haveRange ? data.edgeRange[2 * ei] : 0.0;
+            const double r1 = haveRange ? data.edgeRange[2 * ei + 1] : 0.0;
 
-            edgeCPOffset += numCPs;
-            edgeKnotOffset += numKnots;
-            edgeWeightOffset += numCPs;
+            const std::string ct = ei < data.edgeCurveType.size()
+                ? data.edgeCurveType[ei].GetString() : std::string();
+            try {
+            Handle(Geom_Curve) c3;
+            bool analytic = false;
+            if (ct == "BrepCurve3dLineAPI") {
+                analytic = true;
+                if (lineE < data.edgeLineOrigin.size() &&
+                    lineE < data.edgeLineDirection.size()) {
+                    const GfVec3d& o = data.edgeLineOrigin[lineE];
+                    const GfVec3d& d = data.edgeLineDirection[lineE];
+                    c3 = new Geom_Line(gp_Pnt(o[0], o[1], o[2]),
+                                       gp_Dir(d[0], d[1], d[2]));
+                }
+                ++lineE;
+            } else if (ct == "BrepCurve3dCircleAPI") {
+                analytic = true;
+                if (circE < data.edgeCircleRadius.size()) {
+                    c3 = new Geom_Circle(
+                        mkAx2b(data.edgeCircleCenter[circE],
+                               data.edgeCircleAxis[circE],
+                               data.edgeCircleRefDir[circE]),
+                        data.edgeCircleRadius[circE]);
+                }
+                ++circE;
+            } else if (ct == "BrepCurve3dEllipseAPI") {
+                analytic = true;
+                if (ellE < data.edgeEllipseXRadius.size()) {
+                    double xr = data.edgeEllipseXRadius[ellE];
+                    double yr = data.edgeEllipseYRadius[ellE];
+                    gp_Ax2 ax = mkAx2b(data.edgeEllipseCenter[ellE],
+                                       data.edgeEllipseAxis[ellE],
+                                       data.edgeEllipseRefDir[ellE]);
+                    if (xr >= yr) {
+                        c3 = new Geom_Ellipse(ax, xr, yr);
+                    } else {
+                        ax.Rotate(ax.Axis(), 1.5707963267948966);
+                        c3 = new Geom_Ellipse(ax, yr, xr);
+                    }
+                }
+                ++ellE;
+            } else {
+                // BrepCurve3dNurbAPI (default): NURBS-family cursor + packing.
+                if (nurbE < data.edgeCurveVertexCount.size()) {
+                    int numCPs = data.edgeCurveVertexCount[nurbE];
+                    int order = data.edgeCurveOrder[nurbE];
+                    int numKnots = numCPs + order;
+                    const GfVec3d* cps = data.edgeCurveControlVertices.cdata()
+                                         + edgeCPOffset;
+                    const double* knots = data.edgeCurveKnots.cdata()
+                                          + edgeKnotOffset;
+                    const double* weights = (!data.edgeCurveWeights.empty())
+                        ? data.edgeCurveWeights.cdata() + edgeWeightOffset
+                        : nullptr;
+                    int numW = (!data.edgeCurveWeights.empty()) ? numCPs : 0;
+                    c3 = _MakeBSplineCurve(cps, numCPs, order, knots, numKnots,
+                                           weights, numW);
+                    edgeCPOffset += numCPs;
+                    edgeKnotOffset += numKnots;
+                    edgeWeightOffset += numCPs;
+                }
+                ++nurbE;
+            }
+
+            if (!c3.IsNull()) {
+                if (_fbHistOn) { if (analytic) ++_fbAnalyticEdges;
+                                 else ++_fbNurbEdges; }
+                bool built = false;
+                if (haveVerts && haveRange) {
+                    BRepBuilderAPI_MakeEdge em(c3, p1, p2, r0, r1);
+                    if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                }
+                if (!built && haveVerts) {
+                    // Params disagree with the vertices past tolerance: let OCCT
+                    // derive params from the shared endpoints.
+                    BRepBuilderAPI_MakeEdge em(c3, p1, p2);
+                    if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                }
+                if (!built && haveRange) {
+                    BRepBuilderAPI_MakeEdge em(c3, r0, r1);
+                    if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                }
+                if (!built) {
+                    BRepBuilderAPI_MakeEdge em(c3);
+                    if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                }
+                if (!built && haveVerts) {
+                    // Last resort: a straight segment between the endpoints, so
+                    // the wire can still close (matches the legacy NURBS path).
+                    BRepBuilderAPI_MakeEdge em(p1, p2);
+                    if (em.IsDone()) edges[ei] = em.Edge();
+                }
+            }
+            } catch (const Standard_Failure&) {
+                // Malformed edge curve: leave edges[ei] null; the fallback skips
+                // it exactly as before (the useTrim pcurve path is unaffected).
+            }
+        }
+
+        if (_fbHistOn) {
+            fprintf(stderr,
+              "  HDOCCT fallback edges[] built: analytic=%ld nurb=%ld "
+              "(global edge count=%zu)\n",
+              _fbAnalyticEdges, _fbNurbEdges, numEdgesGlobal);
         }
 
         // Per-edgeuse offsets into the packed curveUv (trim) arrays.
