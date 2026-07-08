@@ -41,10 +41,30 @@ PXR_NAMESPACE_OPEN_SCOPE
 namespace {
 
 // Tolerance used for unit-length and orthogonality checks on analytic
-// surface axis frames.
+// axis frames. A frame is a unit-vector triad regardless of whether it defines
+// a surface (cylinder/cone/sphere/torus/plane axis+refDirection) or a curve
+// (circle/ellipse axis+refDirection): the same 1e-6 bound applies to both so a
+// producer that authors a conformant frame is not flagged on one shape family
+// and cleared on another. (Cross-reference: the curve-frame checks in
+// _CheckCurveUnit / _CheckCurveOrtho reuse this constant -- see BA.53x/54x/55x.)
 constexpr double _FrameTol = 1e-6;
 // pi/2, used to bound cone semiAngle.
 constexpr double _HalfPi = 1.5707963267948966;
+// Fallback intersection tolerance (a 3D length) used only when a BrepArray
+// authors no positive brep:intersectTol3d. Real CAD producers carry positional
+// noise on the order of a micron (STEP files commonly declare uncertainty
+// ~1e-6..1e-5 model units), so the older 1e-9 default was tighter than any real
+// producer and turned benign endpoint/degeneracy noise into systematic BA.230 /
+// BA.240 false positives on float-pathed real files. 1e-6 is the reader-side
+// analogue of the builder's weld floor policy max(1e-4, 10*tol) in
+// brepBuilder.cpp: both express "how far apart two points may be before we treat
+// them as distinct"; the builder is deliberately looser (it must weld a mesh),
+// the validator deliberately tighter (it only reports, and conformant assets
+// author their own tol so this fallback never fires on them). See also the
+// tolerance-policy note in docs/usdsolid-debt-register.md.
+// (_FirstAuthoredIntersectTol3d(), below _Read, packages the "authored tol else
+// this fallback" resolution the tolerance-aware rules share.)
+constexpr double _FallbackIntersectTol3d = 1e-6;
 
 UsdValidationErrorSites
 _PrimSites(const UsdPrim &prim)
@@ -61,6 +81,23 @@ _Read(const UsdAttribute &attr)
         attr.Get(&value);
     }
     return value;
+}
+
+// The first authored, finite, positive brep:intersectTol3d, or the reader-side
+// _FallbackIntersectTol3d. Centralizes the fallback expression that BA.230,
+// BA.240 and BA.375 all need (previously
+// "(!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9" copy-pasted at three sites,
+// each with the fallback magnitude unexplained). A per-Brep tolerance would need
+// per-edge Brep attribution, which the flat data does not carry; the first
+// Brep's tolerance is exact for the common single-Brep case.
+double
+_FirstAuthoredIntersectTol3d(const UsdSolidBrepArray &brep)
+{
+    const VtArray<double> tol
+        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
+    return (!tol.empty() && tol[0] > 0.0 && std::isfinite(tol[0]))
+        ? tol[0]
+        : _FallbackIntersectTol3d;
 }
 
 size_t
@@ -172,9 +209,11 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
     // BA.010: brep:intersectTol3d values must be positive and finite. A
     // non-finite tolerance (NaN/Inf) silently breaks every tolerance-based rule
     // downstream: NaN fails every comparison (so an authored NaN slips past the
-    // <= 0.0 test here), and downstream fallbacks such as BA.240's
-    // "(!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9" would carry a poisoned
-    // tolerance into endpoint/degeneracy checks. Flag the finiteness violation
+    // <= 0.0 test here), and the shared tolerance resolution
+    // (_FirstAuthoredIntersectTol3d, used by BA.230/240/375) would carry a
+    // poisoned tolerance into endpoint/degeneracy checks -- which is why that
+    // helper additionally requires std::isfinite before accepting the authored
+    // value. Flag the finiteness violation
     // explicitly and separately from the non-positive case (a NaN is neither
     // "positive" nor "<= 0.0", so the ordering test alone cannot catch it).
     for (size_t i = 0; i < tol.size(); ++i) {
@@ -879,9 +918,12 @@ _BrepArrayAnalyticSurfaces(const UsdPrim &usdPrim,
 // Shared support for the deferred-rule validators                            //
 // ========================================================================== //
 
-constexpr double _NurbsTol = 1e-11;   // BA.3xx/4xx weight/knot tolerance
+constexpr double _NurbsTol = 1e-11;   // BA.3xx/4xx weight/knot ordering tolerance
 constexpr double _DomainTol = 1e-6;   // BA.56x/57x span tolerance
-constexpr double _CurveEps = 1e-4;    // BA.53x/54x/55x unit/orthogonal tolerance
+// (Curve axis-frame unit/orthogonality checks now share the surface _FrameTol
+// (1e-6); the former _CurveEps=1e-4 was retired -- register row 16. Analytic
+// edge degeneracy now measures arc length against brep:intersectTol3d instead
+// of a fixed curve epsilon -- register row 13.)
 constexpr double _TwoPi = 6.283185307179586;
 
 void
@@ -1258,8 +1300,13 @@ _CheckCurveUnit(const UsdPrim &prim, const char *ba, const char *shape,
                 const char *inst, const char *attr, const TfToken &errTok,
                 const VtArray<GfVec3d> &vecs, UsdValidationErrorVector *errors)
 {
+    // Curve axis frames use the SAME unit-length tolerance as surface axis
+    // frames (_FrameTol, 1e-6): a unit-vector check is a unit-vector check
+    // regardless of the shape family, and the previous 1e-4 curve tolerance let
+    // a circle/ellipse frame drift 100x further before flagging than the
+    // identical cylinder/cone frame (register row 16).
     for (size_t i = 0; i < vecs.size(); ++i) {
-        if (std::abs(vecs[i].GetLength() - 1.0) > _CurveEps) {
+        if (std::abs(vecs[i].GetLength() - 1.0) > _FrameTol) {
             _Err(errors, errTok, prim,
                  TfStringPrintf("[%s] BrepArray <%s>: %s %s %s[%zu] is not unit "
                                 "length (length %g).",
@@ -1275,9 +1322,11 @@ _CheckCurveOrtho(const UsdPrim &prim, const char *ba, const char *shape,
                  const char *inst, const VtArray<GfVec3d> &axis,
                  const VtArray<GfVec3d> &ref, UsdValidationErrorVector *errors)
 {
+    // Orthogonality uses _FrameTol (1e-6) for the same reason as the unit-length
+    // check above: identical frame checks share one tolerance (register row 16).
     const size_t m = std::min(axis.size(), ref.size());
     for (size_t i = 0; i < m; ++i) {
-        if (std::abs(GfDot(axis[i], ref[i])) > _CurveEps) {
+        if (std::abs(GfDot(axis[i], ref[i])) > _FrameTol) {
             _Err(errors,
                  UsdSolidValidationErrorNameTokens
                      ->analyticCurveAxisRefDirectionNotOrthogonal,
@@ -2182,8 +2231,11 @@ struct _EdgeGeom {
     // NURBS: the control-vertex hull for this edge (in curve order).
     bool isNurb = false;
     std::vector<GfVec3d> cvs;
-    // Analytic: whether the curve has zero arc length, plus start/end points.
-    bool zeroArc = false;
+    // Analytic: the curve's arc length over its authored parameter span (a raw
+    // length, no threshold applied here so the caller can measure it against the
+    // Brep's brep:intersectTol3d consistently with the NURBS branch -- register
+    // row 13). Negative when unset (NURBS edges, or an unresolved analytic edge).
+    double arcLen = -1.0;
     // Curve endpoints in curve-parametric order (start = param min, end = max).
     // Valid whenever hasGeom is true.
     GfVec3d start{ 0, 0, 0 };
@@ -2294,8 +2346,9 @@ _ResolveEdgeGeom(const UsdPrim &prim, const UsdSolidBrepArray &brep, bool wire)
                 g.hasGeom = true;
                 g.start = lineOrigin[i] + t0 * lineDir[i];
                 g.end = lineOrigin[i] + t1 * lineDir[i];
-                g.zeroArc
-                    = std::abs((t1 - t0) * lineDir[i].GetLength()) <= _CurveEps;
+                // Arc length = |span| * |direction|; measured against
+                // brep:intersectTol3d by the caller (register row 13).
+                g.arcLen = std::abs((t1 - t0) * lineDir[i].GetLength());
             }
         } else if (ct == circleTok) {
             const size_t i = circleInst++;
@@ -2307,7 +2360,8 @@ _ResolveEdgeGeom(const UsdPrim &prim, const UsdSolidBrepArray &brep, bool wire)
                                   r, r, t0);
                 g.end = conicAt(circleCenter[i], circleAxis[i], circleRef[i],
                                 r, r, t1);
-                g.zeroArc = std::abs(r * (t1 - t0)) <= _CurveEps;
+                // Exact circular arc length = r * |span|.
+                g.arcLen = std::abs(r * (t1 - t0));
             }
         } else if (ct == ellipseTok) {
             const size_t i = ellipseInst++;
@@ -2319,8 +2373,14 @@ _ResolveEdgeGeom(const UsdPrim &prim, const UsdSolidBrepArray &brep, bool wire)
                                   ellipseRef[i], ellipseX[i], ellipseY[i], t0);
                 g.end = conicAt(ellipseCenter[i], ellipseAxis[i],
                                 ellipseRef[i], ellipseX[i], ellipseY[i], t1);
-                const double meanR = 0.5 * (ellipseX[i] + ellipseY[i]);
-                g.zeroArc = std::abs(meanR * (t1 - t0)) <= _CurveEps;
+                // Upper-bound arc length = max(xRadius, yRadius) * |span|. The
+                // larger semi-axis bounds the true elliptic arc from above, so
+                // an edge only registers as degenerate when even that bound is
+                // below tolerance -- an eccentric ellipse (xr >> yr) with a
+                // short span past the minor axis is never falsely collapsed
+                // (register row 13; previously used the mean radius).
+                const double maxR = std::max(ellipseX[i], ellipseY[i]);
+                g.arcLen = std::abs(maxR * (t1 - t0));
             }
         }
     }
@@ -2334,8 +2394,12 @@ _ResolveEdgeGeom(const UsdPrim &prim, const UsdSolidBrepArray &brep, bool wire)
 // measured against tolerance." An edge is degenerate when its 3D curve has no
 // extent: for a NURBS curve, every control vertex coincides (Umhoefer: "we
 // should be able to catch these degenerate edges because all of the control
-// points are equal"); for an analytic curve, the arc length is zero. Distances
-// are measured against the Brep's brep:intersectTol3d. Both edge3d* and
+// points are equal"); for an analytic curve, the arc length falls below
+// tolerance. BOTH branches now measure against the same Brep tolerance
+// (brep:intersectTol3d, with the shared reader fallback) -- the analytic branch
+// previously used a hard-coded 1e-4 curve epsilon while the NURBS branch used
+// the Brep tolerance, so the same physical gap was called degenerate on one
+// curve family and healthy on another (register row 13). Both edge3d* and
 // wireEdge3d* instances are checked. (BA.230.)
 UsdValidationErrorVector
 _BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
@@ -2346,13 +2410,9 @@ _BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
     }
     const UsdSolidBrepArray brep(usdPrim);
 
-    // Tolerance: the first authored brep:intersectTol3d if present, else a
-    // tight geometric default. (A per-Brep tolerance would need a per-edge Brep
-    // attribution, which the flat data does not carry; the first Brep's
-    // tolerance is exact for the common single-Brep case.)
-    const VtArray<double> tol
-        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
-    const double tol3d = (!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9;
+    // Tolerance: the first authored brep:intersectTol3d, else the shared reader
+    // fallback (see _FirstAuthoredIntersectTol3d).
+    const double tol3d = _FirstAuthoredIntersectTol3d(brep);
 
     UsdValidationErrorVector errors;
 
@@ -2382,7 +2442,11 @@ _BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
                     degenerate = true;
                 }
             } else {
-                degenerate = g.zeroArc;
+                // Analytic: the curve's arc length (an upper bound for the
+                // ellipse) is degenerate when it does not exceed the Brep
+                // tolerance. arcLen < 0 means the analytic parameters were not
+                // resolvable, which is reported elsewhere.
+                degenerate = g.arcLen >= 0.0 && g.arcLen <= tol3d;
             }
             if (degenerate) {
                 _Err(&errors,
@@ -2394,7 +2458,10 @@ _BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
                          "381).",
                          usdPrim.GetPath().GetText(), label, e, tol3d,
                          g.isNurb ? "all NURBS control vertices are equal"
-                                  : "the analytic curve has zero arc length"));
+                                  : TfStringPrintf(
+                                        "the analytic curve arc length %g is "
+                                        "within tolerance",
+                                        g.arcLen).c_str()));
             }
         }
     }
@@ -2431,9 +2498,7 @@ _BrepArrayEdgeCurveVertices(const UsdPrim &usdPrim,
         return {};
     }
 
-    const VtArray<double> tol
-        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
-    const double tol3d = (!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9;
+    const double tol3d = _FirstAuthoredIntersectTol3d(brep);
 
     UsdValidationErrorVector errors;
 
@@ -2529,6 +2594,24 @@ _BrepArrayContainment(const UsdPrim &usdPrim,
     const size_t numBoxes = extent.size() / 2;
     UsdValidationErrorVector errors;
 
+    // Containment slop for BA.310/365/465: a vertex or control point may sit a
+    // tolerance outside a brep:extent box without being a real violation. The
+    // slop follows the intersectTol3d ladder used by BA.240 -- the Brep's own
+    // authored 3D tolerance -- rather than the former hard-coded 1e-11, which
+    // was tighter than float32 round-off. Real CAD is frequently authored on a
+    // float path (the prim's `extent` is float3, and brep:extent corners are
+    // commonly float-derived), so a double vertex compared to a float-quantized
+    // box overshot 1e-11 routinely and turned BA.310 into a hard-Error false
+    // positive (register row 14). _DomainTol (1e-6) floors the slop so an asset
+    // that authors an over-tight tolerance is still judged against at least the
+    // domain tolerance; a per-corner relative float32 term (~1.2e-7 * |corner|)
+    // is added so the slop tracks the quantization at large coordinates.
+    const double tol3d = _FirstAuthoredIntersectTol3d(brep);
+    const double baseSlop = std::max(tol3d, _DomainTol);
+    // std::numeric_limits<float>::epsilon() ~ 1.19e-7; a float32 value carries
+    // up to ~0.5 ulp of quantization, i.e. ~0.6e-7 * magnitude.
+    const double floatRel = 0.6e-7;
+
     // BA.040/045/050: each brep:extent box within the prim's extent.
     const VtArray<GfVec3f> primExtent = _ReadName<GfVec3f>(usdPrim, "extent");
     if (primExtent.size() >= 2) {
@@ -2570,7 +2653,13 @@ _BrepArrayContainment(const UsdPrim &usdPrim,
             const GfVec3d &mx = extent[2 * b + 1];
             bool inside = true;
             for (int k = 0; k < 3; ++k) {
-                if (p[k] < mn[k] - _NurbsTol || p[k] > mx[k] + _NurbsTol) {
+                // Per-axis slop = tolerance ladder + a float32-quantization term
+                // scaled to the box corner's magnitude (register row 14).
+                const double loSlop
+                    = baseSlop + floatRel * std::abs(mn[k]);
+                const double hiSlop
+                    = baseSlop + floatRel * std::abs(mx[k]);
+                if (p[k] < mn[k] - loSlop || p[k] > mx[k] + hiSlop) {
                     inside = false;
                     break;
                 }
@@ -2735,15 +2824,14 @@ _BrepArraySpans(const UsdPrim &usdPrim,
     // span) are owned by BrepArrayRanges (BA.235/BA.275, InvalidEdgeRangeOrder /
     // InvalidWireEdgeRangeOrder) and are not re-flagged here.
     //
-    // Tolerance: mirror BA.240 -- use the first authored brep:intersectTol3d if
-    // present and positive, else 1e-9, floored at the analytic domain tolerance
-    // so the bound is never tighter than the surface-domain checks above (an
-    // intersectTol3d of 1e-9 must not turn a benign floating-point overshoot
-    // into a false positive on an otherwise-conformant full-period edge).
-    const VtArray<double> spanTol
-        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
-    const double tol3d
-        = (!spanTol.empty() && spanTol[0] > 0.0) ? spanTol[0] : 1e-9;
+    // Tolerance: mirror BA.240 -- use the shared authored-tol resolution
+    // (_FirstAuthoredIntersectTol3d), floored at the analytic domain tolerance
+    // so the bound is never tighter than the surface-domain checks above (a
+    // benign floating-point overshoot must not become a false positive on an
+    // otherwise-conformant full-period edge). intersectTol3d is a 3D length used
+    // here as a parametric slop; the _DomainTol floor keeps the comparison
+    // meaningful for either interpretation.
+    const double tol3d = _FirstAuthoredIntersectTol3d(brep);
     const double spanAllow = std::max(tol3d, _DomainTol);
     const TfToken circle("BrepCurve3dCircleAPI");
     const TfToken ellipse("BrepCurve3dEllipseAPI");

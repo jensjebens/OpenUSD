@@ -385,6 +385,81 @@ def Xform "World"
         uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
         uniform uint[] brep:regionCount = [1]
     }
+
+    # Row 13 (BA.230): the analytic degeneracy branch must measure arc length
+    # against the Brep's brep:intersectTol3d, not a fixed 1e-4 curve epsilon.
+    # intersectTol3d is 0.01 here. Edge 0 is a circle of radius 1 spanning
+    # 0.005 rad -> arc length 0.005 <= 0.01, so it is degenerate under the
+    # authored tolerance (it was NOT flagged under the old fixed 1e-4 epsilon,
+    # since 0.005 > 1e-4). Edge 1 is a healthy quarter arc (arc length ~1.57).
+    # Edge 2 is an eccentric ellipse (xRadius 10, yRadius 0.001) spanning
+    # 0.005 rad: its upper-bound arc length uses max(xr, yr) = 10 -> 0.05 > 0.01,
+    # so max(xr,yr) keeps it NON-degenerate (the old mean-radius form would have
+    # used ~5.0 and also cleared it, but max is the conservative bound). Only
+    # edge 0 must be flagged.
+    def BrepArray "DegenerateAnalyticArcTol"
+    {
+        uniform double[] brep:intersectTol3d = [0.01]
+        uniform uint[] brep:regionCount = [1]
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dEllipseAPI"]
+        point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0), (0, 0, 0)]
+        vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1), (0, 0, 1)]
+        vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0)]
+        double[] brep:edge3dCircle:curve3d:circle:radius = [1.0, 1.0]
+        point3d[] brep:edge3dEllipse:curve3d:ellipse:center = [(0, 0, 0)]
+        vector3d[] brep:edge3dEllipse:curve3d:ellipse:axis = [(0, 0, 1)]
+        vector3d[] brep:edge3dEllipse:curve3d:ellipse:refDirection = [(1, 0, 0)]
+        double[] brep:edge3dEllipse:curve3d:ellipse:xRadius = [10.0]
+        double[] brep:edge3dEllipse:curve3d:ellipse:yRadius = [0.001]
+        # Edge 0: 0.005 rad span (degenerate). Edge 1: quarter arc (healthy).
+        # Edge 2: ellipse 0.005 rad span (non-degenerate via max(xr,yr)).
+        uniform double[] edge:range = [0, 0.005, 0, 1.5707963267948966, 0, 0.005]
+    }
+
+    # Row 15 (BA.230): a BrepArray that authors NO brep:intersectTol3d exercises
+    # the reader-side fallback (_FallbackIntersectTol3d = 1e-6). Edge 0 is a
+    # zero-direction-scaled line spanning 5e-7 model units -> arc length 5e-7,
+    # which is <= 1e-6 (flagged) but was > 1e-9 under the OLD fallback (NOT
+    # flagged). Edge 1 spans 1e-3 (healthy under either fallback). Exactly edge 0
+    # must be flagged, and only because the fallback is 1e-6.
+    def BrepArray "UnauthoredTolDegenerate"
+    {
+        uniform uint[] brep:regionCount = [1]
+        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI"]
+        point3d[] brep:edge3dLine:curve3d:line:origin = [(0, 0, 0), (0, 0, 0)]
+        vector3d[] brep:edge3dLine:curve3d:line:direction = [(1, 0, 0), (1, 0, 0)]
+        # Edge 0 span 0 -> 5e-7 (arc 5e-7, sub-fallback). Edge 1 span 0 -> 1e-3.
+        uniform double[] edge:range = [0, 5e-7, 0, 1e-3]
+    }
+
+    # Row 14 (BA.310): brep:extent containment slop must follow the
+    # intersectTol3d ladder + a float32-quantization term, not a fixed 1e-11.
+    # The box max on X is 1000; the float32 quantization at 1000 is ~6e-5. Vertex
+    # 0 sits 5e-5 past the box max (1000.00005): below the float slop, so it must
+    # NOT be flagged (it WAS a hard-Error false positive under the old 1e-11).
+    # Vertex 1 sits 1.0 past the box (1001): well outside, still flagged.
+    def BrepArray "ExtentFloatSlop"
+    {
+        uniform double[] brep:intersectTol3d = [1e-6]
+        uniform double3[] brep:extent = [(-1000, -1, -1), (1000, 1, 1)]
+        uniform uint[] brep:regionCount = [1]
+        uniform point3d[] brep:vertexPoint:point:position = [(1000.00005, 0, 0), (1001, 0, 0)]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI"]
+    }
+
+    # Row 16 (BA.532): curve axis frames use the SAME 1e-6 unit-length tolerance
+    # as surface frames. Circle 0's axis length is off by 5e-5 (length
+    # 1.00005) -> flagged under 1e-6 but NOT under the old 1e-4 curve epsilon.
+    # Circle 1 has a unit axis (clean). BrepArrayAnalyticCurves must flag exactly
+    # one AnalyticCurveAxisNotUnitLength.
+    def BrepArray "CurveFrameTol"
+    {
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
+        point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0), (0, 0, 0)]
+        vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1.00005), (0, 0, 1)]
+        vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0)]
+        double[] brep:edge3dCircle:curve3d:circle:radius = [1.0, 1.0]
+    }
 }
 )usda";
 
@@ -834,6 +909,95 @@ TestBrepArrayEdgeCurveVertices()
     }
 }
 
+static void
+TestBrepArrayDegenerateAnalyticArcTol()
+{
+    // Row 13 (BA.230): the analytic degeneracy branch measures arc length
+    // against the Brep's brep:intersectTol3d (here 0.01), not a fixed 1e-4
+    // curve epsilon. A 0.005-rad circle arc (arc length 0.005 <= 0.01) is
+    // degenerate under the authored tolerance; the old 1e-4 epsilon cleared it.
+    // A quarter arc is healthy, and an eccentric ellipse's upper-bound arc
+    // length uses max(xRadius, yRadius) so it is not falsely collapsed. Exactly
+    // one edge (edge 0) must be flagged.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+    const UsdPrim prim
+        = stage->GetPrimAtPath(SdfPath("/World/DegenerateAnalyticArcTol"));
+    TF_AXIOM(prim);
+    const UsdValidationErrorVector errors = validator->Validate(prim);
+    TF_AXIOM(_CountError(errors, ".DegenerateEdge") == 1);
+}
+
+static void
+TestBrepArrayUnauthoredTolFallback()
+{
+    // Row 15 (BA.230): with no authored brep:intersectTol3d, the reader-side
+    // fallback (_FallbackIntersectTol3d = 1e-6) governs degeneracy. A 5e-7-long
+    // analytic line edge is <= 1e-6 (degenerate) but was > 1e-9 under the old
+    // fallback (clean). Exactly the sub-fallback edge 0 must be flagged, which
+    // proves the fallback magnitude is 1e-6 rather than the former 1e-9.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+    const UsdPrim prim
+        = stage->GetPrimAtPath(SdfPath("/World/UnauthoredTolDegenerate"));
+    TF_AXIOM(prim);
+    const UsdValidationErrorVector errors = validator->Validate(prim);
+    TF_AXIOM(_CountError(errors, ".DegenerateEdge") == 1);
+}
+
+static void
+TestBrepArrayContainmentFloatSlop()
+{
+    // Row 14 (BA.310): the brep:extent containment slop follows the
+    // intersectTol3d ladder plus a float32-quantization term, not a fixed
+    // 1e-11. A vertex 5e-5 past a box max of 1000 (below the ~6e-5 float slop at
+    // that magnitude) must NOT be flagged -- under the old 1e-11 slop it was a
+    // hard-Error false positive. A vertex 1.0 past the box is still flagged.
+    // Exactly one vertexPositionOutsideBrepExtent must fire.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayContainment);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+    const UsdPrim prim
+        = stage->GetPrimAtPath(SdfPath("/World/ExtentFloatSlop"));
+    TF_AXIOM(prim);
+    const UsdValidationErrorVector errors = validator->Validate(prim);
+    // Only the vertex well outside the box (vertex 1) is flagged; the 5e-5
+    // overshoot (vertex 0) is within the float-quantization slop.
+    TF_AXIOM(_CountError(errors, ".VertexPositionOutsideBrepExtent") == 1);
+}
+
+static void
+TestBrepArrayCurveFrameTol()
+{
+    // Row 16 (BA.532): curve axis frames use the same 1e-6 unit-length
+    // tolerance as surface frames. A circle axis of length 1.00005 (off by
+    // 5e-5) is flagged under 1e-6 but was cleared under the old 1e-4 curve
+    // epsilon; a unit axis stays clean. Exactly one
+    // AnalyticCurveAxisNotUnitLength must fire.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayAnalyticCurves);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(layerContents);
+    const UsdPrim prim
+        = stage->GetPrimAtPath(SdfPath("/World/CurveFrameTol"));
+    TF_AXIOM(prim);
+    const UsdValidationErrorVector errors = validator->Validate(prim);
+    TF_AXIOM(_CountError(errors, ".AnalyticCurveAxisNotUnitLength") == 1);
+}
+
 int
 main()
 {
@@ -854,6 +1018,10 @@ main()
     TestBrepArraySolidClosure();
     TestBrepArrayDegenerateEdges();
     TestBrepArrayEdgeCurveVertices();
+    TestBrepArrayDegenerateAnalyticArcTol();
+    TestBrepArrayUnauthoredTolFallback();
+    TestBrepArrayContainmentFloatSlop();
+    TestBrepArrayCurveFrameTol();
 
     std::cout << "OK\n";
     return EXIT_SUCCESS;
