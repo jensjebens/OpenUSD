@@ -296,6 +296,23 @@ Handle(Geom2d_BSplineCurve) _MakeBSplineCurve2d(
     }
 }
 
+/// Convert an authored cone v-parameter (AXIAL distance -- height along the
+/// axis, the UsdSolid BrepSurfaceConeAPI convention) to OCCT's Geom_ConicalSurface
+/// v-parameter (SLANT distance along the generator): v_slant = v_axial / cos(semiAngle).
+/// A no-op for any non-conical surface (returns v unchanged), so it is safe to
+/// route every raw authored face:range v through it before feeding OCCT. Guards
+/// a near-90-degree semiAngle (|cos| tiny) by leaving v unconverted -- the
+/// degenerate cone is handled/rejected elsewhere, and dividing by ~0 would
+/// explode the window (see debt register row 1).
+double _ConeAxialToSlantV(const Handle(Geom_Surface)& surface, double v)
+{
+    Handle(Geom_ConicalSurface) cone =
+        Handle(Geom_ConicalSurface)::DownCast(surface);
+    if (cone.IsNull()) return v;
+    const double c = std::cos(cone->SemiAngle());
+    return (std::abs(c) > 1e-9) ? v / c : v;
+}
+
 /// True when a v-extreme (v0 or v1) of the authored face UV window sits on a
 /// surface SINGULARITY -- an isoparm that collapses to a single point: a cone
 /// apex or a sphere/torus pole. Sampled by walking u across [u0,u1] at each
@@ -304,11 +321,17 @@ Handle(Geom2d_BSplineCurve) _MakeBSplineCurve2d(
 /// the apex/pole is a converging VERTEX (rule 428), not a zero-length edge, so
 /// the boundary wire alone cannot bound the patch and OCCT must supply the
 /// natural pole closure (FixAddNaturalBoundMode / a parametric face:range face).
+///
+/// v0/v1 are authored (cone-AXIAL for a conical surface); convert them to the
+/// surface's own parameter space before sampling so the sampled isoparms match
+/// the surface OCCT will build (debt register row 1 -- previously sampled raw v).
 bool _FaceRangeTouchesPole(
     const Handle(Geom_Surface)& surface,
     double u0, double u1, double v0, double v1, double tol)
 {
     if (surface.IsNull()) return false;
+    v0 = _ConeAxialToSlantV(surface, v0);
+    v1 = _ConeAxialToSlantV(surface, v1);
     const int N = 5;
     for (int vi = 0; vi < 2; ++vi) {
         const double v = (vi == 0) ? v0 : v1;
@@ -359,12 +382,10 @@ TopoDS_Face _MakeParametricPoleFace(
     const Handle(Geom_Surface)& surface,
     double u0, double u1, double v0, double v1, double tol)
 {
-    Handle(Geom_ConicalSurface) cone =
-        Handle(Geom_ConicalSurface)::DownCast(surface);
-    if (!cone.IsNull()) {
-        const double c = std::cos(cone->SemiAngle());
-        if (std::abs(c) > 1e-9) { v0 /= c; v1 /= c; }
-    }
+    // Authored cone v is AXIAL; OCCT's conical surface v is SLANT. Convert via
+    // the shared helper (no-op for non-cones) -- see debt register row 1.
+    v0 = _ConeAxialToSlantV(surface, v0);
+    v1 = _ConeAxialToSlantV(surface, v1);
     if (u1 <= u0 || v1 <= v0) return TopoDS_Face();
     try {
         BRepBuilderAPI_MakeFace pf(surface, u0, u1, v0, v1, tol);
@@ -1340,10 +1361,16 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 2 * faceIdx + 1 < data.faceRange.size()) {
                 const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
                 const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
-                if (uvHi[0] > uvLo[0] && uvHi[1] > uvLo[1]) {
+                // Authored cone v is AXIAL; OCCT's conical v is SLANT. Convert
+                // before feeding MakeFace and before the natural-bounds window
+                // classification below, else a cone patch is foreshortened by
+                // cos(semiAngle) (debt register row 1). No-op for non-cones.
+                const double pfv0 = _ConeAxialToSlantV(surface, uvLo[1]);
+                const double pfv1 = _ConeAxialToSlantV(surface, uvHi[1]);
+                if (uvHi[0] > uvLo[0] && pfv1 > pfv0) {
                     try {
                         BRepBuilderAPI_MakeFace pf(surface, uvLo[0], uvHi[0],
-                            uvLo[1], uvHi[1], data.intersectTol3d);
+                            pfv0, pfv1, data.intersectTol3d);
                         if (pf.IsDone()) {
                             ShapeFix_Face fx(pf.Face());
                             fx.Perform();
@@ -1360,12 +1387,13 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                                 // parmOK. A face:range strictly inside the
                                 // natural bounds is a real trim that failed to
                                 // build a wire and fell back oversized: parmFB.
+                                // (v compared in SLANT space to match Bounds().)
                                 Standard_Real nu0, nu1, nv0, nv1;
                                 surface->Bounds(nu0, nu1, nv0, nv1);
                                 const double we = 1e-3;   // window tolerance
                                 const bool fullWindow =
                                     uvLo[0] <= nu0 + we && uvHi[0] >= nu1 - we &&
-                                    uvLo[1] <= nv0 + we && uvHi[1] >= nv1 - we;
+                                    pfv0 <= nv0 + we && pfv1 >= nv1 - we;
                                 HIST(_st, fullWindow ? FS_FALLBACK_PARAM_OK
                                                      : FS_FALLBACK_PARAM);
                             }
@@ -1407,18 +1435,24 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         surface->Bounds(nu0, nu1, nv0, nv1);
                         const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
                         const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
+                        // Authored cone v is AXIAL; OCCT's conical v is SLANT.
+                        // Convert before both the sub-window test (vs the SLANT
+                        // Bounds()) and MakeFace, else the cone patch is
+                        // foreshortened (debt register row 1). No-op for non-cones.
+                        const double rfv0 = _ConeAxialToSlantV(surface, uvLo[1]);
+                        const double rfv1 = _ConeAxialToSlantV(surface, uvHi[1]);
                         // A non-degenerate authored window strictly inside the
                         // natural bounds (small epsilon guards floating point
                         // equality so full-range faces stay on the legacy path).
                         const double eps = 1e-9;
                         const bool validRange =
-                            uvHi[0] > uvLo[0] && uvHi[1] > uvLo[1];
+                            uvHi[0] > uvLo[0] && rfv1 > rfv0;
                         const bool subWindow =
                             uvLo[0] > nu0 + eps || uvHi[0] < nu1 - eps ||
-                            uvLo[1] > nv0 + eps || uvHi[1] < nv1 - eps;
+                            rfv0 > nv0 + eps || rfv1 < nv1 - eps;
                         if (validRange && subWindow) {
                             BRepBuilderAPI_MakeFace rf(surface,
-                                uvLo[0], uvHi[0], uvLo[1], uvHi[1],
+                                uvLo[0], uvHi[0], rfv0, rfv1,
                                 data.intersectTol3d);
                             if (rf.IsDone()) {
                                 ShapeFix_Face fx(rf.Face());

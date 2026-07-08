@@ -188,6 +188,7 @@ PRIM_PATHS = {
     'testFullPeriodSphereBandSeamSplit.usda': '/World/SphereBand',
     'testMixedSurfaces.usda': '/World/MixedSurfaces',
     'testMixedCurvesWithPcurves.usda': '/World/MixedCurves',
+    'testForcedFallbackCone.usda': '/World/FallbackCone',
 }
 
 # Closed solids: signed volume must be positive (outward winding).
@@ -912,6 +913,60 @@ class TestMixedFamilyPacking(unittest.TestCase):
             self.assertAlmostEqual(
                 vol, math.pi * 9.0 * 5.0, delta=3.0,
                 msg=f"trimmed capped-cylinder volume {vol:.2f} != ~141.37")
+
+
+def _mesh_z_range(stage):
+    """(zmin, zmax) over all mesh points, plus max radius in the XY plane."""
+    zmin = zmax = None
+    rmax = 0.0
+    for mesh in _meshes(stage):
+        for p in mesh.GetPointsAttr().Get():
+            zmin = p[2] if zmin is None else min(zmin, p[2])
+            zmax = p[2] if zmax is None else max(zmax, p[2])
+            rmax = max(rmax, math.hypot(p[0], p[1]))
+    return zmin, zmax, rmax
+
+
+class TestForcedFallbackCone(unittest.TestCase):
+    """Cone axial->slant v-conversion on the parametric face:range fallback.
+
+    testForcedFallbackCone is a full cone (base radius 5 at z=0, apex (0,0,10),
+    semiAngle=atan(0.5)) authored with NO curveUv: one lateral face whose only
+    boundary edge is an apex-to-rim meridian seam, face:range covering the full
+    u-period and the full AXIAL v-height [0,10]. The 3D-edge wire cannot bound
+    the apex-enclosing patch, so the builder routes to the !hasTrimCurves
+    parametric face:range fallback (verified via HDOCCT_TRIM_HIST -> parmFB on
+    the cone row). The schema authors face:range v as AXIAL distance, but OCCT's
+    Geom_ConicalSurface v is SLANT (v_slant = v_axial / cos(semiAngle)); fed raw
+    the patch is foreshortened by cos(semiAngle) ~= 0.894 -- its base collapses
+    from radius 5 / z=0 to radius ~4.47 / z~1.06 and the meshed lateral area
+    drops from pi*R*slant ~= 175.6 to ~139.6. The conversion (debt register
+    row 1) restores the full patch.
+    """
+
+    def test_ForcedFallbackCone_FullHeightAndArea(self):
+        stage = _tessellate_fixture('testForcedFallbackCone.usda')
+        # Lateral area of the full cone: pi * R * slant, R=5, slant=sqrt(125).
+        expected = math.pi * 5.0 * math.sqrt(125.0)   # ~= 175.62
+        area = _total_surface_area(stage)
+        self.assertGreater(area, 0.0, "empty mesh")
+        # Foreshortened (raw axial v) meshes ~139.6; converted meshes ~174.5
+        # (chord deflection undershoots the true 175.6). A delta of 4 excludes
+        # the ~36-unit foreshortening error while allowing the deflection.
+        self.assertAlmostEqual(
+            area, expected, delta=4.0,
+            msg=f"cone lateral area {area:.2f} != {expected:.2f} "
+                f"(axial->slant v conversion regressed? foreshortened ~139.6)")
+        # Geometry: the patch must span the full axial height (apex z=10 down to
+        # base z=0) and reach the full base radius 5. Foreshortening leaves
+        # zmin~1.06 and rmax~4.47.
+        zmin, zmax, rmax = _mesh_z_range(stage)
+        self.assertAlmostEqual(zmin, 0.0, delta=0.1,
+                               msg=f"cone base z {zmin:.3f} != 0 (foreshortened)")
+        self.assertAlmostEqual(zmax, 10.0, delta=0.1,
+                               msg=f"cone apex z {zmax:.3f} != 10")
+        self.assertAlmostEqual(rmax, 5.0, delta=0.1,
+                               msg=f"cone base radius {rmax:.3f} != 5 (foreshortened)")
 
 
 if __name__ == '__main__':
