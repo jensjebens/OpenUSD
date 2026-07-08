@@ -24,6 +24,8 @@
 #include "pxr/usdImaging/usdImaging/tokens.h"
 #include "pxr/usd/usdGeom/tokens.h"
 
+#include <cstdlib>
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DEFINE_PRIVATE_TOKENS(
@@ -52,7 +54,40 @@ _BuildTessellationDataSource(const UsdPrim &prim)
 {
     UsdSolidTessellator tessellator;
     UsdSolidTessellationParams params;
-    // Use defaults (0.1 linear, 0.5 angular) — overrides can come from primvars
+
+    // Adapter (usdview / usdrecord / any Hydra) default: RELATIVE deflection at
+    // 0.5% of the shape's bounding-box diagonal, NOT the absolute 0.1mm the CLI
+    // ships. Absolute 0.1mm is catastrophic on large real-CAD assets (a metre-
+    // scale KUKA robot body of ~4000 faces takes >300s and tens of GB), whereas
+    // 0.5%-of-bbox tessellates the same body in seconds with visually identical
+    // silhouettes. The tessellator interprets linearDeflection as a bbox-diagonal
+    // fraction when relativeDeflection is set (see tessellator.cpp), so no extra
+    // bbox pass is needed here; it derives the diagonal from the built shape.
+    //
+    // This diverges from the CLI (usdsolidtessellate) on purpose: the CLI keeps
+    // absolute defaults so its vert-count baselines / test fixtures stay stable.
+    // Overridable, in the spirit of the other HDOCCT_* gates:
+    //   HDOCCT_DEFLECTION_ABSOLUTE=1  -> back to absolute mode
+    //   HDOCCT_LINEAR_DEFLECTION=<f>  -> deflection (fraction in relative mode,
+    //                                    units in absolute mode)
+    //   HDOCCT_ANGULAR_DEFLECTION=<rad>
+    // A per-prim primvars:tessellation:* attribute (below) still wins over these.
+    params.relativeDeflection = true;
+    params.linearDeflection = 0.005;   // 0.5% of bbox diagonal
+    if (const char* a = std::getenv("HDOCCT_DEFLECTION_ABSOLUTE")) {
+        if (a[0] != '\0' && a[0] != '0') {
+            params.relativeDeflection = false;
+            params.linearDeflection = 0.1;  // absolute units, CLI-equivalent
+        }
+    }
+    if (const char* l = std::getenv("HDOCCT_LINEAR_DEFLECTION")) {
+        double v = std::atof(l);
+        if (v > 0.0) params.linearDeflection = v;
+    }
+    if (const char* g = std::getenv("HDOCCT_ANGULAR_DEFLECTION")) {
+        double v = std::atof(g);
+        if (v > 0.0) params.angularDeflection = v;
+    }
 
     // Check for tessellation parameter overrides
     {
@@ -60,7 +95,14 @@ _BuildTessellationDataSource(const UsdPrim &prim)
         attr = prim.GetAttribute(TfToken("primvars:tessellation:linearDeflection"));
         if (attr) {
             double val;
-            if (attr.Get(&val)) params.linearDeflection = val;
+            if (attr.Get(&val)) {
+                // An explicitly authored linear deflection is taken as an
+                // ABSOLUTE chord distance (the pre-existing contract), so a prim
+                // that opts in with e.g. 0.02 keeps meaning 0.02 units — not 2%
+                // of the bbox under our new relative default.
+                params.linearDeflection = val;
+                params.relativeDeflection = false;
+            }
         }
         attr = prim.GetAttribute(TfToken("primvars:tessellation:angularDeflection"));
         if (attr) {
