@@ -83,6 +83,47 @@ EXPECTED_VERT_COUNTS = {
     'testSphere.usda': 306,
     'testTwoBoxes.usda': 48,
     'testProducerCube.usda': 24,
+    # testRealToleranceCylinder is a real-CAD lock pin sliced verbatim from the
+    # toolbox STEP (occ_3 in testToolbox.usda): a short capped cylinder (r=1.9,
+    # L=90) as a void+solid region pair, no pcurves. It carries REAL production
+    # tolerances -- radius 1.9000000000000035, rim endpoints y=2.33e-16 -- the
+    # imperfection class that failed 519/581 toolbox faces before the
+    # shared-vertex wire-assembly fix (brepBuilder.cpp 1e0ab9f0d). The two
+    # half-cylinder walls + two caps close only because the builder welds rim
+    # vertices by intersectTol3d, not exact match. Re-baselined Linux GCC 13 +
+    # OCCT 7.8.1.
+    'testRealToleranceCylinder.usda': 108,
+    # testAnalyticPlaneWithHole is an analytic plane (BrepSurfacePlaneAPI) with a
+    # full-circle analytic hole (BrepCurve3dCircleAPI, u=0..2pi), NO pcurves --
+    # the BRepCheck_BadOrientationOfSubshape class fixed in brepBuilder.cpp
+    # commit ab344ef05. Distinct from testPlaneWithHole (NURBS-surfaced, WITH
+    # pcurves). 20x20 sheet centered at origin minus a r=3 hole. Re-baselined
+    # Linux GCC 13 + OCCT 7.8.1.
+    'testAnalyticPlaneWithHole.usda': 30,
+    # testFullPeriodTorus is one torus face spanning the full major period
+    # u=[0,2pi] with a partial minor band v=[0,pi] (R=5, r=2) -- the full-period
+    # torus residual class (6 such faces in the toolbox). Its u-boundary is a
+    # seam, not a wire, so it renders via the parametric face:range fallback (as
+    # testFullSphere does). The fallback is CORRECT here (meshed area matches the
+    # analytic band ~197.39), so it is a normal assertion. Re-baselined Linux GCC
+    # 13 + OCCT 7.8.1.
+    'testFullPeriodTorus.usda': 547,
+    # testFullPeriodSphereBand is one sphere face spanning the full major period
+    # u=[0,2pi] with a latitude band v=[-pi/4,pi/4] (NOT pole-touching), R=5 --
+    # the full-period sphere-band residual, distinct from the pole-touching
+    # testFullSphere. Renders via the parametric face:range fallback; the fallback
+    # is CORRECT here (meshed area matches the analytic band ~222.14). Re-baselined
+    # Linux GCC 13 + OCCT 7.8.1.
+    'testFullPeriodSphereBand.usda': 179,
+    # Seam-split twins of the two full-period residuals: the full major sweep is
+    # split at u=0/2pi and u=pi into two wire-bounded HALF-period faces (the
+    # producer convention landed for the depressed-plane wall in
+    # testDepressedPlaneSeamSplit). A full-period-limited reader can consume these
+    # with no reader changes; hdOcct meshes them to the SAME band area as the
+    # unsplit twins (asserted split==unsplit). Re-baselined Linux GCC 13 + OCCT
+    # 7.8.1.
+    'testFullPeriodTorusSeamSplit.usda': 562,
+    'testFullPeriodSphereBandSeamSplit.usda': 196,
 }
 
 PRIM_PATHS = {
@@ -108,6 +149,12 @@ PRIM_PATHS = {
     'testFullSphere.usda': '/World/FullSphere',
     'testProducerCube.usda': '/World/Cube',
     'testVoidOnlySphere.usda': '/World/VoidSphere',
+    'testRealToleranceCylinder.usda': '/World/RealPin',
+    'testAnalyticPlaneWithHole.usda': '/World/AnPlaneHole',
+    'testFullPeriodTorus.usda': '/World/FullTorus',
+    'testFullPeriodTorusSeamSplit.usda': '/World/FullTorus',
+    'testFullPeriodSphereBand.usda': '/World/SphereBand',
+    'testFullPeriodSphereBandSeamSplit.usda': '/World/SphereBand',
 }
 
 # Closed solids: signed volume must be positive (outward winding).
@@ -146,6 +193,14 @@ ANALYTIC_AREA_FIXTURES = {
     # 3D-edge wire cannot bound a pole-enclosing patch, so this exercises the
     # parametric face:range fallback (OCCT adds the seam + degenerate pole edges).
     'testFullSphere.usda':            (4.0 * math.pi * 4.0, 2.0),
+    # Full-period torus band, u=[0,2pi] x v=[0,pi], R=5 r=2 -> the u-seam face
+    # renders via the parametric face:range fallback. True band area
+    # 2*pi*r*(R*(v1-v0) + r*(sin v1 - sin v0)) with v=[0,pi] => ~197.39.
+    'testFullPeriodTorus.usda':       (197.392, 3.0),
+    # Full-period sphere band, u=[0,2pi] x v=[-pi/4,pi/4], R=5 (not pole-touching)
+    # -> parametric face:range fallback. True band area 2*pi*R^2*(sin v1 - sin v0)
+    # = 2*pi*25*sqrt(2) => ~222.14.
+    'testFullPeriodSphereBand.usda':  (222.144, 4.0),
 }
 
 
@@ -437,6 +492,19 @@ class TestTrimmedFaceArea(unittest.TestCase):
         self.assertAlmostEqual(area, expected, delta=2.0,
                                msg=f"sheet area {area:.2f} != {expected:.2f}")
 
+    def test_AnalyticPlaneWithHole_FullArea(self):
+        # Analytic plane trimmed by an outer square + a full-circle analytic hole
+        # (no pcurves): 20x20 sheet minus a r=3 hole. A hole-orientation failure
+        # (the BadOrientationOfSubshape class fixed in ab344ef05) either rejects
+        # the wire (empty/partial mesh) or fills the hole (area -> ~400); a clean
+        # punch meshes to 400 - pi*9.
+        stage = _tessellate_fixture('testAnalyticPlaneWithHole.usda')
+        expected = 400.0 - math.pi * 9.0
+        area = _total_surface_area(stage)
+        self.assertAlmostEqual(area, expected, delta=2.0,
+                               msg=f"analytic holed sheet area {area:.2f} != "
+                                   f"{expected:.2f} (hole orientation?)")
+
     def test_CubeWithHole_PuncturedFaces(self):
         # Top (z=10) and bottom (z=0) faces are each 10x10 minus a r=3 hole.
         stage = _tessellate_fixture('testCubeWithHole.usda')
@@ -474,6 +542,81 @@ class TestTrimmedFaceArea(unittest.TestCase):
                                msg=f"seam-split pocket top area {top:.2f}")
         self.assertAlmostEqual(bottom, math.pi * 9.0, delta=2.0,
                                msg=f"seam-split pocket bottom cap area {bottom:.2f}")
+
+
+class TestSeamSplitEquivalence(unittest.TestCase):
+    """Seam-split twins of the full-period torus/sphere-band mesh to the SAME
+    band area as their unsplit full-period twins.
+
+    The unsplit forms (testFullPeriodTorus, testFullPeriodSphereBand) render via
+    the parametric face:range fallback because a full major sweep u=[0,2pi] has a
+    seam, not a bounding wire. The split twins author the identical geometry as
+    two wire-bounded half-period faces (u=[0,pi] and [pi,2pi]) under the producer
+    convention "split full-period periodic faces at the seam" -- so a reader that
+    cannot tessellate a full-period seam face gets exact numbers with zero reader
+    changes, while a full-period-capable consumer (hdOcct) proves the split
+    encoding does not regress it. This asserts split area == unsplit area (both
+    == the analytic band), extending the seam-split evidence beyond the depressed
+    plane (test_DepressedPlaneSeamSplit_Pocket) to curved analytic surfaces.
+    """
+
+    def _assert_same_area(self, split_name, unsplit_name, delta=1.0):
+        split_area = _total_surface_area(_tessellate_fixture(split_name))
+        unsplit_area = _total_surface_area(_tessellate_fixture(unsplit_name))
+        self.assertAlmostEqual(
+            split_area, unsplit_area, delta=delta,
+            msg=f"{split_name} area {split_area:.2f} != {unsplit_name} "
+                f"area {unsplit_area:.2f} (split encoding changed the mesh)")
+
+    def test_FullPeriodTorus_SeamSplitEquivalence(self):
+        self._assert_same_area('testFullPeriodTorusSeamSplit.usda',
+                               'testFullPeriodTorus.usda')
+
+    def test_FullPeriodSphereBand_SeamSplitEquivalence(self):
+        self._assert_same_area('testFullPeriodSphereBandSeamSplit.usda',
+                               'testFullPeriodSphereBand.usda')
+
+
+class TestRealToleranceWireClosure(unittest.TestCase):
+    """A real-CAD part with production tolerances closes and meshes exactly.
+
+    testRealToleranceCylinder is a lock pin sliced verbatim from the toolbox
+    STEP (occ_3): a capped cylinder r=1.9, L=90 as a void+solid region pair with
+    NO pcurves. Its rim endpoints carry real imperfection (y=2.326828918e-16
+    where the model means 0; radius 1.9000000000000035). The two half-cylinder
+    walls and the two planar caps meet at rim vertices that agree only to
+    intersectTol3d, so the wire builder must weld by tolerance, not by exact
+    coordinate match, to close each face's boundary. This is the class that
+    failed 519/581 toolbox faces before the shared-vertex fix landed in
+    brepBuilder.cpp (commit 1e0ab9f0d): without it the lateral walls fail wire
+    assembly and drop out (area collapses to ~2*caps and volume falls far below
+    pi*r^2*L). The asserts below pin the FIXED behavior -- full lateral area and
+    a positive, cylinder-sized signed volume -- so a regression of that weld
+    (or a reader that assembles wires by exact match) flips this test loudly.
+    Geometry-based, independent of the OCCT meshing density.
+    """
+
+    def test_RealToleranceCylinder_ClosesAndMeshes(self):
+        stage = _tessellate_fixture('testRealToleranceCylinder.usda')
+        area = _total_surface_area(stage)
+        # True total surface = lateral 2*pi*r*L + 2 caps pi*r^2 = ~1097.1;
+        # the curved wall chord-undershoots slightly. A tolerance-weld failure
+        # would drop the ~1074.4 lateral area, leaving only ~22.7 (the caps).
+        self.assertGreater(area, 1000.0,
+                           f"lateral walls missing: area {area:.2f} (expected "
+                           f"~1097; ~23 means the tolerance weld failed)")
+        self.assertAlmostEqual(area, 1097.1, delta=6.0,
+                               msg=f"pin surface area {area:.2f} != ~1097.1")
+        for mesh in _meshes(stage):
+            vol = _signed_volume(mesh.GetPointsAttr().Get(),
+                                 mesh.GetFaceVertexCountsAttr().Get(),
+                                 mesh.GetFaceVertexIndicesAttr().Get())
+            # True pi*r^2*L = ~1020.7; positive => outward winding (void faceuse
+            # outward). A wire-closure failure collapses this toward zero.
+            self.assertAlmostEqual(
+                vol, 1020.7, delta=12.0,
+                msg=f"pin signed volume {vol:.2f} != ~1020.7 "
+                    f"(<=0 or tiny means wire closure/winding regressed)")
 
 
 class TestTessellationErrorHandling(unittest.TestCase):
@@ -609,6 +752,18 @@ class TestAnalyticSurfaceArea(unittest.TestCase):
         # Pole-enclosing analytic face (full sphere via meridian seam, no
         # curveUv) -> parametric face:range fallback. Common in real CAD output.
         self._check_area('testFullSphere.usda')
+
+    def test_FullPeriodTorus(self):
+        # Full-period torus band (u=[0,2pi] seam face) -> parametric face:range
+        # fallback. Pins the fallback as CORRECT: meshed area matches the analytic
+        # band. A fix/regression of the full-period path moves the area here.
+        self._check_area('testFullPeriodTorus.usda')
+
+    def test_FullPeriodSphereBand(self):
+        # Full-period sphere band (u=[0,2pi], non-pole-touching) -> parametric
+        # face:range fallback. Distinct from testFullSphere (pole-touching). Pins
+        # the fallback as CORRECT (meshed area matches the analytic band).
+        self._check_area('testFullPeriodSphereBand.usda')
 
 
 if __name__ == '__main__':
