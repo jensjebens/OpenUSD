@@ -233,20 +233,50 @@ UsdSolidTessellationResult _ExtractMesh(
     return result;
 }
 
-/// Merge multiple tessellation results into one.
+/// Merge multiple per-Brep tessellation results into one.
+///
+/// Only successful results contribute geometry. Partial failure is now
+/// reported rather than hidden: merged.success is true only when EVERY input
+/// result succeeded, and each failed result's error is accumulated into
+/// merged.errorMessage with its Brep index (debt register row 9 -- previously
+/// success was hardcoded true and per-Brep errors were dropped). The
+/// hasNormals/hasUVs flags are derived from the first SUCCESSFUL result, not
+/// results[0]: if Brep 0 failed, results[0] is empty and reading its flags
+/// dropped normals/UVs from every surviving Brep.
 UsdSolidTessellationResult _MergeResults(
     const std::vector<UsdSolidTessellationResult>& results)
 {
     UsdSolidTessellationResult merged;
-    merged.success = true;
 
     int totalVerts = 0;
     int totalFaces = 0;
+    int failCount = 0;
+    std::string errors;
 
-    for (const auto& r : results) {
-        if (!r.success) continue;
+    // First successful result: source of the hasNormals/hasUVs decision.
+    const UsdSolidTessellationResult* firstOk = nullptr;
+    for (size_t i = 0; i < results.size(); ++i) {
+        const auto& r = results[i];
+        if (!r.success) {
+            ++failCount;
+            if (!errors.empty()) errors += "; ";
+            errors += TfStringPrintf(
+                "Brep %zu: %s", i,
+                r.errorMessage.empty() ? "tessellation failed"
+                                       : r.errorMessage.c_str());
+            continue;
+        }
+        if (!firstOk) firstOk = &r;
         totalVerts += (int)r.points.size();
         totalFaces += (int)r.faceVertexCounts.size();
+    }
+
+    // Success only if nothing failed; carry the accumulated errors either way.
+    merged.success = (failCount == 0);
+    merged.errorMessage = errors;
+    if (failCount > 0) {
+        TF_WARN("hdOcct: %d of %zu Breps failed to tessellate; merged mesh "
+                "omits them. %s", failCount, results.size(), errors.c_str());
     }
 
     merged.points.reserve(totalVerts);
@@ -255,8 +285,8 @@ UsdSolidTessellationResult _MergeResults(
     merged.faceBrepIndices.reserve(totalFaces);
     merged.faceSolidFaceIndices.reserve(totalFaces);
 
-    bool hasNormals = !results.empty() && !results[0].normals.empty();
-    bool hasUVs = !results.empty() && !results[0].uvs.empty();
+    const bool hasNormals = firstOk && !firstOk->normals.empty();
+    const bool hasUVs = firstOk && !firstOk->uvs.empty();
 
     if (hasNormals) merged.normals.reserve(totalVerts);
     if (hasUVs) merged.uvs.reserve(totalVerts);

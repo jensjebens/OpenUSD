@@ -1834,14 +1834,23 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
 
                     if (euIdx >= data.edgeuseEdgeIndex.size()) { wireOk = false; break; }
                     unsigned int edgeIdx = data.edgeuseEdgeIndex[euIdx];
-                    if (edgeIdx < edges.size() && !edges[edgeIdx].IsNull()) {
-                        TopoDS_Edge edge = edges[edgeIdx];
-                        if (euIdx < data.edgeuseOrientationType.size() &&
-                            data.edgeuseOrientationType[euIdx] == _tokens->opposite) {
-                            edge.Reverse();
-                        }
-                        wireMaker.Add(edge);
+                    if (edgeIdx >= edges.size() || edges[edgeIdx].IsNull()) {
+                        // A missing/failed edge leaves a GAP in the boundary
+                        // wire, so the face would bound the wrong region. Fail
+                        // the wire fast (mirrors the !hasTrimCurves sibling that
+                        // breaks on a null edge3dCurves entry) rather than
+                        // silently adding a shorter loop (debt register row 2).
+                        TF_WARN("hdOcct: Brep %zu face %zu: edgeuse %zu -> null/"
+                                "missing edge %u; failing the boundary wire.",
+                                brepIndex, faceIdx, euIdx, edgeIdx);
+                        wireOk = false; break;
                     }
+                    TopoDS_Edge edge = edges[edgeIdx];
+                    if (euIdx < data.edgeuseOrientationType.size() &&
+                        data.edgeuseOrientationType[euIdx] == _tokens->opposite) {
+                        edge.Reverse();
+                    }
+                    wireMaker.Add(edge);
                 }
 
                 if (!wireOk || !wireMaker.IsDone()) {
@@ -1916,9 +1925,28 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             // only genuinely-collapsing apex/pole faces take this route.
             if (singularFace &&
                 (!haveFace || _FaceMeshTris(finalFace) <= 2)) {
+                const bool hadSliver = haveFace;   // a collapsed wire face
                 TopoDS_Face pf = _MakeParametricPoleFace(
                     surface, fu0, fu1, fv0, fv1, data.intersectTol3d);
-                if (!pf.IsNull()) { finalFace = pf; haveFace = true; }
+                if (!pf.IsNull()) {
+                    finalFace = pf; haveFace = true;
+                } else if (hadSliver) {
+                    // Rescue failed and we keep the collapsed wire face: it
+                    // triangulates to a sliver (<=2 tris) and leaves a visible
+                    // hole at the pole/apex. Previously kept with zero signal
+                    // (debt register row 3).
+                    TF_WARN("hdOcct: Brep %zu face %zu: singular (pole/apex) "
+                            "face collapsed and parametric pole-closure failed; "
+                            "keeping the degenerate wire face.",
+                            brepIndex, faceIdx);
+                } else {
+                    // Rescue failed and there was no wire face either: the
+                    // singular face is dropped entirely (debt register row 3).
+                    TF_WARN("hdOcct: Brep %zu face %zu: singular (pole/apex) "
+                            "face could not be built (wire and parametric "
+                            "pole-closure both failed); dropping the face.",
+                            brepIndex, faceIdx);
+                }
             }
 
             if (haveFace) {
