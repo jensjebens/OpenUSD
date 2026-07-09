@@ -2060,8 +2060,12 @@ _BrepArrayCompleteness(const UsdPrim &usdPrim,
 // (laminar / identity-ring) boundary edge on a solid shell means the surface is
 // open -- surface soup or an open sheet mislabeled as a solid. The same
 // single-use edges on a voidRegion-only (sheet/wire/point) model are legal and
-// are NOT flagged. Degenerate pole/apex edges (start vertex == end vertex),
-// e.g. the corner singularities of a filleted solid, are exempt.
+// are NOT flagged. CLOSED-LOOP edges (start vertex == end vertex -- a
+// full-circle rim or a seam ring, e.g. at the corner singularities of a
+// filleted solid) are exempt from the shared-edge count: they are full-length
+// legal edges, NOT rule-381 degenerate edges. Zero-length (degenerate) edges
+// are never exempted anywhere -- BA.230 (_BrepArrayDegenerateEdges) flags them
+// as errors, measured against brep:intersectTol3d per proposal rule 381.
 // (BA.590/BA.591 are new checks; reconcile numbering with brep_validator.py.)
 UsdValidationErrorVector
 _BrepArraySolidClosure(const UsdPrim &usdPrim,
@@ -2162,8 +2166,11 @@ _BrepArraySolidClosure(const UsdPrim &usdPrim,
         // 3. Enforce closure on every solid edge.
         const bool ringAuthored = nextRadial.size() >= off.edgeuse[b + 1];
         for (const unsigned int e : solidEdges) {
-            // Degenerate pole/apex edge (start vertex == end vertex) is a legal
-            // single-use seam on a closed analytic patch; exempt it.
+            // A closed-loop edge (start vertex == end vertex: full-circle rim
+            // or seam ring) is a legal single-use seam on a closed analytic
+            // patch; exempt it from the shared-edge count. This is NOT a
+            // rule-381 degenerate (zero-length) edge -- those are errors,
+            // flagged by BA.230.
             if (e < edgeVtx.size() && edgeVtx[e][0] == edgeVtx[e][1]) {
                 continue;
             }
