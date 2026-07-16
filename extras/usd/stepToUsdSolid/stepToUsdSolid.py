@@ -1033,7 +1033,22 @@ def extract_brep(rd, cfg, solid_refs=None):
             ctok, cg = curve_geom(rd, a[3])
             same_sense = (len(a) <= 4) or (a[4] == ("enum", "T"))
             if not same_sense: s, e = e, s
-            if ctok == "BrepCurve3dNurbAPI" and cg.get("nurb"):
+            if ctok == "BrepCurve3dLineAPI":
+                # Re-fit the line through its two authored vertices so the curve
+                # passes exactly through the edge's endpoints, with the parameter
+                # range running start -> end. A STEP LINE's own origin/direction
+                # can miss the welded vertices by the file's tolerance, and its
+                # direction may even run end -> start. (The NURBS path below does
+                # the equivalent by trimming its hull to the vertices.) A
+                # degenerate zero-length edge keeps the STEP geometry.
+                ps, pe = verts[s], verts[e]
+                length = math.dist(ps, pe)
+                if length > cfg.edge_degen_tol:
+                    cg = dict(origin=tuple(ps), direction=vnorm(vsub(pe, ps)))
+                    rng = (0.0, length)
+                else:
+                    rng = edge_range(ctok, cg, ps, pe)
+            elif ctok == "BrepCurve3dNurbAPI" and cg.get("nurb"):
                 # process_nurbs_edge self-gates: it only trims when the authored
                 # hull ends don't already sit on the vertices (within nurb_snap_tol).
                 cg, rng = process_nurbs_edge(cg, verts[s], verts[e], cfg)
