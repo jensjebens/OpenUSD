@@ -76,6 +76,21 @@ struct USDSOLIDTESSELLATOR_API UsdSolidTessellationResult {
     /// Per-face source face index within the Brep (for GeomSubset creation).
     VtArray<int> faceSolidFaceIndices;
 
+    /// Discretized B-rep edge polylines, for the optional edge/line display
+    /// mode. \p edgePoints is a flat point array partitioned by
+    /// \p edgeCurveVertexCounts (one count per topological edge), consumed
+    /// exactly like UsdGeomBasisCurves points + curveVertexCounts (type=linear).
+    /// These are the SHARP / feature edges (and open boundary edges).
+    VtArray<int> edgeCurveVertexCounts;
+    VtArray<GfVec3d> edgePoints;
+
+    /// Tangent (smooth, G1-continuous) edges — e.g. fillet<->face transitions —
+    /// classified by the dihedral angle between the two adjacent faces. Emitted
+    /// as a separate, independently toggleable curve set (CAD "tangent edges").
+    /// Same flat-array-partitioned-by-counts layout as the sharp edges above.
+    VtArray<int> tangentEdgeCurveVertexCounts;
+    VtArray<GfVec3d> tangentEdgePoints;
+
     /// Whether tessellation succeeded.
     bool success = false;
 

@@ -6,6 +6,18 @@
 
 #include "brepBuilder.h"
 
+// BRepTools::UVBounds — used by the ring-artifact guard (debt register row 2.2)
+// to read a trimmed face's actual parametric span.
+#include <BRepTools.hxx>
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+#include <string>
+
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/usd/usd/attribute.h"
@@ -18,18 +30,54 @@
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Geom_SphericalSurface.hxx>
+#include <Geom_ToroidalSurface.hxx>
+#include <Geom_Line.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_Ellipse.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Dir.hxx>
+#include <BRepLib.hxx>
+#include <GeomProjLib.hxx>
+#include <Geom2d_Curve.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_Result.hxx>
+#include <BRepCheck_ListOfStatus.hxx>
+#include <TopExp_Explorer.hxx>
+#include <Geom_ElementarySurface.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Standard_Failure.hxx>
+#include <TopLoc_Location.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <Poly_Triangulation.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <gp_Pnt.hxx>
 #include <ShapeFix_Shape.hxx>
+// ShapeFix_Wire drives the wire-healing retry (builder-robustness pass):
+// FixReorder/FixConnected/FixClosed reorder/reconnect/close a boundary wire
+// that failed BRepCheck before rebuilding the face, so a holed/shaped analytic
+// trim is repaired rather than dropped to the untrimmed parametric fallback.
 #include <ShapeFix_Wire.hxx>
 #include <ShapeFix_Face.hxx>
+#include <BRepLib.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
+// Used for rational B-spline surface weights; OCCT 7.x provided this
+// transitively, OCCT 8.0 does not — include it explicitly.
+#include <TColStd_Array2OfReal.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shell.hxx>
@@ -260,6 +308,230 @@ Handle(Geom2d_BSplineCurve) _MakeBSplineCurve2d(
     }
 }
 
+/// Half of pi. Used as the frame-rotation angle applied to a Geom_Ellipse whose
+/// authored xRadius < yRadius (OCCT requires major >= minor) and, with a sign
+/// flip, as the matching remap of that ellipse's authored edge:range parameter
+/// (see the two ellipse dispatch sites; debt register rows 5 and 32).
+constexpr double _halfPi = 1.5707963267948966;
+
+/// Period-normalize an authored parameter interval onto a periodic 3D curve's
+/// own domain. USD authors an edge:range in the producer's parameterization;
+/// on a periodic analytic curve (circle/ellipse) that interval can sit a whole
+/// number of periods off OCCT's domain (its FirstParameter..FirstParameter+Period
+/// window), or straddle the seam (e.g. an arc authored [3pi/2, 5pi/2] whose start
+/// is one period high). BRepBuilderAPI_MakeEdge(curve, v1, v2, r0, r1) then
+/// reports !IsDone and the caller discards the range, letting OCCT re-derive the
+/// parameters from the two endpoint vertices -- which on a periodic curve picks
+/// whichever of the two candidate arcs OCCT prefers, silently taking the WRONG
+/// (often complementary) arc. Shifting the whole interval by an integer number of
+/// periods so r0 lands in [first, first+period) preserves the authored arc length
+/// and orientation (r1-r0 is unchanged) and lets the exact-param build succeed
+/// (debt register row 6). Returns true and writes the shifted [r0,r1] when the
+/// curve is periodic; false (leaving r0/r1 untouched) otherwise.
+bool _PeriodNormalizeRange(const Handle(Geom_Curve)& curve,
+                           double& r0, double& r1)
+{
+    if (curve.IsNull() || !curve->IsPeriodic()) return false;
+    const double period = curve->Period();
+    if (!(period > 0.0)) return false;
+    const double first = curve->FirstParameter();
+    // Number of whole periods r0 sits above `first`; shift the pair down by it.
+    const double n = std::floor((r0 - first) / period);
+    if (n != 0.0) {
+        r0 -= n * period;
+        r1 -= n * period;
+    }
+    return true;
+}
+
+/// Convert an authored cone v-parameter (AXIAL distance -- height along the
+/// axis, the UsdSolid BrepSurfaceConeAPI convention) to OCCT's Geom_ConicalSurface
+/// v-parameter (SLANT distance along the generator): v_slant = v_axial / cos(semiAngle).
+/// A no-op for any non-conical surface (returns v unchanged), so it is safe to
+/// route every raw authored face:range v through it before feeding OCCT. Guards
+/// a near-90-degree semiAngle (|cos| tiny) by leaving v unconverted -- the
+/// degenerate cone is handled/rejected elsewhere, and dividing by ~0 would
+/// explode the window (see debt register row 1).
+double _ConeAxialToSlantV(const Handle(Geom_Surface)& surface, double v)
+{
+    Handle(Geom_ConicalSurface) cone =
+        Handle(Geom_ConicalSurface)::DownCast(surface);
+    if (cone.IsNull()) return v;
+    const double c = std::cos(cone->SemiAngle());
+    return (std::abs(c) > 1e-9) ? v / c : v;
+}
+
+/// Wire-healing rebuild for a trimmed face that failed BRepCheck.
+///
+/// The KUKA (and real-CAD generally) failure population is dominated by
+/// boundary wires that ALMOST close in UV but trip BRepCheck: seam-crossing
+/// outer wires composed of circles + short NURBS jogs report WIRE status 28
+/// (NotClosed); shared-vertex analytic loops report EDGE status 10/11
+/// (SameParameter / SameRange) after the 3D->2D pcurve reconcile; and holed
+/// (multi-loop) faces report FACE gstatus 27/32 (Unorientable /
+/// BadOrientationOfSubshape). Each of these is exactly what ShapeFix_Wire's
+/// FixReorder / FixConnected / FixClosed sub-fixers repair -- reordering the
+/// edges into a connected chain, snapping near-coincident endpoint vertices
+/// together (raising edge tolerances up to \p maxTol), and closing the small
+/// residual gap -- WITHOUT discarding the hole or the shaped boundary the way
+/// the untrimmed parametric fallback does.
+///
+/// Takes the already-assembled (but invalid) \p face, re-heals every wire in
+/// the SURFACE + WIRE context at working precision \p prec (the Brep's
+/// intersectTol3d) with tolerance escalation to \p maxTol, then rebuilds the
+/// face on the SAME surface using the SAME MakeFace + ShapeFix_Face +
+/// SameParameter chain the primary trim uses (first wire = outer via
+/// MakeFace(surface,wire); any further wires added as holes). Returns the
+/// rebuilt face (NULL on any structural failure). The caller re-runs
+/// BRepCheck AND the existing ring / wrong-side guards on the result and
+/// accepts it only if it now passes -- so a heal that produces a differently
+/// bad face (or an over-covered ring) is still rejected to the fallback.
+///
+/// Deliberately does NOT touch FixPeriodicDegenerated (kept off for the same
+/// SIGSEGV reason documented at the ShapeFix_Face call site) and does NOT add
+/// natural bounds (a pole face is served by the parametric fallback, not by
+/// wire healing).
+TopoDS_Face _HealTrimmedFace(const TopoDS_Face& face,
+                             const Handle(Geom_Surface)& surface,
+                             bool addNaturalBound,
+                             bool fixOrient,
+                             double prec, double maxTol)
+{
+    if (face.IsNull() || surface.IsNull()) return TopoDS_Face();
+    try {
+        // Collect the wires in authored order (outer first is the norm from
+        // the MakeFace assembly; TopExp preserves face wire order).
+        std::vector<TopoDS_Wire> healedWires;
+        for (TopExp_Explorer ex(face, TopAbs_WIRE); ex.More(); ex.Next()) {
+            TopoDS_Wire w = TopoDS::Wire(ex.Current());
+            ShapeFix_Wire sfw;
+            sfw.Load(w);
+            sfw.SetSurface(surface);
+            sfw.SetPrecision(prec);
+            sfw.SetMaxTolerance(maxTol);
+            sfw.ModifyTopologyMode() = Standard_True;   // allow vertex merge
+            // Reorder into a connected chain, snap coincident endpoints, close
+            // the residual seam gap. Each guarded; a sub-fixer that finds
+            // nothing to do is a no-op.
+            sfw.FixReorder();
+            sfw.FixConnected();
+            sfw.FixClosed();
+            healedWires.push_back(sfw.Wire());
+        }
+        if (healedWires.empty()) return TopoDS_Face();
+
+        BRepBuilderAPI_MakeFace mkf(surface, healedWires[0], Standard_True);
+        if (!mkf.IsDone()) return TopoDS_Face();
+        TopoDS_Face rebuilt = mkf.Face();
+        for (size_t i = 1; i < healedWires.size(); ++i) {
+            BRepBuilderAPI_MakeFace mkh(rebuilt, healedWires[i]);
+            if (!mkh.IsDone()) return TopoDS_Face();
+            rebuilt = mkh.Face();
+        }
+
+        BRepLib::BuildCurves3d(rebuilt, prec);
+        ShapeFix_Face ff(rebuilt);
+        ff.FixAddNaturalBoundMode() =
+            addNaturalBound ? Standard_True : Standard_False;
+        ff.FixWireMode() = Standard_True;
+        ff.FixPeriodicDegeneratedMode() = Standard_False;   // SIGSEGV guard
+        if (fixOrient) ff.FixOrientationMode() = Standard_True;
+        ff.Perform();
+        if (fixOrient) ff.FixOrientation();
+        rebuilt = ff.Face();
+        BRepLib::SameParameter(rebuilt, prec);
+        return rebuilt;
+    } catch (const Standard_Failure&) {
+        return TopoDS_Face();
+    }
+}
+
+/// True when a v-extreme (v0 or v1) of the authored face UV window sits on a
+/// surface SINGULARITY -- an isoparm that collapses to a single point: a cone
+/// apex or a sphere/torus pole. Sampled by walking u across [u0,u1] at each
+/// v-extreme and testing whether all samples coincide within \p tol. This is
+/// how the degenerate-edge-free (rule 381) form of a singularity is detected:
+/// the apex/pole is a converging VERTEX (rule 428), not a zero-length edge, so
+/// the boundary wire alone cannot bound the patch and OCCT must supply the
+/// natural pole closure (FixAddNaturalBoundMode / a parametric face:range face).
+///
+/// v0/v1 are authored (cone-AXIAL for a conical surface); convert them to the
+/// surface's own parameter space before sampling so the sampled isoparms match
+/// the surface OCCT will build (debt register row 1 -- previously sampled raw v).
+bool _FaceRangeTouchesPole(
+    const Handle(Geom_Surface)& surface,
+    double u0, double u1, double v0, double v1, double tol)
+{
+    if (surface.IsNull()) return false;
+    v0 = _ConeAxialToSlantV(surface, v0);
+    v1 = _ConeAxialToSlantV(surface, v1);
+    const int N = 5;
+    for (int vi = 0; vi < 2; ++vi) {
+        const double v = (vi == 0) ? v0 : v1;
+        gp_Pnt first = surface->Value(u0, v);
+        bool collapsed = true;
+        for (int i = 1; i <= N; ++i) {
+            const double u = u0 + (u1 - u0) * (double(i) / double(N));
+            if (surface->Value(u, v).Distance(first) > tol) {
+                collapsed = false;
+                break;
+            }
+        }
+        if (collapsed && std::abs(u1 - u0) > tol) return true;
+    }
+    return false;
+}
+
+/// Triangle count a face produces under BRepMesh at the tessellator's default
+/// deflection. A singular (pole/apex) wire-built face can be geometrically
+/// valid yet triangulate to nothing -- the recurring cone-apex symptom -- so
+/// this is the reliable discriminator for routing to the parametric fallback.
+int _FaceMeshTris(const TopoDS_Face& face)
+{
+    if (face.IsNull()) return 0;
+    try {
+        TopoDS_Face f = face;
+        BRepMesh_IncrementalMesh mesh(f, 0.1, Standard_False, 0.5,
+                                      Standard_False);
+        TopLoc_Location loc;
+        Handle(Poly_Triangulation) t = BRep_Tool::Triangulation(f, loc);
+        return t.IsNull() ? 0 : t->NbTriangles();
+    } catch (const Standard_Failure&) {
+        return 0;
+    }
+}
+
+/// Build a face from a surface + the authored UV window (face:range), letting
+/// OCCT add the natural seam + degenerate pole/apex edges a boundary wire
+/// cannot express. This is the parametric pole-closure the sphere poles and the
+/// analytic-cone apex already rely on; returns a null face on any failure.
+///
+/// Cone v-parameter convention: the UsdSolid BrepSurfaceConeAPI schema authors
+/// face:range v as AXIAL distance (height along the axis), whereas OCCT's
+/// Geom_ConicalSurface parametrizes v as SLANT distance along the generator.
+/// Convert axial -> slant (v_slant = v_axial / cos(semiAngle)) so the
+/// parametric window covers the full authored height, not a foreshortened one.
+TopoDS_Face _MakeParametricPoleFace(
+    const Handle(Geom_Surface)& surface,
+    double u0, double u1, double v0, double v1, double tol)
+{
+    // Authored cone v is AXIAL; OCCT's conical surface v is SLANT. Convert via
+    // the shared helper (no-op for non-cones) -- see debt register row 1.
+    v0 = _ConeAxialToSlantV(surface, v0);
+    v1 = _ConeAxialToSlantV(surface, v1);
+    if (u1 <= u0 || v1 <= v0) return TopoDS_Face();
+    try {
+        BRepBuilderAPI_MakeFace pf(surface, u0, u1, v0, v1, tol);
+        if (!pf.IsDone()) return TopoDS_Face();
+        ShapeFix_Face fx(pf.Face());
+        fx.FixAddNaturalBoundMode() = Standard_True;
+        fx.Perform();
+        TopoDS_Face f = fx.Face();
+        if (BRepCheck_Analyzer(f).IsValid()) return f;
+    } catch (const Standard_Failure&) {}
+    return TopoDS_Face();
+}
+
 } // anonymous namespace
 
 // --------------------------------------------------------------------------
@@ -283,11 +555,10 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
         return attr.Get(&out);
     };
 
-    // Brep-level
-    VtArray<double> tolArray;
-    if (_GetAttr("brep:intersectTol3d", tolArray) && !tolArray.empty()) {
-        data->intersectTol3d = tolArray[0];
-    }
+    // Brep-level. brep:intersectTol3d authors one tolerance per Brep in the
+    // array; keep the whole array and resolve per-Brep in _BuildSingleBrep
+    // (debt register row 17), rather than collapsing to entry [0] for all Breps.
+    _GetAttr("brep:intersectTol3d", data->intersectTol3d);
     _GetAttr("brep:regionCount", data->regionCount);
 
     // Region
@@ -312,6 +583,7 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
     _GetAttr("edgeuse:edgeIndex", data->edgeuseEdgeIndex);
     _GetAttr("edgeuse:orientationType", data->edgeuseOrientationType);
     _GetAttr("faceuse:orientationType", data->faceuseOrientationType);
+    _GetAttr("faceuse:faceIndex", data->faceuseFaceIndex);
     _GetAttr("edgeuse:nextRadialEUIndex", data->edgeuseNextRadialEUIndex);
 
     // Edge
@@ -381,13 +653,50 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
     _GetAttr("brep:surface:nurb:weights",
              data->surfaceWeights);
 
+    // Analytic cylinder surfaces (BrepSurfaceCylinderAPI)
+    _GetAttr("brep:surface:cylinder:origin", data->surfaceCylinderOrigin);
+    _GetAttr("brep:surface:cylinder:axis", data->surfaceCylinderAxis);
+    _GetAttr("brep:surface:cylinder:refDirection", data->surfaceCylinderRefDir);
+    _GetAttr("brep:surface:cylinder:radius", data->surfaceCylinderRadius);
+    _GetAttr("brep:surface:plane:origin", data->surfacePlaneOrigin);
+    _GetAttr("brep:surface:plane:axis", data->surfacePlaneAxis);
+    _GetAttr("brep:surface:plane:refDirection", data->surfacePlaneRefDir);
+    _GetAttr("brep:surface:cone:origin", data->surfaceConeOrigin);
+    _GetAttr("brep:surface:cone:axis", data->surfaceConeAxis);
+    _GetAttr("brep:surface:cone:refDirection", data->surfaceConeRefDir);
+    _GetAttr("brep:surface:cone:radius", data->surfaceConeRadius);
+    _GetAttr("brep:surface:cone:semiAngle", data->surfaceConeSemiAngle);
+    _GetAttr("brep:surface:sphere:center", data->surfaceSphereCenter);
+    _GetAttr("brep:surface:sphere:axis", data->surfaceSphereAxis);
+    _GetAttr("brep:surface:sphere:refDirection", data->surfaceSphereRefDir);
+    _GetAttr("brep:surface:sphere:radius", data->surfaceSphereRadius);
+    _GetAttr("brep:surface:torus:origin", data->surfaceTorusOrigin);
+    _GetAttr("brep:surface:torus:axis", data->surfaceTorusAxis);
+    _GetAttr("brep:surface:torus:refDirection", data->surfaceTorusRefDir);
+    _GetAttr("brep:surface:torus:majorRadius", data->surfaceTorusMajorRadius);
+    _GetAttr("brep:surface:torus:minorRadius", data->surfaceTorusMinorRadius);
+
+    // Analytic 3D curves for edges (line/circle/ellipse)
+    _GetAttr("brep:edge3dLine:curve3d:line:origin", data->edgeLineOrigin);
+    _GetAttr("brep:edge3dLine:curve3d:line:direction", data->edgeLineDirection);
+    _GetAttr("brep:edge3dCircle:curve3d:circle:center", data->edgeCircleCenter);
+    _GetAttr("brep:edge3dCircle:curve3d:circle:axis", data->edgeCircleAxis);
+    _GetAttr("brep:edge3dCircle:curve3d:circle:refDirection", data->edgeCircleRefDir);
+    _GetAttr("brep:edge3dCircle:curve3d:circle:radius", data->edgeCircleRadius);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:center", data->edgeEllipseCenter);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:axis", data->edgeEllipseAxis);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:refDirection", data->edgeEllipseRefDir);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:xRadius", data->edgeEllipseXRadius);
+    _GetAttr("brep:edge3dEllipse:curve3d:ellipse:yRadius", data->edgeEllipseYRadius);
+
     return !data->regionCount.empty();
 }
 
 TopoDS_Shape
 UsdSolidBrepBuilder::_BuildSingleBrep(
     const _BrepData& data,
-    size_t brepIndex) const
+    size_t brepIndex,
+    std::vector<int>* outFaceAuthoredIndices) const
 {
     BRep_Builder builder;
 
@@ -404,6 +713,17 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         TF_WARN("Brep %zu has 0 regions", brepIndex);
         return TopoDS_Shape();
     }
+
+    // Resolve THIS Brep's 3D intersection tolerance from the per-Brep array with
+    // a last-entry clamp: a producer may author one shared tolerance for a
+    // multi-Brep array (array shorter than the Brep count) or one per Brep. An
+    // empty array falls back to the 1e-6 lenient-reader default (brepBuilder.h)
+    // (debt register row 17).
+    const double intersectTol3d =
+        data.intersectTol3d.empty()
+            ? 1e-6
+            : data.intersectTol3d[std::min(brepIndex,
+                                           data.intersectTol3d.size() - 1)];
 
     // Compute shell start for this Brep's regions
     size_t shellStart = 0;
@@ -449,267 +769,1599 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     }
 
     // Build OCCT surfaces for each face
-    std::vector<Handle(Geom_BSplineSurface)> surfaces;
+    std::vector<Handle(Geom_Surface)> surfaces;
     surfaces.reserve(numFaces);
 
-    size_t surfCPOffset = 0;
-    size_t surfUKnotOffset = 0;
-    size_t surfVKnotOffset = 0;
-    size_t surfWeightOffset = 0;
+    // Surface arrays are packed per surface TYPE (NURBS faces in the nurb
+    // arrays, cylinder faces in the cylinder arrays, ...). Walk faces in order,
+    // dispatch on face:surfaceType, and advance the matching per-type offsets.
+    // Faces before faceStart (earlier Breps) still advance the offsets.
+    size_t surfCPOffset = 0, surfUKnotOffset = 0, surfVKnotOffset = 0,
+           surfWeightOffset = 0;   // NURBS packing offsets
+    size_t nurbFace = 0, cylFace = 0, planeFace = 0, coneFace = 0,
+           sphereFace = 0, torusFace = 0;   // per-type element counters
+    auto mkAx3 = [](const GfVec3d& o, const GfVec3d& ax, const GfVec3d& rd) {
+        return gp_Ax3(gp_Pnt(o[0], o[1], o[2]),
+                      gp_Dir(ax[0], ax[1], ax[2]),
+                      gp_Dir(rd[0], rd[1], rd[2]));
+    };
 
-    // Skip surfaces before faceStart
-    for (size_t i = 0; i < faceStart && i < data.surfaceUVertexCount.size(); ++i) {
-        int uCnt = data.surfaceUVertexCount[i];
-        int vCnt = data.surfaceVVertexCount[i];
-        surfCPOffset += uCnt * vCnt;
-        surfUKnotOffset += uCnt + data.surfaceUOrder[i];
-        surfVKnotOffset += vCnt + data.surfaceVOrder[i];
-        surfWeightOffset += uCnt * vCnt;
+    // Observability for the surface dispatch (debt register rows 12 + 18).
+    //   _warnedSurfType   -- unknown face:surfaceType tokens already warned for
+    //                        this Brep (warn once per unrecognized token).
+    //   _warnedUnderpack  -- known families whose per-type surface array ran out
+    //                        (warn once per family; the face becomes null-surface
+    //                        and is skipped below -- previously silent).
+    // A null surface is left in `surfaces` (never skipped in the vector) so the
+    // per-face index stays aligned with faceRange / loops downstream.
+    std::set<std::string> _warnedSurfType, _warnedUnderpack;
+    size_t _nullSurfFaces = 0;
+    auto warnUnderpack = [&](const char* family, size_t have, size_t need) {
+        if (_warnedUnderpack.insert(family).second) {
+            TF_WARN("hdOcct: Brep %zu: %s surface array under-packed "
+                    "(have %zu, face #%zu needs one more); affected faces are "
+                    "skipped (null surface). Counted in HDOCCT_TRIM_HIST "
+                    "nullSrf.", brepIndex, family, have, need);
+        }
+    };
+
+    for (size_t faceIdx = 0;
+         faceIdx < faceStart + numFaces &&
+         faceIdx < data.faceSurfaceType.size(); ++faceIdx) {
+        const TfToken& stype = data.faceSurfaceType[faceIdx];
+        Handle(Geom_Surface) surf;
+
+        if (stype.GetString() == "BrepSurfaceCylinderAPI") {
+            if (cylFace < data.surfaceCylinderRadius.size() &&
+                cylFace < data.surfaceCylinderOrigin.size()) {
+                const GfVec3d& o  = data.surfaceCylinderOrigin[cylFace];
+                const GfVec3d& ax = data.surfaceCylinderAxis[cylFace];
+                const GfVec3d& rd = data.surfaceCylinderRefDir[cylFace];
+                gp_Ax3 ax3(gp_Pnt(o[0], o[1], o[2]),
+                           gp_Dir(ax[0], ax[1], ax[2]),
+                           gp_Dir(rd[0], rd[1], rd[2]));
+                surf = new Geom_CylindricalSurface(
+                    ax3, data.surfaceCylinderRadius[cylFace]);
+            } else {
+                warnUnderpack("cylinder",
+                              data.surfaceCylinderRadius.size(), cylFace);
+            }
+            ++cylFace;
+        } else if (stype.GetString() == "BrepSurfacePlaneAPI") {
+            if (planeFace < data.surfacePlaneOrigin.size()) {
+                surf = new Geom_Plane(mkAx3(data.surfacePlaneOrigin[planeFace],
+                    data.surfacePlaneAxis[planeFace],
+                    data.surfacePlaneRefDir[planeFace]));
+            } else {
+                warnUnderpack("plane",
+                              data.surfacePlaneOrigin.size(), planeFace);
+            }
+            ++planeFace;
+        } else if (stype.GetString() == "BrepSurfaceConeAPI") {
+            if (coneFace < data.surfaceConeRadius.size()) {
+                surf = new Geom_ConicalSurface(
+                    mkAx3(data.surfaceConeOrigin[coneFace],
+                          data.surfaceConeAxis[coneFace],
+                          data.surfaceConeRefDir[coneFace]),
+                    data.surfaceConeSemiAngle[coneFace],
+                    data.surfaceConeRadius[coneFace]);
+            } else {
+                warnUnderpack("cone", data.surfaceConeRadius.size(), coneFace);
+            }
+            ++coneFace;
+        } else if (stype.GetString() == "BrepSurfaceSphereAPI") {
+            if (sphereFace < data.surfaceSphereRadius.size()) {
+                surf = new Geom_SphericalSurface(
+                    mkAx3(data.surfaceSphereCenter[sphereFace],
+                          data.surfaceSphereAxis[sphereFace],
+                          data.surfaceSphereRefDir[sphereFace]),
+                    data.surfaceSphereRadius[sphereFace]);
+            } else {
+                warnUnderpack("sphere",
+                              data.surfaceSphereRadius.size(), sphereFace);
+            }
+            ++sphereFace;
+        } else if (stype.GetString() == "BrepSurfaceTorusAPI") {
+            if (torusFace < data.surfaceTorusMajorRadius.size()) {
+                surf = new Geom_ToroidalSurface(
+                    mkAx3(data.surfaceTorusOrigin[torusFace],
+                          data.surfaceTorusAxis[torusFace],
+                          data.surfaceTorusRefDir[torusFace]),
+                    data.surfaceTorusMajorRadius[torusFace],
+                    data.surfaceTorusMinorRadius[torusFace]);
+            } else {
+                warnUnderpack("torus",
+                              data.surfaceTorusMajorRadius.size(), torusFace);
+            }
+            ++torusFace;
+        } else if (stype.GetString() == "BrepSurfaceNurbAPI") {
+            // NURBS is now an EXPLICIT token match (was the catch-all default).
+            // An unrecognized token no longer silently consumes a NURBS slot and
+            // desyncs every later NURBS face (debt register row 12).
+            if (nurbFace < data.surfaceUVertexCount.size()) {
+                int uCnt = data.surfaceUVertexCount[nurbFace];
+                int vCnt = data.surfaceVVertexCount[nurbFace];
+                int uOrd = data.surfaceUOrder[nurbFace];
+                int vOrd = data.surfaceVOrder[nurbFace];
+                int numUKnots = uCnt + uOrd, numVKnots = vCnt + vOrd;
+                int numCPs = uCnt * vCnt;
+                const GfVec3d* cps = data.surfaceControlVertices.cdata() + surfCPOffset;
+                const double* uKnots = data.surfaceUKnots.cdata() + surfUKnotOffset;
+                const double* vKnots = data.surfaceVKnots.cdata() + surfVKnotOffset;
+                const double* weights = (!data.surfaceWeights.empty())
+                    ? data.surfaceWeights.cdata() + surfWeightOffset : nullptr;
+                int numW = (!data.surfaceWeights.empty()) ? numCPs : 0;
+                surf = _MakeBSplineSurface(cps, uCnt, vCnt, uOrd, vOrd,
+                    uKnots, numUKnots, vKnots, numVKnots, weights, numW);
+                surfCPOffset += numCPs; surfUKnotOffset += numUKnots;
+                surfVKnotOffset += numVKnots; surfWeightOffset += numCPs;
+            } else {
+                warnUnderpack("nurb", data.surfaceUVertexCount.size(), nurbFace);
+            }
+            ++nurbFace;
+        } else {
+            // Unknown surfaceType token: consume NOTHING (advance no per-family
+            // cursor) and leave the surface null, so the per-family packing stays
+            // aligned for later faces. The null face is skipped by the trim
+            // builders below (which already `continue` on a null surface). Warn
+            // once per unrecognized token per Brep (debt register row 12).
+            if (_warnedSurfType.insert(stype.GetString()).second) {
+                TF_WARN("hdOcct: Brep %zu face #%zu: unknown face:surfaceType "
+                        "'%s'; face skipped (no surface built) and no surface "
+                        "array consumed. Add an explicit branch if this type is "
+                        "supported.", brepIndex, faceIdx,
+                        stype.GetString().c_str());
+            }
+        }
+
+        if (faceIdx >= faceStart) {
+            if (surf.IsNull()) ++_nullSurfFaces;
+            surfaces.push_back(surf);
+        }
     }
 
-    for (size_t fi = 0; fi < numFaces; ++fi) {
-        size_t faceIdx = faceStart + fi;
-        if (faceIdx >= data.surfaceUVertexCount.size()) break;
-
-        int uCnt = data.surfaceUVertexCount[faceIdx];
-        int vCnt = data.surfaceVVertexCount[faceIdx];
-        int uOrd = data.surfaceUOrder[faceIdx];
-        int vOrd = data.surfaceVOrder[faceIdx];
-        int numUKnots = uCnt + uOrd;
-        int numVKnots = vCnt + vOrd;
-        int numCPs = uCnt * vCnt;
-
-        const GfVec3d* cps = data.surfaceControlVertices.cdata() + surfCPOffset;
-        const double* uKnots = data.surfaceUKnots.cdata() + surfUKnotOffset;
-        const double* vKnots = data.surfaceVKnots.cdata() + surfVKnotOffset;
-        const double* weights = (!data.surfaceWeights.empty())
-            ? data.surfaceWeights.cdata() + surfWeightOffset : nullptr;
-        int numW = (!data.surfaceWeights.empty()) ? numCPs : 0;
-
-        auto surface = _MakeBSplineSurface(
-            cps, uCnt, vCnt, uOrd, vOrd,
-            uKnots, numUKnots, vKnots, numVKnots,
-            weights, numW);
-        surfaces.push_back(surface);
-
-        surfCPOffset += numCPs;
-        surfUKnotOffset += numUKnots;
-        surfVKnotOffset += numVKnots;
-        surfWeightOffset += numCPs;
-    }
-
-    // Build faces as untrimmed NURBS surfaces.
+    // Build trimmed faces. Two branches follow, selected by whether the prim
+    // authored 2D trim curves (BrepCurveUvNurbAPI pcurves):
     //
-    // When BrepCurveUvNurbAPI data is absent (no pcurves), we build untrimmed
-    // faces from natural surface parameter bounds. Faces with multiple loops
-    // (indicating trim curves we can't reconstruct) are skipped — they are
-    // typically planar end-caps that would render as oversized rectangles.
+    //   hasTrimCurves == true  -> "full topology" branch (else, below). Each
+    //     wire edge is built directly from its authored 2D pcurve on the
+    //     surface, giving an exact trim; a per-edgeuse edges[] 3D-curve source
+    //     is prepared as the fallback for any edgeuse whose pcurve is absent or
+    //     fails to build.
     //
-    // TODO: When BrepCurveUvNurbAPI data IS available, reconstruct full
-    // edge topology with pcurves for proper trimmed tessellation.
+    //   hasTrimCurves == false -> "derive from 3D edges" branch (Ladder B, the
+    //     if-block below). No pcurves are authored, so each face is trimmed from
+    //     its loops' 3D edges: analytic (line/circle/ellipse) and NURBS edge
+    //     curves are built, projected to pcurves where possible, and the face is
+    //     wire-trimmed. A failure ladder (analyzer-reject -> two-pass retry ->
+    //     parametric face:range / natural-bounds fallback, with a parametric
+    //     pole-closure for singular apex/pole faces) is the safety net.
+    //
+    // Both branches handle single- and multi-loop faces (holes/pockets) and
+    // both apply the authored faceuse:orientationType via applyFaceuseOrientation.
     bool hasTrimCurves = !data.trimCurveControlVertices.empty();
 
     std::vector<TopoDS_Face> faces;
     std::vector<bool> faceNeedsFlip;
+    // Authored index of each entry in `faces`, kept in lockstep so consumers
+    // can attribute per-face data even when the ladder drops faces.
+    std::vector<int> builtAuthored;
     faces.reserve(numFaces);
     faceNeedsFlip.reserve(numFaces);
 
+    // Orient each face from the authored radial-edge data. "opposite" means the
+    // solid-exterior (outward) normal points against the surface's natural
+    // normal, so mark the face REVERSED and let the tessellator derive
+    // winding/normals from face.Orientation(). Set absolutely (not a
+    // conditional flip): face construction (ShapeFix_Face / MakeFace-with-wires)
+    // may itself leave the face REVERSED, and the authored data is the single
+    // source of truth.
+    //
+    // The schema requires the void-included form (issue #68): a closed solid
+    // counts its infinite exterior void region, with faceuses grouped by shell
+    // and an explicit faceuse:faceIndex. Two such layouts occur from CAD
+    // producers (the legacy single-solidRegion interleaved layout with no void
+    // region is no longer accepted):
+    //  (B) Separate voidRegion + solidRegion shells with faceuses grouped by
+    //      shell plus an explicit faceuse:faceIndex map (CAD producers, e.g.
+    //      hoops-converter). Here 2*fi straddles both shells and mis-orients
+    //      half the faces, collapsing closed solids to ~0 signed volume. Use
+    //      the faceuse bounding the VOID region's shell (the solid's exterior
+    //      side) as the outward reference, so the same opposite->REVERSED rule
+    //      as (A) applies and normals point outward.
+    //  (C) A void-ONLY body (voidRegion with no solidRegion -- e.g. CATIA
+    //      solids via hoops-converter). All faceuses live in the single void
+    //      shell, so like (B) resolve each face through faceuse:faceIndex
+    //      rather than by position: the fixed 2*fi pick assumed an INTERLEAVED
+    //      faceuse layout ([0,0,1,1,...]), but producers may author GROUPED
+    //      faceuses ([0,1,2,0,1,2,...]) -- the same grouping (B) uses -- so the
+    //      positional pair never matches and every face falls to the fallback.
+    //      Pick by CONTENT: REVERSE only when ALL of a face's faceuses are
+    //      'opposite'; otherwise FORWARD.
+    std::vector<int> faceOutwardOpposite(numFaces, -1);   // -1 = unknown
+    {
+        bool hasVoid = false, hasSolid = false;
+        for (size_t ri = regionStart; ri < regionStart + numRegions &&
+                                      ri < data.regionType.size(); ++ri) {
+            if (data.regionType[ri] == _tokens->voidRegion)  hasVoid = true;
+            if (data.regionType[ri] == _tokens->solidRegion) hasSolid = true;
+        }
+        if (hasVoid && hasSolid && !data.faceuseFaceIndex.empty()) {
+            // Layout (B): walk this Brep's shells and record the outward
+            // orientation for each face from the faceuse bounding the voidRegion
+            // shell (the solid's exterior side).
+            size_t fu = faceuseStart, shellIdx = shellStart;
+            for (size_t ri = regionStart; ri < regionStart + numRegions; ++ri) {
+                const bool isVoid = ri < data.regionType.size() &&
+                                    data.regionType[ri] == _tokens->voidRegion;
+                const size_t nShells = ri < data.regionShellCount.size()
+                                       ? data.regionShellCount[ri] : 0;
+                for (size_t s = 0; s < nShells; ++s, ++shellIdx) {
+                    const size_t nfu = shellIdx < data.shellFaceuseCount.size()
+                                       ? data.shellFaceuseCount[shellIdx] : 0;
+                    for (size_t j = 0; j < nfu; ++j, ++fu) {
+                        if (!isVoid || fu >= data.faceuseFaceIndex.size())
+                            continue;
+                        const size_t fl =
+                            (size_t)data.faceuseFaceIndex[fu] - faceStart;
+                        if (fl < numFaces)
+                            faceOutwardOpposite[fl] =
+                                (fu < data.faceuseOrientationType.size() &&
+                                 data.faceuseOrientationType[fu] ==
+                                     _tokens->opposite) ? 1 : 0;
+                    }
+                }
+            }
+        } else if (hasVoid && !hasSolid && !data.faceuseFaceIndex.empty()) {
+            // Layout (C): void-only body -- order-independent. Walk this Brep's
+            // faceuse range once and fold each faceuse's orientation into its
+            // face (mapped through faceuse:faceIndex, not by 2*fi position, so
+            // interleaved and grouped layouts both work). REVERSE a face only
+            // when ALL of its faceuses are 'opposite'; otherwise FORWARD.
+            for (size_t fu = faceuseStart;
+                 fu < faceuseStart + totalFaceuses &&
+                 fu < data.faceuseFaceIndex.size() &&
+                 fu < data.faceuseOrientationType.size(); ++fu) {
+                const size_t fl = (size_t)data.faceuseFaceIndex[fu] - faceStart;
+                if (fl >= numFaces) continue;
+                const bool opp =
+                    data.faceuseOrientationType[fu] == _tokens->opposite;
+                // Start FORWARD (0); stay 1 (REVERSE) only if every faceuse of
+                // this face is 'opposite'.
+                faceOutwardOpposite[fl] =
+                    (faceOutwardOpposite[fl] < 0) ? (opp ? 1 : 0)
+                                                  : (faceOutwardOpposite[fl] & (opp ? 1 : 0));
+            }
+        }
+    }
+    bool warnedMissingVoid = false;
+    auto applyFaceuseOrientation = [&](TopoDS_Face face, size_t fi) {
+        // Layout (B)/(C) above resolved each face's outward side from its
+        // void-region faceuse. The legacy single-solidRegion interleaved layout
+        // (2*fi, no void region) is no longer accepted (issue #68); a face that
+        // reaches here falls back to the surface's natural normal with a
+        // one-time warning.
+        bool outwardOpposite = false;
+        if (fi < faceOutwardOpposite.size() && faceOutwardOpposite[fi] >= 0) {
+            outwardOpposite = (faceOutwardOpposite[fi] == 1);    // (B)/(C)
+        } else if (!warnedMissingVoid) {
+            TF_WARN("hdOcct: a Brep face has no void-region faceuse; expected "
+                    "the void-included BrepArray form (regionCount counts the "
+                    "infinite void region). Orienting from the natural normal.");
+            warnedMissingVoid = true;
+        }
+        face.Orientation(outwardOpposite ? TopAbs_REVERSED : TopAbs_FORWARD);
+        return face;
+    };
+
     if (!hasTrimCurves) {
-        // Surface-only path: build faces, use 3D edge curves for trimming
+        // ---- HDOCCT_TRIM_HIST instrumentation --------------------------------
+        // Per-surface-type failure histogram for the analytic wire-trim path.
+        // Enabled by env HDOCCT_TRIM_HIST=1; printed to stderr at end of build.
+        static const bool _histOn =
+            (getenv("HDOCCT_TRIM_HIST") != nullptr);
+        enum { ST_PLANE=0, ST_CYL, ST_CONE, ST_SPHERE, ST_TORUS, ST_NURBS,
+               ST_OTHER, ST_N };
+        static const char* _stName[ST_N] =
+            {"plane","cylinder","cone","sphere","torus","nurbs","other"};
+        enum { FS_EDGE3D=0, FS_PROJNULL, FS_WIRE, FS_MKFACE_OUTER,
+               FS_MKFACE_INNER, FS_ANALYZER, FS_FALLBACK_PARAM,
+               FS_FALLBACK_PARAM_OK, FS_FALLBACK_RANGE, FS_SKIP, FS_TRIM_OK,
+               FS_RANGE_DISCARD, FS_CHORD, FS_NULL_SURF, FS_RING_GUARD,
+               FS_HEAL,
+               FS_N };
+        // Accumulate across all Breps of the whole build.
+        static long _hist[ST_N][FS_N] = {{0}};
+        static long _faceSeen[ST_N] = {0};
+        auto _stOf = [](const Handle(Geom_Surface)& s) -> int {
+            if (s.IsNull()) return ST_OTHER;
+            if (s->IsKind(STANDARD_TYPE(Geom_Plane)))            return ST_PLANE;
+            if (s->IsKind(STANDARD_TYPE(Geom_CylindricalSurface)))return ST_CYL;
+            if (s->IsKind(STANDARD_TYPE(Geom_ConicalSurface)))   return ST_CONE;
+            if (s->IsKind(STANDARD_TYPE(Geom_SphericalSurface))) return ST_SPHERE;
+            if (s->IsKind(STANDARD_TYPE(Geom_ToroidalSurface)))  return ST_TORUS;
+            if (s->IsKind(STANDARD_TYPE(Geom_BSplineSurface)))   return ST_NURBS;
+            return ST_OTHER;
+        };
+        #define HIST(st, fs) do { if (_histOn) _hist[(st)][(fs)]++; } while(0)
+        // Roll the faces already skipped for a null (under-packed / unknown)
+        // surface into the histogram (debt register row 18). They never reach
+        // _stOf below because a null surface `continue`s the trim loop, so tally
+        // them here under ST_OTHER.
+        if (_histOn && _nullSurfFaces > 0)
+            _hist[ST_OTHER][FS_NULL_SURF] += (long)_nullSurfFaces;
+        // ---- end instrumentation setup ---------------------------------------
+
+        // Surface-only path: trim each face with its 3D edge curves.
+        // Build the 3D curve for every edge, dispatching on edge:curveType
+        // (NURBS / line / circle / ellipse), each packed per curve type.
+        // Analytic surfaces project robustly here (the OCCT STEP-import
+        // pattern), unlike the BSpline case where 3D-wire trimming under-meshes.
+        auto mkAx2 = [](const GfVec3d& c, const GfVec3d& n, const GfVec3d& vx) {
+            return gp_Ax2(gp_Pnt(c[0], c[1], c[2]),
+                          gp_Dir(n[0], n[1], n[2]),
+                          gp_Dir(vx[0], vx[1], vx[2]));
+        };
+        size_t numEdgesTotal = data.edgeCurveType.size();
+        std::vector<Handle(Geom_Curve)> edge3dCurves(numEdgesTotal);
+        std::vector<bool> edgeIsAnalytic(numEdgesTotal, false);
+        // An xr<yr ellipse's frame is rotated +pi/2 (OCCT major>=minor), which
+        // shifts its parameterization; the authored edge:range must then be
+        // remapped by -pi/2 where it is consumed below (debt register row 5).
+        std::vector<bool> edgeEllipseSwapped(numEdgesTotal, false);
+
+        // Shared boundary vertices, one TopoDS_Vertex per authored vertex index
+        // (brep:vertexPoint:point:position). Building each analytic edge between
+        // these SHARED vertices -- rather than letting BRepBuilderAPI_MakeEdge
+        // mint fresh independent vertices per edge -- is what lets the boundary
+        // loop close: MakeWire connects edges by shared vertex identity, and the
+        // authored analytic geometry (imperfect STEP axes, a 3D edge sitting a
+        // few ulps off its host surface) leaves consecutive edges' independent
+        // endpoint vertices just far enough apart that MakeWire's final closure
+        // reports Disconnected -> the whole face falls to the oversized
+        // face:range fallback. Give the vertices a real working tolerance so the
+        // curve+parameter edge builder can still bind them to the exact authored
+        // trim interval. (Mirrors the full-topology/hasTrimCurves path, which
+        // already builds edges from vertexPositions.)
+        std::vector<TopoDS_Vertex> sharedVerts(data.vertexPositions.size());
+        {
+            // A tolerance comfortably above the STEP producer's positional noise
+            // (~1e-4 vs the observed few-ulp..1e-6 residuals) so MakeEdge with
+            // explicit params accepts the vertex without over-inflating it.
+            const double vtxTol =
+                std::max(1.0e-4, intersectTol3d * 10.0);
+            BRep_Builder vb;
+            for (size_t vi = 0; vi < data.vertexPositions.size(); ++vi) {
+                const GfVec3d& p = data.vertexPositions[vi];
+                vb.MakeVertex(sharedVerts[vi],
+                              gp_Pnt(p[0], p[1], p[2]), vtxTol);
+            }
+        }
+        {
+            size_t eCP = 0, eKnot = 0, eW = 0;   // NURBS packing offsets
+            size_t nurbE = 0, lineE = 0, circE = 0, ellE = 0;
+            std::set<std::string> _warnedEdgeType;   // row 12, once per token
+            for (size_t ei = 0; ei < numEdgesTotal; ++ei) {
+                const std::string ct = data.edgeCurveType[ei].GetString();
+                try {
+                if (ct == "BrepCurve3dLineAPI") {
+                    edgeIsAnalytic[ei] = true;
+                    if (lineE < data.edgeLineOrigin.size() &&
+                        lineE < data.edgeLineDirection.size()) {
+                        const GfVec3d& o = data.edgeLineOrigin[lineE];
+                        const GfVec3d& d = data.edgeLineDirection[lineE];
+                        edge3dCurves[ei] = new Geom_Line(
+                            gp_Pnt(o[0], o[1], o[2]), gp_Dir(d[0], d[1], d[2]));
+                    }
+                    ++lineE;
+                } else if (ct == "BrepCurve3dCircleAPI") {
+                    edgeIsAnalytic[ei] = true;
+                    if (circE < data.edgeCircleRadius.size()) {
+                        edge3dCurves[ei] = new Geom_Circle(
+                            mkAx2(data.edgeCircleCenter[circE],
+                                  data.edgeCircleAxis[circE],
+                                  data.edgeCircleRefDir[circE]),
+                            data.edgeCircleRadius[circE]);
+                    }
+                    ++circE;
+                } else if (ct == "BrepCurve3dEllipseAPI") {
+                    edgeIsAnalytic[ei] = true;
+                    if (ellE < data.edgeEllipseXRadius.size()) {
+                        double xr = data.edgeEllipseXRadius[ellE];
+                        double yr = data.edgeEllipseYRadius[ellE];
+                        gp_Ax2 ax = mkAx2(data.edgeEllipseCenter[ellE],
+                                          data.edgeEllipseAxis[ellE],
+                                          data.edgeEllipseRefDir[ellE]);
+                        // OCCT requires major >= minor; rotate frame +pi/2 if
+                        // not, and flag the edge so its authored edge:range is
+                        // remapped by -pi/2 at consumption (debt register row 5).
+                        if (xr >= yr) {
+                            edge3dCurves[ei] = new Geom_Ellipse(ax, xr, yr);
+                        } else {
+                            ax.Rotate(ax.Axis(), _halfPi);
+                            edge3dCurves[ei] = new Geom_Ellipse(ax, yr, xr);
+                            edgeEllipseSwapped[ei] = true;
+                        }
+                    }
+                    ++ellE;
+                } else if (ct == "BrepCurve3dNurbAPI") {
+                    // NURBS is an EXPLICIT token match (was the catch-all
+                    // default). An unrecognized token no longer consumes a NURBS
+                    // slot and desyncs every later NURBS edge (register row 12).
+                    if (nurbE < data.edgeCurveVertexCount.size()) {
+                        int ncp = data.edgeCurveVertexCount[nurbE];
+                        int ord = data.edgeCurveOrder[nurbE];
+                        int nk = ncp + ord;
+                        const GfVec3d* cps =
+                            data.edgeCurveControlVertices.cdata() + eCP;
+                        const double* kn = data.edgeCurveKnots.cdata() + eKnot;
+                        const double* w = (!data.edgeCurveWeights.empty())
+                            ? data.edgeCurveWeights.cdata() + eW : nullptr;
+                        int nw = (!data.edgeCurveWeights.empty()) ? ncp : 0;
+                        edge3dCurves[ei] = _MakeBSplineCurve(
+                            cps, ncp, ord, kn, nk, w, nw);
+                        eCP += ncp; eKnot += nk; eW += ncp;
+                    }
+                    ++nurbE;
+                } else {
+                    // Unknown edge:curveType: consume NOTHING (advance no cursor)
+                    // and leave edge3dCurves[ei] null so later per-family packing
+                    // stays aligned. The null edge fails its boundary wire loudly
+                    // via the null-edge guard below (register rows 12 + 2). Warn
+                    // once per unrecognized token per Brep.
+                    if (_warnedEdgeType.insert(ct).second) {
+                        TF_WARN("hdOcct: Brep %zu edge %zu: unknown edge:"
+                                "curveType '%s'; leaving the edge null (its "
+                                "boundary wire will fail). Add an explicit "
+                                "branch if this type is supported.",
+                                brepIndex, ei, ct.c_str());
+                    }
+                }
+                } catch (const Standard_Failure&) {
+                    // Malformed edge curve: leave it null; the face build skips.
+                }
+            }
+        }
+
         for (size_t fi = 0; fi < numFaces; ++fi) {
             if (fi >= surfaces.size()) break;
             const auto& surface = surfaces[fi];
             if (surface.IsNull()) continue;
 
-            // Check if this face has multiple loops (needs trimming)
+            const bool analyticSurf =
+                surface->IsKind(STANDARD_TYPE(Geom_ElementarySurface));
+
+            const int _st = _stOf(surface);   // HDOCCT_TRIM_HIST surface class
+            if (_histOn) _faceSeen[_st]++;
+
             size_t faceIdx = faceStart + fi;
-            if (faceIdx < data.faceLoopCount.size() &&
-                data.faceLoopCount[faceIdx] > 1) {
-                // Multi-loop face: build trimmed face using 3D edge curves.
-                if (data.edgeCurveControlVertices.empty() ||
-                    data.edgeCurveVertexCount.empty()) {
-                    continue;  // No 3D edge data — can't trim
-                }
+            size_t numLoops = (faceIdx < data.faceLoopCount.size())
+                ? data.faceLoopCount[faceIdx] : 0;
 
-                // Compute loop start for this face
-                size_t loopStartIdx = 0;
-                for (size_t f = 0; f < faceIdx; ++f) {
-                    if (f < data.faceLoopCount.size())
-                        loopStartIdx += data.faceLoopCount[f];
-                }
+            // Loop + edgeuse start indices for this face.
+            size_t loopStartIdx = 0;
+            for (size_t f = 0; f < faceIdx; ++f)
+                if (f < data.faceLoopCount.size())
+                    loopStartIdx += data.faceLoopCount[f];
+            size_t euStartIdx = 0;
+            for (size_t l = 0; l < loopStartIdx; ++l)
+                if (l < data.loopEdgeuseCount.size())
+                    euStartIdx += data.loopEdgeuseCount[l];
 
-                // Compute edgeuse start for this face's loops
-                size_t euStartIdx = 0;
-                for (size_t l = 0; l < loopStartIdx; ++l) {
-                    if (l < data.loopEdgeuseCount.size())
-                        euStartIdx += data.loopEdgeuseCount[l];
-                }
+            // Build a trimmed face from the loops' 3D edge wires.
+            //
+            // Any face carrying a non-empty boundary loop attempts the wire-trim
+            // (with the failure ladders below -- analyzer reject -> two-pass
+            // retry -> parametric/natural-bounds fallback -- as the safety net).
+            // This covers analytic (elementary) surfaces for any loop count AND
+            // single-loop NURBS faces trimmed only by analytic 3D edges (real
+            // CAD trims a NURBS face with line/circle/ellipse 3D edges and no
+            // authored curveUv -- production STEP commonly omits pcurves).
+            //
+            // The single-loop NURBS case was formerly excluded (attemptTrim =
+            // analyticSurf || numLoops > 1) on the finding that 3D-wire trimming
+            // under-meshed BSpline surfaces. That calculus changed: the derive
+            // path now projects exact pcurves onto BSpline surfaces too
+            // (GeomProjLib::Curve2d, gated below on analyticSurf ||
+            // IsKind(Geom_BSplineSurface)), reconciles via BRepLib::BuildCurves3d
+            // + SameParameter, and validity-checks the NURBS trim -- the same
+            // route that made the holed pcurve-less NURBS twins work. A NURBS
+            // trim that still fails the analyzer falls through to the ranged /
+            // natural-bounds fallback exactly as before, so an already-consistent
+            // planar NURBS face (whose control net already equals its trim) is
+            // unchanged geometrically.
+            //
+            // "Boundary edges present" is required so a rule-428 degenerate
+            // vertex-loop (a zero-edgeuse pole/apex marker) does NOT attempt a
+            // wire-trim it cannot build -- that would pre-empt the parametric
+            // pole-closure fallback. Sum this face's loop edgeuse counts.
+            size_t faceEdgeuseTotal = 0;
+            for (size_t l = 0; l < numLoops; ++l) {
+                size_t gl = loopStartIdx + l;
+                if (gl < data.loopEdgeuseCount.size())
+                    faceEdgeuseTotal += data.loopEdgeuseCount[gl];
+            }
+            const bool faceHasBoundaryEdges = faceEdgeuseTotal > 0;
+            const bool attemptTrim =
+                analyticSurf || numLoops > 1 ||
+                (numLoops == 1 && faceHasBoundaryEdges);
 
-                size_t numLoops = data.faceLoopCount[faceIdx];
-                bool success = true;
+            TopoDS_Face finalFace;
+            bool haveFace = false;
+
+            // Two-pass analytic trim: pass 0 attaches projected pcurves
+            // (GeomProjLib::Curve2d); if the healed face is rejected, pass 1
+            // rebuilds the same wire pcurve-LESS and lets MakeFace +
+            // BuildCurves3d + SameParameter compute the pcurves in the face
+            // context. The projection wins for most bands but produces a
+            // degenerate pcurve for some (partial cylinders, holed disks) where
+            // the in-context computation succeeds -- and vice versa -- so trying
+            // both recovers faces that either route alone would drop to the
+            // oversized fallback. NURBS uses only pass 0 (projection is its only
+            // UV source). Pass 1 is restricted to NON-pole analytic surfaces
+            // (cylinder/cone/plane): sphere/torus poles rely on the projected
+            // pcurve + FixAddNaturalBound path, and a pcurve-less retry there
+            // meshes the full sphere to nothing (empty mesh).
+            const bool poleSurfaceEarly =
+                surface->IsKind(STANDARD_TYPE(Geom_SphericalSurface)) ||
+                surface->IsKind(STANDARD_TYPE(Geom_ToroidalSurface));
+            const int nTrimPasses = (analyticSurf && !poleSurfaceEarly) ? 2 : 1;
+            for (int trimPass = 0;
+                 trimPass < nTrimPasses && !haveFace && attemptTrim;
+                 ++trimPass) {
+              const bool doProject = (trimPass == 0);
+              try {
+                bool built = false, ok = true;
                 TopoDS_Face trimmedFace;
-
                 size_t currentEU = euStartIdx;
-                for (size_t li = 0; li < numLoops && success; ++li) {
+                for (size_t li = 0; li < numLoops && ok; ++li) {
                     size_t globalLoop = loopStartIdx + li;
                     if (globalLoop >= data.loopEdgeuseCount.size()) {
-                        success = false; break;
+                        ok = false; break;
                     }
                     size_t numEU = data.loopEdgeuseCount[globalLoop];
-                    if (numEU == 0) { currentEU += numEU; continue; }
+                    if (numEU == 0) { ok = false; break; }
 
-                    // Build wire from edgeuses in this loop
                     BRepBuilderAPI_MakeWire wireMaker;
                     for (size_t eu = 0; eu < numEU; ++eu) {
                         size_t euIdx = currentEU + eu;
                         if (euIdx >= data.edgeuseEdgeIndex.size()) {
-                            success = false; break;
+                            ok = false; break;
                         }
                         size_t edgeIdx = data.edgeuseEdgeIndex[euIdx];
-                        if (edgeIdx >= data.edgeCurveVertexCount.size()) {
-                            success = false; break;
+                        if (edgeIdx >= edge3dCurves.size() ||
+                            edge3dCurves[edgeIdx].IsNull()) {
+                            ok = false; break;
                         }
-
-                        // Compute offset into edge curve arrays
-                        size_t ecpOffset = 0, eknotOffset = 0, ewOffset = 0;
-                        for (size_t e = 0; e < edgeIdx; ++e) {
-                            ecpOffset += data.edgeCurveVertexCount[e];
-                            eknotOffset += data.edgeCurveVertexCount[e] +
-                                           data.edgeCurveOrder[e];
-                            ewOffset += data.edgeCurveVertexCount[e];
+                        // Analytic curves are infinite/periodic — bound them by
+                        // the authored edge:range parameter interval, and build
+                        // them BETWEEN the shared boundary vertices so the loop
+                        // closes (see sharedVerts above). The vertex-bounded
+                        // builder keeps the exact authored trim (params) while
+                        // giving consecutive edges a common vertex identity.
+                        TopoDS_Edge edge;
+                        bool builtEdge = false;
+                        // Resolve this edge's two shared vertices (if authored).
+                        const TopoDS_Vertex* v1 = nullptr;
+                        const TopoDS_Vertex* v2 = nullptr;
+                        if (edgeIdx < data.edgeVertexIndices.size()) {
+                            const GfVec2i& vidx =
+                                data.edgeVertexIndices[edgeIdx];
+                            if (vidx[0] >= 0 && vidx[1] >= 0 &&
+                                (size_t)vidx[0] < sharedVerts.size() &&
+                                (size_t)vidx[1] < sharedVerts.size()) {
+                                v1 = &sharedVerts[vidx[0]];
+                                v2 = &sharedVerts[vidx[1]];
+                            }
                         }
-
-                        int numCPs = data.edgeCurveVertexCount[edgeIdx];
-                        int edgeOrder = data.edgeCurveOrder[edgeIdx];
-                        int numKnots = numCPs + edgeOrder;
-
-                        const GfVec3d* cps =
-                            data.edgeCurveControlVertices.cdata() + ecpOffset;
-                        const double* knots =
-                            data.edgeCurveKnots.cdata() + eknotOffset;
-                        const double* weights =
-                            (!data.edgeCurveWeights.empty())
-                            ? data.edgeCurveWeights.cdata() + ewOffset
-                            : nullptr;
-                        int numW = (!data.edgeCurveWeights.empty())
-                                   ? numCPs : 0;
-
-                        auto curve = _MakeBSplineCurve(
-                            cps, numCPs, edgeOrder, knots, numKnots,
-                            weights, numW);
-                        if (curve.IsNull()) { success = false; break; }
-
-                        // Check if edgeuse orientation is "opposite" → reverse
-                        bool euReversed = false;
-                        if (euIdx < data.edgeuseOrientationType.size()) {
-                            euReversed = (data.edgeuseOrientationType[euIdx]
-                                          == _tokens->opposite);
+                        if (edgeIsAnalytic[edgeIdx] &&
+                            2 * edgeIdx + 1 < data.edgeRange.size()) {
+                            double r0 = data.edgeRange[2 * edgeIdx];
+                            double r1 = data.edgeRange[2 * edgeIdx + 1];
+                            // xr<yr ellipse: the +pi/2 frame rotation applied at
+                            // construction shifts params by -pi/2 (row 5).
+                            if (edgeEllipseSwapped[edgeIdx]) {
+                                r0 -= _halfPi; r1 -= _halfPi;
+                            }
+                            // Preferred: shared vertices + exact params.
+                            if (v1 && v2) {
+                                BRepBuilderAPI_MakeEdge em(
+                                    edge3dCurves[edgeIdx], *v1, *v2, r0, r1);
+                                if (em.IsDone()) {
+                                    edge = em.Edge(); builtEdge = true;
+                                } else {
+                                    // Exact-param build failed. On a periodic
+                                    // curve the authored range may sit a whole
+                                    // number of periods off OCCT's domain (or
+                                    // straddle the seam); shift it into range and
+                                    // retry WITH params before discarding it --
+                                    // discarding lets OCCT re-derive params from
+                                    // the endpoints, which can silently select
+                                    // the wrong (complementary) arc (row 6).
+                                    double nr0 = r0, nr1 = r1;
+                                    if (_PeriodNormalizeRange(
+                                            edge3dCurves[edgeIdx], nr0, nr1) &&
+                                        (nr0 != r0 || nr1 != r1)) {
+                                        BRepBuilderAPI_MakeEdge emp(
+                                            edge3dCurves[edgeIdx],
+                                            *v1, *v2, nr0, nr1);
+                                        if (emp.IsDone()) {
+                                            edge = emp.Edge(); builtEdge = true;
+                                        }
+                                    }
+                                    if (!builtEdge) {
+                                        // Range rescue exhausted: let OCCT derive
+                                        // params from the shared vertices. This
+                                        // loses the authored arc on a periodic
+                                        // curve, so tally + warn once per build.
+                                        BRepBuilderAPI_MakeEdge em2(
+                                            edge3dCurves[edgeIdx], *v1, *v2);
+                                        if (em2.IsDone()) {
+                                            edge = em2.Edge(); builtEdge = true;
+                                            HIST(_st, FS_RANGE_DISCARD);
+                                            static std::atomic<bool> _warned{false};
+                                            if (!_warned.exchange(true)) {
+                                                TF_WARN("hdOcct: Brep %zu face "
+                                                  "%zu: analytic edge %zu range "
+                                                  "[%g,%g] rejected by OCCT; "
+                                                  "rebuilt from endpoint "
+                                                  "vertices (authored arc may be "
+                                                  "lost on a periodic curve, "
+                                                  "row 6). Further occurrences "
+                                                  "counted in HDOCCT_TRIM_HIST "
+                                                  "rngDisc.", brepIndex, faceIdx,
+                                                  edgeIdx, r0, r1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (!builtEdge) {
+                                // No authored vertices: fall back to the legacy
+                                // curve+params edge (fresh, unshared vertices).
+                                BRepBuilderAPI_MakeEdge em(
+                                    edge3dCurves[edgeIdx], r0, r1);
+                                if (!em.IsDone()) { ok = false; break; }
+                                edge = em.Edge(); builtEdge = true;
+                            }
+                        } else {
+                            if (v1 && v2) {
+                                BRepBuilderAPI_MakeEdge em(
+                                    edge3dCurves[edgeIdx], *v1, *v2);
+                                if (em.IsDone()) {
+                                    edge = em.Edge(); builtEdge = true;
+                                }
+                            }
+                            if (!builtEdge) {
+                                BRepBuilderAPI_MakeEdge em(edge3dCurves[edgeIdx]);
+                                if (!em.IsDone()) { ok = false; break; }
+                                edge = em.Edge(); builtEdge = true;
+                            }
                         }
-
-                        // Build edge from curve
-                        BRepBuilderAPI_MakeEdge edgeMaker(curve);
-                        if (!edgeMaker.IsDone()) { success = false; break; }
-                        TopoDS_Edge edge = edgeMaker.Edge();
-                        if (euReversed) edge.Reverse();
+                        // Attach an exact pcurve (3D->2D projection) so curved
+                        // faces mesh. Projected for analytic AND NURBS surfaces:
+                        // curveUv is optional (proposal #109), so a pcurve-less
+                        // trimmed/holed NURBS face must derive its UV placement
+                        // from the 3D edge or OCCT cannot cut the hole. Null-
+                        // guarded, so a failed projection simply carries no
+                        // pcurve and the fallbacks handle it. NOTE: for some
+                        // analytic bands (partial cylinders, holed disks)
+                        // GeomProjLib::Curve2d yields a degenerate pcurve and the
+                        // face is rejected; those are recovered by the
+                        // pcurve-less retry after the heal below.
+                        if (doProject &&
+                            (analyticSurf ||
+                             surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface)))) {
+                            Standard_Real f, l;
+                            Handle(Geom_Curve) c3 =
+                                BRep_Tool::Curve(edge, f, l);
+                            if (!c3.IsNull()) {
+                                Handle(Geom2d_Curve) pc =
+                                    GeomProjLib::Curve2d(c3, f, l, surface);
+                                if (!pc.IsNull()) {
+                                    BRep_Builder bb;
+                                    bb.UpdateEdge(edge, pc, surface,
+                                        TopLoc_Location(),
+                                        intersectTol3d);
+                                } else if (trimPass == 0) {
+                                    HIST(_st, FS_PROJNULL);
+                                }
+                            }
+                        }
+                        if (euIdx < data.edgeuseOrientationType.size() &&
+                            data.edgeuseOrientationType[euIdx] ==
+                                _tokens->opposite)
+                            edge.Reverse();
                         wireMaker.Add(edge);
                     }
                     currentEU += numEU;
-
-                    if (!success || !wireMaker.IsDone()) {
-                        success = false; break;
+                    if (!ok || !wireMaker.IsDone()) {
+                        if (!wireMaker.IsDone()) HIST(_st, FS_WIRE);
+                        ok = false; break;
                     }
                     TopoDS_Wire wire = wireMaker.Wire();
 
                     if (li == 0) {
-                        // First loop = outer boundary
                         BRepBuilderAPI_MakeFace faceMaker(surface, wire,
-                                                         Standard_True);
-                        if (!faceMaker.IsDone()) { success = false; break; }
+                                                          Standard_True);
+                        if (!faceMaker.IsDone()) {
+                            HIST(_st, FS_MKFACE_OUTER); ok = false; break;
+                        }
                         trimmedFace = faceMaker.Face();
+                        built = true;
                     } else {
-                        // Inner loops = holes
-                        wire.Reverse();  // Inner wires must be reversed
+                        // Inner loops are authored CW (opposite the CCW outer)
+                        // per the material-on-left convention; the edgeuse
+                        // orientationType applied above (edge.Reverse for
+                        // "opposite") already wound them to cut the hole.
+                        // Consume as-built, matching the hasTrimCurves path
+                        // (which likewise dropped its former hole.Reverse()).
                         BRepBuilderAPI_MakeFace faceMaker(trimmedFace, wire);
-                        if (!faceMaker.IsDone()) { success = false; break; }
+                        if (!faceMaker.IsDone()) {
+                            HIST(_st, FS_MKFACE_INNER); ok = false; break;
+                        }
                         trimmedFace = faceMaker.Face();
                     }
                 }
 
-                if (success && !trimmedFace.IsNull()) {
-                    // Ensure pcurves exist for BRepMesh to work
+                if (built && ok && !trimmedFace.IsNull()) {
+                    // Pole-bearing surfaces (sphere/torus) need the natural seam
+                    // + degenerate pole edges added so a cap/great-circle wire
+                    // closes.
+                    bool poleSurface =
+                        surface->IsKind(STANDARD_TYPE(Geom_SphericalSurface)) ||
+                        surface->IsKind(STANDARD_TYPE(Geom_ToroidalSurface));
+                    // Synthesize any missing 3D/2D curves and reconcile before
+                    // healing so holes cut and analytic bands close. For NURBS
+                    // this reconciles the projected hole pcurve (mirrors the
+                    // hasTrimCurves path). For ANALYTIC surfaces the edges were
+                    // left pcurve-less above; MakeFace(surface, wire) computed
+                    // the pcurves in-context, and this pass reconciles them --
+                    // the robust route that fixes the partial-band / holed-disk
+                    // faces GeomProjLib::Curve2d mis-projected.
+                    BRepLib::BuildCurves3d(trimmedFace, intersectTol3d);
                     ShapeFix_Face fix(trimmedFace);
-                    fix.FixAddNaturalBoundMode() = Standard_False;
+                    fix.FixAddNaturalBoundMode() =
+                        (analyticSurf && poleSurface) ? Standard_True
+                                                      : Standard_False;
                     fix.FixWireMode() = Standard_True;
+                    // Disable ShapeFix_Face::FixPeriodicDegenerated (debt
+                    // register row 2.1 / KUKA body_4 face 66). On a periodic
+                    // analytic surface (cone/cylinder/sphere/torus) this OCCT
+                    // sub-fixer, invoked by Perform(), deterministically
+                    // SIGSEGVs on some malformed wire configurations (verified by
+                    // backtrace: ShapeFix_Face::FixPeriodicDegenerated -> null
+                    // deref, NOT a catchable Standard_Failure, so the surrounding
+                    // try/catch cannot save it -- OCCT signal-to-exception
+                    // conversion is not installed in this CLI). It repairs only
+                    // degenerate seam/pole edges we do not rely on: our seam and
+                    // pole closure comes from FixAddNaturalBound (poles) and the
+                    // authored wire, and the parametric face:range fallback below
+                    // handles any face this heal then leaves invalid. Turning it
+                    // off removes the crash with no change to the clean corpus,
+                    // suite, or any other KUKA body (all verified unchanged).
+                    fix.FixPeriodicDegeneratedMode() = Standard_False;
+                    // Enable wire-orientation repair on MULTI-LOOP (holed) faces.
+                    // On real STEP holed planes the inner (hole) wire is authored
+                    // CW and consumed as-built; once MakeFace computes its pcurve
+                    // in-context the 2D winding can come out same-sense as the
+                    // outer, which OCCT flags BRepCheck_BadOrientationOfSubshape
+                    // (status 32) and the face is rejected -> oversized fallback
+                    // (the untrimmed, unholed plane the user saw). FixOrientation
+                    // reorders/reverses the wires against the surface material
+                    // side so the hole cuts. Applied to holed faces AND single-
+                    // loop full-period bands (cylinders/planes) whose seam wire
+                    // likewise only closes once oriented against the material
+                    // side -- EXCEPT single-loop cones. A single-loop cone's lone
+                    // outer wire needs no reorientation, and its pcurve-less twin
+                    // baseline (testConeNoPcurves = 106 verts) shifts by 2 if a
+                    // spurious orientation pass adds a seam. A holed cone
+                    // (numLoops>1) still gets the fix.
+                    const bool isConeSurf =
+                        surface->IsKind(STANDARD_TYPE(Geom_ConicalSurface));
+                    const bool fixOrient = (numLoops > 1) || !isConeSurf;
+                    if (fixOrient) fix.FixOrientationMode() = Standard_True;
                     fix.Perform();
+                    // Explicit orientation pass: Perform()'s auto route does not
+                    // always reconcile an as-built inner wire; call it directly
+                    // so a mis-wound hole is flipped rather than dropped.
+                    if (fixOrient) fix.FixOrientation();
                     trimmedFace = fix.Face();
-                    faces.push_back(trimmedFace);
-                    faceNeedsFlip.push_back(false);
+                    BRepLib::SameParameter(trimmedFace, intersectTol3d);
+
+                    bool _healTried = false;
+                    // Wire-healing retry (builder-robustness pass). If the
+                    // assembled trim is INVALID, attempt one healed rebuild
+                    // BEFORE giving up on the trim: ShapeFix_Wire
+                    // FixReorder/FixConnected/FixClosed on every wire (working
+                    // precision = intersectTol3d, escalating up to ~10x), then
+                    // rebuild the face on the same surface with the same
+                    // MakeFace + ShapeFix_Face + SameParameter chain. This
+                    // repairs the seam-crossing / near-coincident-vertex /
+                    // mis-oriented-hole wires that dominate the KUKA
+                    // analyz-fail population (WIRE 28 NotClosed, EDGE 10/11
+                    // SameParameter/SameRange, FACE 27/32 Unorientable/
+                    // BadOrientation) so a holed disc or shaped bracket keeps
+                    // its trim instead of dropping to the untrimmed parametric
+                    // fallback (which renders the wrong -- unholed / over-
+                    // covered -- geometry). Gated strictly on !IsValid(): a
+                    // face that already passes is NEVER re-touched (fixture
+                    // safety). The healed face is only ADOPTED here; the
+                    // BRepCheck + ring/wrong-side guards below re-run on it
+                    // exactly as on a primary trim, so a heal that produces a
+                    // differently bad or over-covered face is still rejected.
+                    // HDOCCT_NO_HEAL=1 disables the retry (A/B measurement of the
+                    // healing's isolated contribution; the heal is ON by default).
+                    static const bool _healOff =
+                        (getenv("HDOCCT_NO_HEAL") != nullptr);
+                    if (!_healOff &&
+                        !BRepCheck_Analyzer(trimmedFace).IsValid()) {
+                        // Two rescue routes, both from the SAME ShapeFix_Wire
+                        // pass. (1) Adopt the rebuilt face if it is valid.
+                        // (2) Otherwise the heal's in-place wire repair
+                        // (ModifyTopologyMode -- vertex merge + tolerance
+                        // escalation on the shared edges/vertices) may itself
+                        // have made the ORIGINAL trimmedFace valid; keep it if
+                        // so. Either way BRepCheck + the ring/wrong-side guards
+                        // below re-run and have final say.
+                        TopoDS_Face _healed = _HealTrimmedFace(
+                            trimmedFace, surface,
+                            /*addNaturalBound=*/(analyticSurf && poleSurface),
+                            /*fixOrient=*/fixOrient,
+                            /*prec=*/intersectTol3d,
+                            /*maxTol=*/intersectTol3d * 10.0);
+                        if (!_healed.IsNull() &&
+                            BRepCheck_Analyzer(_healed).IsValid()) {
+                            trimmedFace = _healed;
+                            _healTried = true;
+                        } else if (BRepCheck_Analyzer(trimmedFace).IsValid()) {
+                            // In-place wire repair rescued the original face.
+                            _healTried = true;
+                        }
+                        if (_healTried && getenv("HDOCCT_HEAL_DBG"))
+                            fprintf(stderr, "  HEAL-OK face=%zu st=%s "
+                                "pass=%d loops=%zu\n", faceIdx,
+                                _stName[_st], trimPass, numLoops);
+                    }
+
+                    // Validity-check NURBS trims too (was analytic-only): a
+                    // projection that produced a malformed hole falls through to
+                    // the fallbacks instead of emitting a masked bad face.
+                    // Analytic acceptance is unchanged (it already required
+                    // validity via the !analyticSurf==false short-circuit).
+                    // NOTE: a seam-split analytic lune (sphere authored as two
+                    // half-lune faces, e.g. testSphere) whose boundary wire is
+                    // only meridians cannot close without the degenerate
+                    // pole/seam edges that authored pcurves would supply, so its
+                    // pcurve-less twin under-covers (half sphere). Spheres
+                    // authored as a single natural-bound face (testAnalyticSphere)
+                    // render correctly pcurve-less; this is an authoring-form
+                    // limitation, documented as an xfail twin.
+                    bool _ringReject = false;
+                    if (BRepCheck_Analyzer(trimmedFace).IsValid()) {
+                        // Ring-artifact guard (debt register row 2.2 / KUKA
+                        // fillets). A trimmed analytic face on a PERIODIC surface
+                        // (cone u / cylinder u / sphere / torus u+v) can be
+                        // accepted by the analyzer yet cover the FULL 2*pi period
+                        // when the authored window is only a thin sliver -- e.g.
+                        // KUKA body_5 face 3116: a torus fillet with authored
+                        // face:range u=[0.121,0.130] (uspan 0.009 rad) whose inner
+                        // loop is a single full-circle edge [0,2*pi]; MakeFace then
+                        // builds the whole torus revolution and the mesh renders a
+                        // huge ring 3456 mm beyond brep:extent. Detect a face whose
+                        // accepted UV span in a periodic direction reaches nearly
+                        // the full period (> 5 rad) while the authored window there
+                        // is a thin sliver (< 0.5 rad): a >10x, up-to-full-period
+                        // over-cover no legitimate trim produces. Reject it so the
+                        // parametric face:range fallback below rebuilds the tight
+                        // authored window. Verified: silent on the whole clean
+                        // corpus (toolbox has zero such faces -> committed-fixture
+                        // numbers unchanged), and on KUKA it removes the rings on
+                        // every affected body with none made worse (body_5
+                        // out-of-extent 509 -> 8, body_3 798 -> 0, body_2
+                        // 781 -> 2, all back-to-back deterministic).
+                        if (analyticSurf &&
+                            2*faceIdx+1 < data.faceRange.size()) {
+                            Standard_Real fu0,fu1,fv0,fv1;
+                            BRepTools::UVBounds(trimmedFace, fu0,fu1,fv0,fv1);
+                            const double au = data.faceRange[2*faceIdx+1][0] -
+                                              data.faceRange[2*faceIdx][0];
+                            const double av = data.faceRange[2*faceIdx+1][1] -
+                                              data.faceRange[2*faceIdx][1];
+                            const double slivTol = 0.5;   // thin-authored (rad)
+                            const double fullTol = 5.0;   // near-full period (rad)
+                            const bool ringU = surface->IsUPeriodic() &&
+                                au < slivTol && (fu1-fu0) > fullTol;
+                            const bool ringV = surface->IsVPeriodic() &&
+                                av < slivTol && (fv1-fv0) > fullTol;
+                            // Wrong-side guard (KUKA A3 hose-ball class): a
+                            // single-loop sphere trim can be accepted on the
+                            // COMPLEMENT side of its boundary loop -- both
+                            // sides are BRepCheck-valid, and FixOrientation /
+                            // in-context pcurves may pick the wrong one (body_2
+                            // face 2628 materialized the 10% south cap instead
+                            // of the 90% remainder). The wrong side shows as an
+                            // accepted V range poking well OUTSIDE the authored
+                            // window while spanning only a fraction of it.
+                            // Sphere V is non-periodic latitude, so containment
+                            // is unambiguous; producers that author loose
+                            // natural-bound windows can never trip it. Reject
+                            // to the parametric fallback, which rebuilds the
+                            // authored window.
+                            if (!(ringU || ringV) &&
+                                surface->IsKind(
+                                    STANDARD_TYPE(Geom_SphericalSurface)) &&
+                                av >= 1.0) {
+                                const double aLo =
+                                    data.faceRange[2*faceIdx][1];
+                                const double aHi =
+                                    data.faceRange[2*faceIdx+1][1];
+                                const double poke =
+                                    std::max(aLo - fv0, fv1 - aHi);
+                                if (poke > 0.15 && (fv1 - fv0) < 0.5 * av) {
+                                    _ringReject = true;
+                                    HIST(_st, FS_RING_GUARD);
+                                    static std::atomic<bool> _warnedSide{false};
+                                    if (!_warnedSide.exchange(true)) {
+                                        TF_WARN("hdOcct: Brep %zu face %zu: "
+                                          "accepted sphere trim lies on the "
+                                          "complement side of its loop (V "
+                                          "[%.3f,%.3f] vs authored window "
+                                          "[%.3f,%.3f]). Rejecting to the "
+                                          "parametric face:range fallback. "
+                                          "Further occurrences counted in "
+                                          "HDOCCT_TRIM_HIST ringGrd.",
+                                          brepIndex, faceIdx, fv0, fv1,
+                                          aLo, aHi);
+                                    }
+                                }
+                            }
+                            if (ringU || ringV) {
+                                _ringReject = true;
+                                HIST(_st, FS_RING_GUARD);
+                                static std::atomic<bool> _warnedRing{false};
+                                if (!_warnedRing.exchange(true)) {
+                                    TF_WARN("hdOcct: Brep %zu face %zu: trimmed "
+                                      "analytic face covers the full periodic "
+                                      "revolution (%.2f rad) though its authored "
+                                      "face:range is a thin sliver (%.4f rad) -- "
+                                      "the wire wrapped the whole surface. "
+                                      "Rejecting the over-covered trim; the "
+                                      "parametric face:range fallback rebuilds the "
+                                      "authored window (debt register row 2.2). "
+                                      "Further occurrences counted in "
+                                      "HDOCCT_TRIM_HIST ringGuard.",
+                                      brepIndex, faceIdx,
+                                      ringU ? (fu1-fu0) : (fv1-fv0),
+                                      ringU ? au : av);
+                                }
+                            }
+                        }
+                        if (!_ringReject) {
+                            finalFace = trimmedFace;
+                            haveFace = true;
+                            HIST(_st, FS_TRIM_OK);
+                            // Count faces recovered purely by the wire-healing
+                            // retry (they would otherwise have been analyz-fails
+                            // dropped to the untrimmed parametric fallback).
+                            if (_healTried) HIST(_st, FS_HEAL);
+                        }
+                    }
+                    // Only tally the miss once both passes are exhausted.
+                    if (!haveFace && trimPass == nTrimPasses - 1) {
+                        HIST(_st, FS_ANALYZER);
+                        if (_histOn) {
+                            double us = -1.0, vs = -1.0;
+                            if (2*faceIdx+1 < data.faceRange.size()) {
+                                us = data.faceRange[2*faceIdx+1][0] -
+                                     data.faceRange[2*faceIdx][0];
+                                vs = data.faceRange[2*faceIdx+1][1] -
+                                     data.faceRange[2*faceIdx][1];
+                            }
+                            fprintf(stderr,
+                              "  ANALYZ-FAIL face=%zu st=%s loops=%zu "
+                              "uspan=%.4f vspan=%.4f\n",
+                              faceIdx, _stName[_st], numLoops, us, vs);
+                            // HDOCCT_TRIM_DIAG: dump per-subshape BRepCheck
+                            // status codes so we can see WHICH sub-check
+                            // rejects (edge-on-surface, closed, range, ...).
+                            if (getenv("HDOCCT_TRIM_DIAG") != nullptr) {
+                                BRepCheck_Analyzer an(trimmedFace);
+                                auto dumpStat = [&](const TopoDS_Shape& sh,
+                                                    const char* kind){
+                                    Handle(BRepCheck_Result) res =
+                                        an.Result(sh);
+                                    if (res.IsNull()) return;
+                                    for (res->InitContextIterator();
+                                         res->MoreShapeInContext();
+                                         res->NextShapeInContext()) {
+                                        const BRepCheck_ListOfStatus& ls =
+                                            res->StatusOnShape();
+                                        for (BRepCheck_ListIteratorOfListOfStatus
+                                             it(ls); it.More(); it.Next())
+                                            if (it.Value() != BRepCheck_NoError)
+                                                fprintf(stderr,
+                                                  "      %s status=%d\n",
+                                                  kind, (int)it.Value());
+                                    }
+                                    const BRepCheck_ListOfStatus& gl =
+                                        res->Status();
+                                    for (BRepCheck_ListIteratorOfListOfStatus
+                                         it(gl); it.More(); it.Next())
+                                        if (it.Value() != BRepCheck_NoError)
+                                            fprintf(stderr,
+                                              "      %s gstatus=%d\n",
+                                              kind, (int)it.Value());
+                                };
+                                dumpStat(trimmedFace, "FACE");
+                                for (TopExp_Explorer ex(trimmedFace,
+                                       TopAbs_WIRE); ex.More(); ex.Next())
+                                    dumpStat(ex.Current(), "WIRE");
+                                for (TopExp_Explorer ex(trimmedFace,
+                                       TopAbs_EDGE); ex.More(); ex.Next())
+                                    dumpStat(ex.Current(), "EDGE");
+                            }
+                        }
+                    }
                 }
-                continue;
+              } catch (const Standard_Failure&) {
+                  haveFace = false;   // never let an OCCT throw crash tessellation
+              }
             }
 
-            BRepBuilderAPI_MakeFace faceMaker(surface, data.intersectTol3d);
-            if (faceMaker.IsDone()) {
-                TopoDS_Face face = faceMaker.Face();
-                // Don't apply faceuse Reverse() — without the full closed
-                // shell (multi-loop end-caps), faceuse orientation is
-                // misleading for rendering. The surface natural normal is
-                // used as-is for display purposes.
-                faces.push_back(face);
+            // Parametric fallback for analytic faces whose 3D-edge wire cannot
+            // bound the patch — pole-enclosing or seam-encoded faces, e.g. a full
+            // sphere whose only edge is a pole-to-pole meridian seam, a spherical
+            // cap or apex cone that includes a pole. Build the face from the
+            // authored face:range UV bounds; OCCT supplies the seam + degenerate
+            // pole edges that a wire alone cannot express. (Common in real CAD:
+            // producers trim analytic faces with 3D edges and no curveUv.)
+            if (!haveFace && analyticSurf &&
+                2 * faceIdx + 1 < data.faceRange.size()) {
+                const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
+                const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
+                // Authored cone v is AXIAL; OCCT's conical v is SLANT. Convert
+                // before feeding MakeFace and before the natural-bounds window
+                // classification below, else a cone patch is foreshortened by
+                // cos(semiAngle) (debt register row 1). No-op for non-cones.
+                const double pfv0 = _ConeAxialToSlantV(surface, uvLo[1]);
+                const double pfv1 = _ConeAxialToSlantV(surface, uvHi[1]);
+                if (uvHi[0] > uvLo[0] && pfv1 > pfv0) {
+                    try {
+                        BRepBuilderAPI_MakeFace pf(surface, uvLo[0], uvHi[0],
+                            pfv0, pfv1, intersectTol3d);
+                        if (pf.IsDone()) {
+                            ShapeFix_Face fx(pf.Face());
+                            fx.Perform();
+                            TopoDS_Face pff = fx.Face();
+                            if (BRepCheck_Analyzer(pff).IsValid()) {
+                                finalFace = pff;
+                                haveFace = true;
+                                // Classify: a face whose authored face:range
+                                // equals the surface's FULL natural parameter
+                                // window is a complete closed analytic surface
+                                // (a full torus/sphere) with no boundary edges
+                                // to wire-trim -- the parametric route is the
+                                // CORRECT one, not a trim failure. Count it as
+                                // parmOK. A face:range strictly inside the
+                                // natural bounds is a real trim that failed to
+                                // build a wire and fell back oversized: parmFB.
+                                // (v compared in SLANT space to match Bounds().)
+                                Standard_Real nu0, nu1, nv0, nv1;
+                                surface->Bounds(nu0, nu1, nv0, nv1);
+                                const double we = 1e-3;   // window tolerance
+                                const bool fullWindow =
+                                    uvLo[0] <= nu0 + we && uvHi[0] >= nu1 - we &&
+                                    pfv0 <= nv0 + we && pfv1 >= nv1 - we;
+                                HIST(_st, fullWindow ? FS_FALLBACK_PARAM_OK
+                                                     : FS_FALLBACK_PARAM);
+                            }
+                        }
+                    } catch (const Standard_Failure&) {}
+                }
+            }
+
+            // Untrimmed fallback: single-loop NURBS faces and faces with no
+            // boundary loops fall back to the surface parameter bounds. This is
+            // also the SAFETY NET for a single-loop NURBS face whose wire-trim
+            // was attempted (the widened attemptTrim gate) but failed the
+            // analyzer: it degrades to the same ranged/natural-bounds face it
+            // rendered before, rather than being dropped. Analytic faces that
+            // attempted trim and failed are still SKIPPED (no garbage geometry) --
+            // their legitimate pole/seam cases are already served by the
+            // parametric face:range fallback above, so a genuine analytic trim
+            // failure must not emit an oversized patch. Multi-loop (holed) NURBS
+            // faces are likewise NOT opened to this fallback: an un-holed
+            // oversized patch is exactly the BRepCheck_BadOrientationOfSubshape
+            // failure mode the FixOrientation pass exists to avoid.
+            //
+            // When no curveUv (pcurve) is authored the natural surface bounds
+            // are the only 2D window available. If the authored face:range is a
+            // STRICT sub-window of those natural bounds, the NURBS surface is
+            // oversized relative to the face and untrimmed natural bounds would
+            // render the patch too large; trim to the authored face:range
+            // (uMin,vMin)-(uMax,vMax) instead. When face:range equals (or
+            // exceeds) the natural bounds this is a no-op and we keep the
+            // untrimmed natural-bounds face, so already-consistent fixtures are
+            // unaffected.
+            if (!haveFace &&
+                (!attemptTrim || numLoops == 0 ||
+                 (!analyticSurf && numLoops == 1))) {
+                try {
+                    bool builtRanged = false;
+                    if (2 * faceIdx + 1 < data.faceRange.size()) {
+                        Standard_Real nu0, nu1, nv0, nv1;
+                        surface->Bounds(nu0, nu1, nv0, nv1);
+                        const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
+                        const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
+                        // Authored cone v is AXIAL; OCCT's conical v is SLANT.
+                        // Convert before both the sub-window test (vs the SLANT
+                        // Bounds()) and MakeFace, else the cone patch is
+                        // foreshortened (debt register row 1). No-op for non-cones.
+                        const double rfv0 = _ConeAxialToSlantV(surface, uvLo[1]);
+                        const double rfv1 = _ConeAxialToSlantV(surface, uvHi[1]);
+                        // A non-degenerate authored window strictly inside the
+                        // natural bounds (small epsilon guards floating point
+                        // equality so full-range faces stay on the legacy path).
+                        const double eps = 1e-9;
+                        const bool validRange =
+                            uvHi[0] > uvLo[0] && rfv1 > rfv0;
+                        const bool subWindow =
+                            uvLo[0] > nu0 + eps || uvHi[0] < nu1 - eps ||
+                            rfv0 > nv0 + eps || rfv1 < nv1 - eps;
+                        if (validRange && subWindow) {
+                            BRepBuilderAPI_MakeFace rf(surface,
+                                uvLo[0], uvHi[0], rfv0, rfv1,
+                                intersectTol3d);
+                            if (rf.IsDone()) {
+                                ShapeFix_Face fx(rf.Face());
+                                fx.Perform();
+                                TopoDS_Face rff = fx.Face();
+                                if (BRepCheck_Analyzer(rff).IsValid()) {
+                                    finalFace = rff;
+                                    haveFace = true;
+                                    builtRanged = true;
+                                }
+                            }
+                        }
+                    }
+                    if (!builtRanged) {
+                        BRepBuilderAPI_MakeFace faceMaker(
+                            surface, intersectTol3d);
+                        if (faceMaker.IsDone()) {
+                            finalFace = faceMaker.Face();
+                            haveFace = true;
+                        }
+                    }
+                    if (haveFace) HIST(_st, FS_FALLBACK_RANGE);
+                } catch (const Standard_Failure&) {}
+            }
+
+            // Last-resort ranged / natural-bounds face for the DOUBLE-FAIL case
+            // (builder-robustness pass). A face that (a) attempted the
+            // wire-trim and failed BRepCheck even after the healing retry, AND
+            // (b) could not build a parametric face:range face above (the
+            // silent skip today), would otherwise DISAPPEAR -- the black band at
+            // the boom-tube/bellows junction. Rather than leave a hole in the
+            // shell, emit a face covering the authored face:range window (or the
+            // surface's natural bounds if the window is degenerate/absent). This
+            // is strictly the double-fail rescue: it does NOT open the
+            // over-cover fallback to faces that already built (the ring/wrong-
+            // side guards and the un-holed-patch concern only apply to trims
+            // that were ACCEPTED; here nothing was), and it only fires when the
+            // alternative is a missing face. The window is preferred over
+            // natural bounds so a holed disc still shows its outer extent
+            // roughly right even if the hole is lost; a lost hole is a far
+            // smaller visual defect than a black void, and this face was
+            // unbuildable by every trim route anyway.
+            //
+            // Extended to NURBS surfaces (was analytic-only): a full-period
+            // NURBS surface of revolution with several trimming/hole loops -- the
+            // KUKA well-wall / wrist-dome class (body_4 face 566: a 7-loop
+            // full-2*pi B-spline dome whose hole wire will not close, WIRE 28
+            // NotClosed / FACE 27 Unorientable) -- fails every trim route and,
+            // being multi-loop NURBS, was excluded from the untrimmed fallback
+            // above (the un-holed-patch concern). That left the entire dome a
+            // black void. A NURBS surface of revolution's natural u/v bounds ARE
+            // the dome, so a ranged/natural-bounds face renders the dome minus
+            // its small label/bolt holes -- far better than a black void, and
+            // consistent with the analytic double-fail argument. Only fires when
+            // the face is otherwise SKIPPED, so no already-built face is touched.
+            const bool _isBSpline =
+                surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface));
+            static const bool _healOff2 =
+                (getenv("HDOCCT_NO_HEAL") != nullptr);
+            if (!_healOff2 && !haveFace && (analyticSurf || _isBSpline) &&
+                attemptTrim) {
+                try {
+                    bool builtLast = false;
+                    if (2 * faceIdx + 1 < data.faceRange.size()) {
+                        Standard_Real nu0, nu1, nv0, nv1;
+                        surface->Bounds(nu0, nu1, nv0, nv1);
+                        const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
+                        const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
+                        // Cone axial->slant, as everywhere else (row 1).
+                        const double lv0 = _ConeAxialToSlantV(surface, uvLo[1]);
+                        const double lv1 = _ConeAxialToSlantV(surface, uvHi[1]);
+                        if (uvHi[0] > uvLo[0] && lv1 > lv0) {
+                            BRepBuilderAPI_MakeFace lf(surface,
+                                uvLo[0], uvHi[0], lv0, lv1, intersectTol3d);
+                            if (lf.IsDone()) {
+                                ShapeFix_Face fx(lf.Face());
+                                fx.FixPeriodicDegeneratedMode() =
+                                    Standard_False;   // SIGSEGV guard
+                                fx.Perform();
+                                TopoDS_Face lff = fx.Face();
+                                if (BRepCheck_Analyzer(lff).IsValid()) {
+                                    finalFace = lff;
+                                    haveFace = true;
+                                    builtLast = true;
+                                }
+                            }
+                        }
+                    }
+                    if (!builtLast) {
+                        BRepBuilderAPI_MakeFace faceMaker(
+                            surface, intersectTol3d);
+                        if (faceMaker.IsDone()) {
+                            finalFace = faceMaker.Face();
+                            haveFace = true;
+                        }
+                    }
+                    if (haveFace) HIST(_st, FS_FALLBACK_RANGE);
+                } catch (const Standard_Failure&) {}
+            }
+
+            if (haveFace) {
+                faces.push_back(applyFaceuseOrientation(finalFace, fi));
+                builtAuthored.push_back((int)fi);
                 faceNeedsFlip.push_back(false);
+            } else {
+                HIST(_st, FS_SKIP);
             }
         }
+
+        // ---- HDOCCT_TRIM_HIST report -----------------------------------------
+        if (_histOn) {
+            fprintf(stderr,
+              "\n===== HDOCCT ANALYTIC TRIM HISTOGRAM (!hasTrimCurves) =====\n");
+            fprintf(stderr,
+                "%-9s %6s | %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s %8s "
+                "%8s %8s %8s\n",
+                "surface","seen",
+                "trimOK","parmOK","parmFB","rangeFB","skip","projN","wireX",
+                "mkfOut","mkfIn","analyz","rngDisc","chord","nullSrf",
+                "ringGrd","heal");
+            long tot[FS_N] = {0}; long totSeen = 0;
+            for (int s = 0; s < ST_N; ++s) {
+                if (_faceSeen[s] == 0 &&
+                    _hist[s][FS_TRIM_OK]==0 && _hist[s][FS_SKIP]==0 &&
+                    _hist[s][FS_NULL_SURF]==0) continue;
+                fprintf(stderr,
+                  "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld "
+                  "%8ld %8ld %8ld %8ld %8ld %8ld\n",
+                  _stName[s], _faceSeen[s],
+                  _hist[s][FS_TRIM_OK], _hist[s][FS_FALLBACK_PARAM_OK],
+                  _hist[s][FS_FALLBACK_PARAM],
+                  _hist[s][FS_FALLBACK_RANGE], _hist[s][FS_SKIP],
+                  _hist[s][FS_PROJNULL], _hist[s][FS_WIRE],
+                  _hist[s][FS_MKFACE_OUTER], _hist[s][FS_MKFACE_INNER],
+                  _hist[s][FS_ANALYZER],
+                  _hist[s][FS_RANGE_DISCARD], _hist[s][FS_CHORD],
+                  _hist[s][FS_NULL_SURF], _hist[s][FS_RING_GUARD],
+                  _hist[s][FS_HEAL]);
+                totSeen += _faceSeen[s];
+                for (int f = 0; f < FS_N; ++f) tot[f] += _hist[s][f];
+            }
+            fprintf(stderr,
+              "%-9s %6ld | %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld %8ld "
+              "%8ld %8ld %8ld %8ld %8ld\n",
+              "TOTAL", totSeen,
+              tot[FS_TRIM_OK], tot[FS_FALLBACK_PARAM_OK], tot[FS_FALLBACK_PARAM],
+              tot[FS_FALLBACK_RANGE],
+              tot[FS_SKIP], tot[FS_PROJNULL], tot[FS_WIRE],
+              tot[FS_MKFACE_OUTER], tot[FS_MKFACE_INNER], tot[FS_ANALYZER],
+              tot[FS_RANGE_DISCARD], tot[FS_CHORD], tot[FS_NULL_SURF],
+              tot[FS_RING_GUARD], tot[FS_HEAL]);
+            fprintf(stderr,
+              "  legend: trimOK=wire-trim accepted; parmOK=full-window analytic "
+              "face:range param route (closed surface, correct by design); "
+              "parmFB=sub-window param fallback (real trim that failed); "
+              "rangeFB=untrimmed natural/range fallback; "
+              "skip=no face built; projN=Curve2d null; wireX=MakeWire !done; "
+              "mkfOut/mkfIn=MakeFace !done; analyz=BRepCheck rejected; "
+              "rngDisc=analytic edge lost its authored range (verts-only "
+              "rescue, row 6); chord=curved edge replaced by a straight chord "
+              "(row 7); nullSrf=face skipped, per-family surface array "
+              "under-packed (row 18); ringGrd=full-period analytic trim rejected "
+              "(thin authored window over-covered the whole revolution, row 2.2)"
+              "; heal=trimOK faces recovered ONLY by the ShapeFix_Wire healing "
+              "retry (subset of trimOK; would otherwise be analyz-fails)\n");
+            fprintf(stderr,
+              "===========================================================\n\n");
+        }
+        #undef HIST
+        // ---- end report ------------------------------------------------------
     } else {
-        // Full topology path with pcurves available
-        size_t numEdges = data.edgeCurveVertexCount.size();
+        // Full topology path with pcurves available.
+        //
+        // edges[] is the per-edgeuse FALLBACK's 3D-edge source: it fires when an
+        // authored 2D pcurve is absent or its MakeEdge fails (the useTrim path
+        // ~40 lines down), and reads edges[edgeIdx] with a GLOBAL edgeIdx
+        // (edgeuse:edgeIndex). It is therefore built over ALL edges, sized and
+        // indexed by the GLOBAL edge index (edge:curveType.size()), dispatching
+        // on edge:curveType with separate per-family cursors -- mirroring the
+        // !hasTrimCurves branch's analytic dispatch. (Previously edges[] was
+        // sized/packed ONLY from the NURBS 3D-curve strata (edgeCurveVertexCount)
+        // and indexed by the NURBS ordinal, so on a prim mixing analytic edges
+        // (line/circle/ellipse) with NURBS the global index no longer aligned AND
+        // analytic edges had no entry at all -- the fallback dropped those
+        // edgeuses and lost the face. testMixedCurvesWithPcurves.usda exercises
+        // the mixed line/circle/NURBS case with valid pcurves so the fallback is
+        // not normally taken; this build makes the fallback correct if it ever
+        // is, and matches the same cross-kernel packing class the SMLib reader
+        // hit on real CAD with 9 NURBS among 581 analytic edges.)
+        size_t numEdgesGlobal = data.edgeCurveType.size();
         size_t edgeCPOffset = 0;
         size_t edgeKnotOffset = 0;
         size_t edgeWeightOffset = 0;
+        // Per-family ordinal cursors (each analytic family + NURBS is packed in
+        // its own array in edge order; advance the cursor for the family each
+        // GLOBAL edge belongs to, exactly as the !hasTrimCurves builder does).
+        size_t nurbE = 0, lineE = 0, circE = 0, ellE = 0;
 
-        std::vector<TopoDS_Edge> edges(numEdges);
+        // Env-gated counter (HDOCCT_TRIM_HIST spirit): how many analytic edges
+        // this branch built for the fallback. Non-zero on a mixed-family prim
+        // that actually authored analytic 3D edges alongside NURBS; the useTrim
+        // path still normally consumes the pcurves, so this only proves the
+        // fallback source is now populated for analytic edges.
+        static const bool _fbHistOn = (getenv("HDOCCT_TRIM_HIST") != nullptr);
+        long _fbAnalyticEdges = 0, _fbNurbEdges = 0;
+        // Lossy-rung counters for this branch (HDOCCT_TRIM_HIST spirit):
+        //   rangeDiscard -- an analytic edge whose exact-param build failed and
+        //     was rebuilt from endpoint vertices, dropping the authored range
+        //     (can pick the wrong arc on a periodic curve, row 6);
+        //   chord -- a curved edge that could be built no other way and was
+        //     replaced by a straight chord between its endpoints (row 7).
+        long _fbRangeDiscardEdges = 0, _fbChordEdges = 0;
 
-        for (size_t ei = 0; ei < numEdges; ++ei) {
-            int numCPs = data.edgeCurveVertexCount[ei];
-            int order = data.edgeCurveOrder[ei];
-            int numKnots = numCPs + order;
+        auto mkAx2b = [](const GfVec3d& c, const GfVec3d& n, const GfVec3d& vx) {
+            return gp_Ax2(gp_Pnt(c[0], c[1], c[2]),
+                          gp_Dir(n[0], n[1], n[2]),
+                          gp_Dir(vx[0], vx[1], vx[2]));
+        };
 
-            const GfVec3d* cps = data.edgeCurveControlVertices.cdata()
-                                 + edgeCPOffset;
-            const double* knots = data.edgeCurveKnots.cdata() + edgeKnotOffset;
-            const double* weights = (!data.edgeCurveWeights.empty())
-                ? data.edgeCurveWeights.cdata() + edgeWeightOffset : nullptr;
-            int numW = (!data.edgeCurveWeights.empty()) ? numCPs : 0;
+        std::vector<TopoDS_Edge> edges(numEdgesGlobal);
+        std::set<std::string> _warnedEdgeTypeA;   // row 12, once per token
 
-            auto curve = _MakeBSplineCurve(cps, numCPs, order, knots, numKnots,
-                                           weights, numW);
+        for (size_t ei = 0; ei < numEdgesGlobal; ++ei) {
+            // Endpoints (shared authored vertices), bounded by the authored
+            // edge:range interval -- both indexed by the GLOBAL edge id ei.
+            const bool haveVerts = ei < data.edgeVertexIndices.size();
+            gp_Pnt p1, p2;
+            if (haveVerts) {
+                const GfVec2i& vidx = data.edgeVertexIndices[ei];
+                if (vidx[0] >= 0 && vidx[1] >= 0 &&
+                    (size_t)vidx[0] < data.vertexPositions.size() &&
+                    (size_t)vidx[1] < data.vertexPositions.size()) {
+                    const GfVec3d& a = data.vertexPositions[vidx[0]];
+                    const GfVec3d& b = data.vertexPositions[vidx[1]];
+                    p1 = gp_Pnt(a[0], a[1], a[2]);
+                    p2 = gp_Pnt(b[0], b[1], b[2]);
+                }
+            }
+            const bool haveRange = 2 * ei + 1 < data.edgeRange.size();
+            // Mutable: an xr<yr ellipse whose frame we rotate by +pi/2 below
+            // needs its authored range remapped by -pi/2 to stay on the same arc.
+            double r0 = haveRange ? data.edgeRange[2 * ei] : 0.0;
+            double r1 = haveRange ? data.edgeRange[2 * ei + 1] : 0.0;
 
-            if (!curve.IsNull()) {
-                auto vertIdx = data.edgeVertexIndices[ei];
-                gp_Pnt p1(data.vertexPositions[vertIdx[0]][0],
-                          data.vertexPositions[vertIdx[0]][1],
-                          data.vertexPositions[vertIdx[0]][2]);
-                gp_Pnt p2(data.vertexPositions[vertIdx[1]][0],
-                          data.vertexPositions[vertIdx[1]][1],
-                          data.vertexPositions[vertIdx[1]][2]);
-
-                double paramMin = data.edgeRange[ei * 2];
-                double paramMax = data.edgeRange[ei * 2 + 1];
-
-                BRepBuilderAPI_MakeEdge edgeMaker(curve, p1, p2,
-                                                   paramMin, paramMax);
-                if (edgeMaker.IsDone()) {
-                    edges[ei] = edgeMaker.Edge();
-                } else {
-                    BRepBuilderAPI_MakeEdge fallback(p1, p2);
-                    if (fallback.IsDone()) {
-                        edges[ei] = fallback.Edge();
+            const std::string ct = ei < data.edgeCurveType.size()
+                ? data.edgeCurveType[ei].GetString() : std::string();
+            try {
+            Handle(Geom_Curve) c3;
+            bool analytic = false;
+            if (ct == "BrepCurve3dLineAPI") {
+                analytic = true;
+                if (lineE < data.edgeLineOrigin.size() &&
+                    lineE < data.edgeLineDirection.size()) {
+                    const GfVec3d& o = data.edgeLineOrigin[lineE];
+                    const GfVec3d& d = data.edgeLineDirection[lineE];
+                    c3 = new Geom_Line(gp_Pnt(o[0], o[1], o[2]),
+                                       gp_Dir(d[0], d[1], d[2]));
+                }
+                ++lineE;
+            } else if (ct == "BrepCurve3dCircleAPI") {
+                analytic = true;
+                if (circE < data.edgeCircleRadius.size()) {
+                    c3 = new Geom_Circle(
+                        mkAx2b(data.edgeCircleCenter[circE],
+                               data.edgeCircleAxis[circE],
+                               data.edgeCircleRefDir[circE]),
+                        data.edgeCircleRadius[circE]);
+                }
+                ++circE;
+            } else if (ct == "BrepCurve3dEllipseAPI") {
+                analytic = true;
+                if (ellE < data.edgeEllipseXRadius.size()) {
+                    double xr = data.edgeEllipseXRadius[ellE];
+                    double yr = data.edgeEllipseYRadius[ellE];
+                    gp_Ax2 ax = mkAx2b(data.edgeEllipseCenter[ellE],
+                                       data.edgeEllipseAxis[ellE],
+                                       data.edgeEllipseRefDir[ellE]);
+                    if (xr >= yr) {
+                        c3 = new Geom_Ellipse(ax, xr, yr);
+                    } else {
+                        // OCCT requires major >= minor, so swap the radii and
+                        // rotate the frame +pi/2. That rotation reparametrizes
+                        // the ellipse: a point at authored param t now sits at
+                        // t - pi/2 in the rotated frame, so shift the authored
+                        // edge:range to match, else MakeEdge(c3,p1,p2,r0,r1)
+                        // selects the wrong (often complementary) arc on a
+                        // partial-arc ellipse (debt register row 5).
+                        ax.Rotate(ax.Axis(), _halfPi);
+                        c3 = new Geom_Ellipse(ax, yr, xr);
+                        if (haveRange) { r0 -= _halfPi; r1 -= _halfPi; }
                     }
+                }
+                ++ellE;
+            } else if (ct == "BrepCurve3dNurbAPI") {
+                // NURBS-family cursor + packing (EXPLICIT token match now, was
+                // the catch-all default). An unrecognized token no longer
+                // consumes a NURBS slot and desyncs later NURBS edges (row 12).
+                if (nurbE < data.edgeCurveVertexCount.size()) {
+                    int numCPs = data.edgeCurveVertexCount[nurbE];
+                    int order = data.edgeCurveOrder[nurbE];
+                    int numKnots = numCPs + order;
+                    const GfVec3d* cps = data.edgeCurveControlVertices.cdata()
+                                         + edgeCPOffset;
+                    const double* knots = data.edgeCurveKnots.cdata()
+                                          + edgeKnotOffset;
+                    const double* weights = (!data.edgeCurveWeights.empty())
+                        ? data.edgeCurveWeights.cdata() + edgeWeightOffset
+                        : nullptr;
+                    int numW = (!data.edgeCurveWeights.empty()) ? numCPs : 0;
+                    c3 = _MakeBSplineCurve(cps, numCPs, order, knots, numKnots,
+                                           weights, numW);
+                    edgeCPOffset += numCPs;
+                    edgeKnotOffset += numKnots;
+                    edgeWeightOffset += numCPs;
+                }
+                ++nurbE;
+            } else {
+                // Unknown edge:curveType: consume NOTHING (advance no cursor),
+                // leave c3 null. The fallback edges[ei] stays null and the wire
+                // that references it fails loudly via the null-edge guard below
+                // (register rows 12 + 2). Warn once per token per Brep.
+                if (!ct.empty() && _warnedEdgeTypeA.insert(ct).second) {
+                    TF_WARN("hdOcct: Brep %zu edge %zu: unknown edge:curveType "
+                            "'%s'; leaving the fallback edge null. Add an "
+                            "explicit branch if this type is supported.",
+                            brepIndex, ei, ct.c_str());
                 }
             }
 
-            edgeCPOffset += numCPs;
-            edgeKnotOffset += numKnots;
-            edgeWeightOffset += numCPs;
+            if (!c3.IsNull()) {
+                if (_fbHistOn) { if (analytic) ++_fbAnalyticEdges;
+                                 else ++_fbNurbEdges; }
+                bool built = false;
+                if (haveVerts && haveRange) {
+                    BRepBuilderAPI_MakeEdge em(c3, p1, p2, r0, r1);
+                    if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                }
+                if (!built && haveVerts && haveRange) {
+                    // Exact-param build failed. Before discarding the authored
+                    // range, period-normalize it onto the curve's own domain and
+                    // retry WITH params: a periodic curve (circle/ellipse) can
+                    // carry a range a whole number of periods off OCCT's window,
+                    // or straddling the seam. Only if that also fails do we drop
+                    // the range (below), which on a periodic curve can silently
+                    // select the wrong arc (row 6).
+                    double nr0 = r0, nr1 = r1;
+                    if (_PeriodNormalizeRange(c3, nr0, nr1) &&
+                        (nr0 != r0 || nr1 != r1)) {
+                        BRepBuilderAPI_MakeEdge em(c3, p1, p2, nr0, nr1);
+                        if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                    }
+                }
+                if (!built && haveVerts) {
+                    // Range rescue exhausted: derive params from the shared
+                    // endpoints. This discards the authored range, so on a
+                    // periodic curve OCCT may pick the complementary arc. Count +
+                    // warn once (row 6).
+                    BRepBuilderAPI_MakeEdge em(c3, p1, p2);
+                    if (em.IsDone()) {
+                        edges[ei] = em.Edge(); built = true;
+                        if (haveRange) {
+                            ++_fbRangeDiscardEdges;
+                            static std::atomic<bool> _warnedRD{false};
+                            if (!_warnedRD.exchange(true)) {
+                                TF_WARN("hdOcct: Brep %zu edge %zu: range [%g,%g] "
+                                  "rejected by OCCT; rebuilt from endpoint "
+                                  "vertices (authored arc may be lost on a "
+                                  "periodic curve, row 6). Further occurrences "
+                                  "counted in HDOCCT_TRIM_HIST.",
+                                  brepIndex, ei, r0, r1);
+                            }
+                        }
+                    }
+                }
+                if (!built && haveRange) {
+                    BRepBuilderAPI_MakeEdge em(c3, r0, r1);
+                    if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                }
+                if (!built) {
+                    BRepBuilderAPI_MakeEdge em(c3);
+                    if (em.IsDone()) { edges[ei] = em.Edge(); built = true; }
+                }
+                if (!built && haveVerts) {
+                    // Last resort: no builder accepted the authored 3D curve, so
+                    // replace this (curved) edge with the straight chord between
+                    // its endpoints purely to let the boundary wire close. This
+                    // changes the boundary geometry (a real curve becomes a line),
+                    // so count + warn once (row 7).
+                    BRepBuilderAPI_MakeEdge em(p1, p2);
+                    if (em.IsDone()) {
+                        edges[ei] = em.Edge();
+                        ++_fbChordEdges;
+                        static std::atomic<bool> _warnedChord{false};
+                        if (!_warnedChord.exchange(true)) {
+                            TF_WARN("hdOcct: Brep %zu edge %zu (%s): authored 3D "
+                              "curve could not be built by any range/vertex "
+                              "route; replaced by a straight chord to close the "
+                              "wire (boundary geometry altered, row 7). Further "
+                              "occurrences counted in HDOCCT_TRIM_HIST.",
+                              brepIndex, ei, ct.c_str());
+                        }
+                    }
+                }
+            }
+            } catch (const Standard_Failure&) {
+                // Malformed edge curve: leave edges[ei] null; the fallback skips
+                // it exactly as before (the useTrim pcurve path is unaffected).
+            }
+        }
+
+        if (_fbHistOn) {
+            fprintf(stderr,
+              "  HDOCCT fallback edges[] built: analytic=%ld nurb=%ld "
+              "rangeDiscard=%ld chord=%ld (global edge count=%zu)\n",
+              _fbAnalyticEdges, _fbNurbEdges,
+              _fbRangeDiscardEdges, _fbChordEdges, numEdgesGlobal);
+        }
+
+        // Per-edgeuse offsets into the packed curveUv (trim) arrays.
+        // curveUv is authored one 2D pcurve per edgeuse, in global edgeuse
+        // order (schema: "packed in order used by edgeuses").
+        const size_t numTrim = data.trimCurveVertexCount.size();
+        std::vector<size_t> trimCPOff(numTrim + 1, 0), trimKOff(numTrim + 1, 0);
+        for (size_t i = 0; i < numTrim; ++i) {
+            int tvc = (int)data.trimCurveVertexCount[i];
+            int tord = (int)data.trimCurveOrder[i];
+            trimCPOff[i + 1] = trimCPOff[i] + tvc;
+            trimKOff[i + 1]  = trimKOff[i] + tvc + tord;
+        }
+        // curveUv is positionally packed one 2D pcurve per edgeuse, so the
+        // per-edgeuse indexing (trimCPOff[euIdx]) is only valid when exactly one
+        // pcurve was authored per edgeuse. If the authored count does not match
+        // the edgeuse count, the entire pcurve set is discarded and every face
+        // falls to the 3D-edge trim path. That gate is required (a mismatched
+        // count means the positional mapping is unknowable), but the whole-set
+        // discard was silent -- warn once, citing the counts, so a truncated or
+        // over-authored curveUv array (BA.375) is visible (debt register row 22).
+        const bool useTrim = (numTrim == data.edgeuseEdgeIndex.size()) &&
+                             !data.trimCurveControlVertices.empty();
+        if (!useTrim && numTrim != 0 &&
+            numTrim != data.edgeuseEdgeIndex.size()) {
+            static std::atomic<bool> _warnedUseTrim{false};
+            if (!_warnedUseTrim.exchange(true)) {
+                TF_WARN("hdOcct: Brep %zu: curveUv pcurve count (%zu) != edgeuse "
+                        "count (%zu); discarding the ENTIRE authored pcurve set "
+                        "and trimming every face from its 3D edges instead "
+                        "(positional packing requires an exact 1:1 match; see "
+                        "BA.375, debt register row 22).",
+                        brepIndex, numTrim, data.edgeuseEdgeIndex.size());
+            }
         }
 
         // Build faces with edge loops + pcurves
@@ -733,9 +2385,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
 
             int numLoops = data.faceLoopCount[faceIdx];
 
-            Handle(Geom_BSplineSurface) surface =
+            Handle(Geom_Surface) surface =
                 (fi < surfaces.size()) ? surfaces[fi]
-                                       : Handle(Geom_BSplineSurface)();
+                                       : Handle(Geom_Surface)();
 
             if (surface.IsNull()) {
                 for (int li = 0; li < numLoops; ++li) {
@@ -747,51 +2399,181 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 continue;
             }
 
-            BRepBuilderAPI_MakeFace faceMaker(surface, data.intersectTol3d);
+            bool faceOk = true;
+            bool hasVertexLoop = false;   // rule-428 zero-edgeuse (pole) loop
+            std::vector<TopoDS_Wire> loopWires;   // [0] = outer, rest = holes
 
             for (int li = 0; li < numLoops; ++li) {
-                if (currentLoop >= data.loopEdgeuseCount.size()) break;
+                if (currentLoop >= data.loopEdgeuseCount.size()) {
+                    faceOk = false; break;
+                }
                 int numEdgeuses = data.loopEdgeuseCount[currentLoop];
-
-                if (numEdgeuses == 0) {
-                    currentLoop++;
-                    continue;
-                }
-
-                BRepBuilderAPI_MakeWire wireMaker;
-                for (int eu = 0; eu < numEdgeuses; ++eu) {
-                    size_t euIdx = currentEdgeuse + eu;
-                    if (euIdx >= data.edgeuseEdgeIndex.size()) break;
-
-                    unsigned int edgeIdx = data.edgeuseEdgeIndex[euIdx];
-                    if (edgeIdx < edges.size()
-                        && !edges[edgeIdx].IsNull()) {
-                        TopoDS_Edge edge = edges[edgeIdx];
-                        if (euIdx < data.edgeuseOrientationType.size() &&
-                            data.edgeuseOrientationType[euIdx]
-                                == _tokens->opposite) {
-                            edge.Reverse();
-                        }
-                        wireMaker.Add(edge);
-                    }
-                }
-
-                if (wireMaker.IsDone()) {
-                    TopoDS_Wire wire = wireMaker.Wire();
-                    if (li == 0) {
-                        faceMaker.Add(wire);
-                    } else {
-                        wire.Reverse();
-                        faceMaker.Add(wire);
-                    }
-                }
-
+                size_t euStart = currentEdgeuse;
+                // Advance counters deterministically so a build failure on one
+                // loop cannot desync subsequent faces.
                 currentEdgeuse += numEdgeuses;
                 currentLoop++;
+                // A zero-edgeuse loop is a rule-428 degenerate vertex-loop: it
+                // marks a surface singularity (cone apex / sphere pole) with its
+                // loop:vertexIndex, carrying no boundary geometry. Accept it (do
+                // NOT fail the face); the pole is closed below by the parametric
+                // pole-closure fallback, exactly as for a converging-vertex apex.
+                if (numEdgeuses == 0) {
+                    hasVertexLoop = true;
+                    loopWires.push_back(TopoDS_Wire());
+                    continue;
+                }
+                if (!faceOk) { loopWires.push_back(TopoDS_Wire()); continue; }
+
+                BRepBuilderAPI_MakeWire wireMaker;
+                bool wireOk = true;
+                for (int eu = 0; eu < numEdgeuses; ++eu) {
+                    size_t euIdx = euStart + eu;
+
+                    // Preferred: build the edge directly from its authored 2D
+                    // pcurve on the surface (no projection of a 3D wire, which
+                    // is what malformed the trimmed faces — Finding #9).
+                    if (useTrim && euIdx < numTrim) {
+                        int tvc = (int)data.trimCurveVertexCount[euIdx];
+                        int tord = (int)data.trimCurveOrder[euIdx];
+                        const GfVec2d* cp =
+                            data.trimCurveControlVertices.cdata() + trimCPOff[euIdx];
+                        const double* kn =
+                            data.trimCurveKnots.cdata() + trimKOff[euIdx];
+                        const double* wt = data.trimCurveWeights.empty()
+                            ? nullptr
+                            : data.trimCurveWeights.cdata() + trimCPOff[euIdx];
+                        auto c2d = _MakeBSplineCurve2d(
+                            cp, tvc, tord, kn, tvc + tord, wt, wt ? tvc : 0);
+                        if (!c2d.IsNull()) {
+                            double t0 = kn[0];
+                            double t1 = kn[tvc + tord - 1];
+                            BRepBuilderAPI_MakeEdge em(c2d, surface, t0, t1);
+                            if (em.IsDone()) { wireMaker.Add(em.Edge()); continue; }
+                        }
+                        // fall through to the 3D-edge path on any failure
+                    }
+
+                    if (euIdx >= data.edgeuseEdgeIndex.size()) { wireOk = false; break; }
+                    unsigned int edgeIdx = data.edgeuseEdgeIndex[euIdx];
+                    if (edgeIdx >= edges.size() || edges[edgeIdx].IsNull()) {
+                        // A missing/failed edge leaves a GAP in the boundary
+                        // wire, so the face would bound the wrong region. Fail
+                        // the wire fast (mirrors the !hasTrimCurves sibling that
+                        // breaks on a null edge3dCurves entry) rather than
+                        // silently adding a shorter loop (debt register row 2).
+                        TF_WARN("hdOcct: Brep %zu face %zu: edgeuse %zu -> null/"
+                                "missing edge %u; failing the boundary wire.",
+                                brepIndex, faceIdx, euIdx, edgeIdx);
+                        wireOk = false; break;
+                    }
+                    TopoDS_Edge edge = edges[edgeIdx];
+                    if (euIdx < data.edgeuseOrientationType.size() &&
+                        data.edgeuseOrientationType[euIdx] == _tokens->opposite) {
+                        edge.Reverse();
+                    }
+                    wireMaker.Add(edge);
+                }
+
+                if (!wireOk || !wireMaker.IsDone()) {
+                    faceOk = false; loopWires.push_back(TopoDS_Wire()); continue;
+                }
+                loopWires.push_back(wireMaker.Wire());
             }
 
-            if (faceMaker.IsDone()) {
-                faces.push_back(faceMaker.Face());
+            // A singular (pole/apex) analytic face: its authored UV window
+            // reaches a surface singularity (cone apex / sphere pole) either as
+            // a converging vertex or as a rule-428 vertex-loop. The boundary
+            // wire alone cannot bound such a patch, so OCCT must supply the
+            // natural pole closure; detect it here so we can route to the
+            // parametric fallback below when the wire-built face collapses.
+            const bool analyticSurf =
+                surface->IsKind(STANDARD_TYPE(Geom_ElementarySurface));
+            bool singularFace = false;
+            double fu0 = 0, fu1 = 0, fv0 = 0, fv1 = 0;
+            if (analyticSurf && 2 * faceIdx + 1 < data.faceRange.size()) {
+                const GfVec2d& uvLo = data.faceRange[2 * faceIdx];
+                const GfVec2d& uvHi = data.faceRange[2 * faceIdx + 1];
+                fu0 = uvLo[0]; fu1 = uvHi[0]; fv0 = uvLo[1]; fv1 = uvHi[1];
+                singularFace = hasVertexLoop ||
+                    _FaceRangeTouchesPole(surface, fu0, fu1, fv0, fv1,
+                                          intersectTol3d);
+            }
+
+            TopoDS_Face finalFace;
+            bool haveFace = false;
+
+            if (faceOk && !loopWires.empty()
+                && !loopWires[0].IsNull()) {
+                // Build the face FROM its outer wire (Inside=true bounds a
+                // finite region); add the remaining loops as holes (reversed).
+                // NOT MakeFace(surface)+Add(outer): that treats the outer wire
+                // as a hole in the surface's full natural rectangle.
+                BRepBuilderAPI_MakeFace faceMaker(surface, loopWires[0],
+                                                  Standard_True);
+                for (size_t k = 1; k < loopWires.size(); ++k) {
+                    if (loopWires[k].IsNull()) continue;
+                    // Inner loops are authored CW (opposite the CCW outer) per
+                    // the material-on-left convention, so add them as-built to
+                    // cut the hole. (Previously the exporter forced all loops
+                    // CCW and we reversed here; both sides now use the standard
+                    // outer-CCW/inner-CW convention.)
+                    faceMaker.Add(loopWires[k]);
+                }
+                if (faceMaker.IsDone()) {
+                    TopoDS_Face face = faceMaker.Face();
+                    // pcurve-built edges carry no 3D curve and leave
+                    // SameParameter unset; synthesize/reconcile both before
+                    // the face is handed to the mesher.
+                    BRepLib::BuildCurves3d(face, intersectTol3d);
+                    BRepLib::SameParameter(face, intersectTol3d,
+                                           Standard_True);
+                    finalFace = face;
+                    haveFace = true;
+                }
+            }
+
+            // Parametric pole-closure fallback for a singular analytic face
+            // whose boundary wire cannot bound the patch. A pole/apex face's
+            // wire runs UP to the singular isoparm but cannot trace ALONG it
+            // (the apex/pole is a single point, not a curve), so
+            // MakeFace(surface, wire) yields a face OCCT's mesher cannot fan
+            // into the apex -- it triangulates to a sliver (the recurring
+            // cone-apex problem). Detect that by mesh-testing the wire face;
+            // when it collapses, rebuild from the authored face:range UV window,
+            // where OCCT supplies the natural seam + the degenerate pole/apex
+            // edge the wire cannot express. The sphere's pole faces mesh fine
+            // from the wire (hundreds of triangles) and are left untouched, so
+            // only genuinely-collapsing apex/pole faces take this route.
+            if (singularFace &&
+                (!haveFace || _FaceMeshTris(finalFace) <= 2)) {
+                const bool hadSliver = haveFace;   // a collapsed wire face
+                TopoDS_Face pf = _MakeParametricPoleFace(
+                    surface, fu0, fu1, fv0, fv1, intersectTol3d);
+                if (!pf.IsNull()) {
+                    finalFace = pf; haveFace = true;
+                } else if (hadSliver) {
+                    // Rescue failed and we keep the collapsed wire face: it
+                    // triangulates to a sliver (<=2 tris) and leaves a visible
+                    // hole at the pole/apex. Previously kept with zero signal
+                    // (debt register row 3).
+                    TF_WARN("hdOcct: Brep %zu face %zu: singular (pole/apex) "
+                            "face collapsed and parametric pole-closure failed; "
+                            "keeping the degenerate wire face.",
+                            brepIndex, faceIdx);
+                } else {
+                    // Rescue failed and there was no wire face either: the
+                    // singular face is dropped entirely (debt register row 3).
+                    TF_WARN("hdOcct: Brep %zu face %zu: singular (pole/apex) "
+                            "face could not be built (wire and parametric "
+                            "pole-closure both failed); dropping the face.",
+                            brepIndex, faceIdx);
+                }
+            }
+
+            if (haveFace) {
+                faces.push_back(applyFaceuseOrientation(finalFace, fi));
+                builtAuthored.push_back((int)fi);
             }
         }
     }
@@ -811,6 +2593,54 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         compoundBuilder.Add(compound, face);
     }
 
+    // EXPERIMENTAL (env HDOCCT_SEW=1): sew the now-trimmed faces so shared
+    // curved edges mesh once and the per-side crack pattern collapses. Off by
+    // default -- sewing welds vertices (changes fixture vert counts) and can
+    // reorient faces, so it stays gated behind an env flag pending validation.
+    if (getenv("HDOCCT_SEW") != nullptr) {
+        try {
+            BRepBuilderAPI_Sewing sew(intersectTol3d);
+            for (const auto& face : faces) sew.Add(face);
+            sew.Perform();
+            TopoDS_Shape sewn = sew.SewedShape();
+            if (!sewn.IsNull()) {
+                // A residual mis-oriented face (e.g. an untrimmed full-period
+                // fallback patch) can seed the sewn shell inside-out, flipping
+                // the WHOLE solid's normals. For a closed shell orientation is
+                // decidable: signed volume must be positive. Measure each
+                // closed shell and reverse it when negative, so every sewn
+                // solid renders outward regardless of per-face residuals.
+                TopoDS_Compound oriented;
+                BRep_Builder ob;
+                ob.MakeCompound(oriented);
+                for (TopExp_Explorer se(sewn, TopAbs_SHELL);
+                     se.More(); se.Next()) {
+                    TopoDS_Shell shell = TopoDS::Shell(se.Current());
+                    // Divergence-theorem volume of the shell itself: the sign
+                    // stays meaningful for a mostly-closed shell (residual
+                    // cracks perturb magnitude, not sign), so do not require
+                    // topological closedness.
+                    try {
+                        GProp_GProps props;
+                        BRepGProp::VolumeProperties(shell, props);
+                        if (props.Mass() < 0.0) shell.Reverse();
+                    } catch (const Standard_Failure&) {}
+                    ob.Add(oriented, shell);
+                }
+                // Preserve any faces sewing left outside a shell.
+                for (TopExp_Explorer fe(sewn, TopAbs_FACE, TopAbs_SHELL);
+                     fe.More(); fe.Next()) {
+                    ob.Add(oriented, fe.Current());
+                }
+                // Sewing merges/reorders faces: the authored-index mapping
+                // no longer describes the shape. Report it as unknown.
+                if (outFaceAuthoredIndices) outFaceAuthoredIndices->clear();
+                return oriented;
+            }
+        } catch (const Standard_Failure&) {}
+    }
+
+    if (outFaceAuthoredIndices) *outFaceAuthoredIndices = builtAuthored;
     return compound;
 }
 
@@ -827,9 +2657,13 @@ UsdSolidBrepBuilder::Build(const UsdPrim& brepArrayPrim) const
     size_t numBreps = data.regionCount.size();
     std::vector<TopoDS_Shape> shapes;
     shapes.reserve(numBreps);
+    _builtFaceAuthored.clear();
+    _builtFaceAuthored.reserve(numBreps);
 
     for (size_t i = 0; i < numBreps; ++i) {
-        shapes.push_back(_BuildSingleBrep(data, i));
+        std::vector<int> authored;
+        shapes.push_back(_BuildSingleBrep(data, i, &authored));
+        _builtFaceAuthored.push_back(std::move(authored));
     }
 
     return shapes;
@@ -851,7 +2685,8 @@ UsdSolidBrepBuilder::BuildSingleBrep(
         return std::nullopt;
     }
 
-    auto shape = _BuildSingleBrep(data, brepIndex);
+    _builtFaceAuthored.assign(1, {});
+    auto shape = _BuildSingleBrep(data, brepIndex, &_builtFaceAuthored[0]);
     if (shape.IsNull()) return std::nullopt;
     return shape;
 }

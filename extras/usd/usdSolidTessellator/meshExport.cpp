@@ -17,7 +17,15 @@ extern "C" HDOCCT_IMPORT int UsdSolid_ExportMesh(
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <input.usd> <output.usd> [primPath]"
+        std::cerr << "Usage: " << argv[0]
+                  << " <input.usd> <output.usd> [primPath | --all]\n"
+                  << "  primPath  tessellate one BrepArray prim"
+                     " (default /World/Brep0)\n"
+                  << "  --all     tessellate every BrepArray prim on the"
+                     " stage into one Mesh\n"
+                  << "            stage: body-named prims, per-body"
+                     " displayColor, source\n"
+                  << "            upAxis/metersPerUnit"
                   << std::endl;
         return 1;
     }
@@ -25,6 +33,7 @@ int main(int argc, char* argv[]) {
     std::string inputPath = argv[1];
     std::string outputPath = argv[2];
     std::string primPath = (argc > 3) ? argv[3] : "/World/Brep0";
+    if (primPath == "--all" || primPath == "-") primPath.clear();
 
     int meshCount = UsdSolid_ExportMesh(
         inputPath.c_str(), outputPath.c_str(), primPath.c_str());

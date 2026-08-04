@@ -12,6 +12,7 @@
 #include "pxr/pxr.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/primvarSchema.h"
@@ -30,10 +31,14 @@ TF_DEFINE_PRIVATE_TOKENS(
     (usdSolidTessellation)
     (usdSolidTessellatorData)
     (meshCount)
+    (edgeCount)
+    (tangentEdgeCount)
     (points)
     (faceVertexCounts)
     (faceVertexIndices)
+    (curveVertexCounts)
     (normals)
+    (displayColor)
 );
 
 TF_REGISTRY_FUNCTION(TfType)
@@ -70,6 +75,22 @@ _BuildTessellationDataSource(const UsdPrim &prim)
         if (attr) {
             bool val;
             if (attr.Get(&val)) params.computeNormals = val;
+        }
+    }
+
+    // Authored per-face display colors (converter face-level CAD styles):
+    // primvars:displayColor on the BrepArray prim with one entry per B-rep
+    // face. A single entry is the ordinary constant color and stays on the
+    // procedural's inherited-constant path.
+    VtArray<GfVec3f> faceColors;
+    {
+        UsdAttribute attr =
+            prim.GetAttribute(TfToken("primvars:displayColor"));
+        if (attr) {
+            VtArray<GfVec3f> v;
+            if (attr.Get(&v) && v.size() > 1) {
+                faceColors = v;
+            }
         }
     }
 
@@ -130,7 +151,20 @@ _BuildTessellationDataSource(const UsdPrim &prim)
             remappedIndices[j] = oldToNew[result.faceVertexIndices[j]];
         }
 
-        HdContainerDataSourceHandle meshDs;
+        std::vector<TfToken> mNames;
+        std::vector<HdDataSourceBaseHandle> mVals;
+        mNames.push_back(_tokens->points);
+        mVals.push_back(
+            HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                floatPoints));
+        mNames.push_back(_tokens->faceVertexCounts);
+        mVals.push_back(
+            HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                result.faceVertexCounts));
+        mNames.push_back(_tokens->faceVertexIndices);
+        mVals.push_back(
+            HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                remappedIndices));
         if (!result.normals.empty()) {
             VtArray<GfVec3f> compactNormals(newIdx);
             for (size_t j = 0; j < result.normals.size()
@@ -139,39 +173,110 @@ _BuildTessellationDataSource(const UsdPrim &prim)
                     compactNormals[oldToNew[j]] = result.normals[j];
                 }
             }
-            meshDs = HdRetainedContainerDataSource::New(
-                _tokens->points,
-                HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
-                    floatPoints),
-                _tokens->faceVertexCounts,
-                HdRetainedTypedSampledDataSource<VtArray<int>>::New(
-                    result.faceVertexCounts),
-                _tokens->faceVertexIndices,
-                HdRetainedTypedSampledDataSource<VtArray<int>>::New(
-                    remappedIndices),
-                _tokens->normals,
+            mNames.push_back(_tokens->normals);
+            mVals.push_back(
                 HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
                     compactNormals));
-        } else {
-            meshDs = HdRetainedContainerDataSource::New(
-                _tokens->points,
-                HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
-                    floatPoints),
-                _tokens->faceVertexCounts,
-                HdRetainedTypedSampledDataSource<VtArray<int>>::New(
-                    result.faceVertexCounts),
-                _tokens->faceVertexIndices,
-                HdRetainedTypedSampledDataSource<VtArray<int>>::New(
-                    remappedIndices));
         }
+
+        // Expand authored per-face colors to per-triangle (uniform interp)
+        // via faceSolidFaceIndices. Only for single-Brep prims: the authored
+        // array is indexed by global face id, and faceSolidFaceIndices
+        // restarts at 0 per Brep, so they only coincide when there is one.
+        if (!faceColors.empty() && goodResults.size() == 1
+            && result.faceSolidFaceIndices.size()
+                   == result.faceVertexCounts.size()) {
+            const size_t nTris = result.faceVertexCounts.size();
+            VtArray<GfVec3f> triColors(nTris);
+            bool ok = true;
+            for (size_t t = 0; t < nTris; ++t) {
+                const int f = result.faceSolidFaceIndices[t];
+                if (f < 0 || (size_t)f >= faceColors.size()) {
+                    ok = false;
+                    break;
+                }
+                triColors[t] = faceColors[f];
+            }
+            if (ok) {
+                mNames.push_back(_tokens->displayColor);
+                mVals.push_back(
+                    HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                        triColors));
+            } else {
+                TF_WARN("BrepArrayAdapter: face index out of range of the "
+                        "%zu authored per-face colors on '%s'; falling back "
+                        "to constant color", faceColors.size(),
+                        prim.GetPath().GetText());
+            }
+        }
+
+        HdContainerDataSourceHandle meshDs =
+            HdRetainedContainerDataSource::New(
+                mNames.size(), mNames.data(), mVals.data());
 
         meshNames.push_back(
             TfToken(TfStringPrintf("mesh_%zu", i)));
         meshDataSources.push_back(meshDs);
+
+        // B-rep edge polylines (for the edge/line display): pack as an
+        // edges_<i> container holding points + curveVertexCounts, consumed by
+        // the procedural as a linear HdBasisCurves child.
+        if (!result.edgePoints.empty()) {
+            VtArray<GfVec3f> edgePts(result.edgePoints.size());
+            for (size_t j = 0; j < result.edgePoints.size(); ++j) {
+                const GfVec3d& p = result.edgePoints[j];
+                edgePts[j] = GfVec3f((float)p[0], (float)p[1], (float)p[2]);
+            }
+            HdContainerDataSourceHandle edgeDs =
+                HdRetainedContainerDataSource::New(
+                    _tokens->points,
+                    HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                        edgePts),
+                    _tokens->curveVertexCounts,
+                    HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                        result.edgeCurveVertexCounts));
+            meshNames.push_back(
+                TfToken(TfStringPrintf("edges_%zu", i)));
+            meshDataSources.push_back(edgeDs);
+        }
+
+        // Tangent (smooth) edges -> a parallel tangent_edges_<i> container,
+        // emitted as a separate, independently toggleable curve child.
+        if (!result.tangentEdgePoints.empty()) {
+            VtArray<GfVec3f> tpts(result.tangentEdgePoints.size());
+            for (size_t j = 0; j < result.tangentEdgePoints.size(); ++j) {
+                const GfVec3d& p = result.tangentEdgePoints[j];
+                tpts[j] = GfVec3f((float)p[0], (float)p[1], (float)p[2]);
+            }
+            HdContainerDataSourceHandle tDs =
+                HdRetainedContainerDataSource::New(
+                    _tokens->points,
+                    HdRetainedTypedSampledDataSource<VtArray<GfVec3f>>::New(
+                        tpts),
+                    _tokens->curveVertexCounts,
+                    HdRetainedTypedSampledDataSource<VtArray<int>>::New(
+                        result.tangentEdgeCurveVertexCounts));
+            meshNames.push_back(
+                TfToken(TfStringPrintf("tangent_edges_%zu", i)));
+            meshDataSources.push_back(tDs);
+        }
     }
 
     // Add mesh count
     meshNames.push_back(_tokens->meshCount);
+    meshDataSources.push_back(
+        HdRetainedTypedSampledDataSource<int>::New(
+            (int)goodResults.size()));
+
+    // Edge-group count (parallel to mesh count; edges_<i> may be absent when
+    // a Brep produced no drawable edges).
+    meshNames.push_back(_tokens->edgeCount);
+    meshDataSources.push_back(
+        HdRetainedTypedSampledDataSource<int>::New(
+            (int)goodResults.size()));
+
+    // Tangent-edge-group count (parallel; tangent_edges_<i> may be absent).
+    meshNames.push_back(_tokens->tangentEdgeCount);
     meshDataSources.push_back(
         HdRetainedTypedSampledDataSource<int>::New(
             (int)goodResults.size()));
@@ -273,8 +378,37 @@ UsdSolidBrepArrayAdapter::InvalidateImagingSubprim(
         return HdDataSourceLocatorSet();
     }
 
-    return UsdImagingDataSourcePrim::Invalidate(
-        prim, subprim, properties, invalidationType);
+    // Base prim invalidation handles xform / visibility / purpose so moving
+    // or hiding the prim stays live.
+    HdDataSourceLocatorSet result =
+        UsdImagingDataSourcePrim::Invalidate(
+            prim, subprim, properties, invalidationType);
+
+    // The tessellated mesh + edge data is built eagerly in
+    // GetImagingSubprimData and injected as a retained snapshot; the stage
+    // scene index does NOT rebuild that snapshot on a value-only change, it
+    // only dirties locators. So when any attribute that feeds the tessellation
+    // changes (B-rep geometry/topology or the tessellation params), we ask the
+    // index to fully repopulate this prim: GetImagingSubprimData then re-runs
+    // the OCCT build + mesh with the new values and the generative procedural
+    // re-cooks, refreshing both the mesh and the edge curves. (OCCT has no
+    // incremental rebuild, so a full repopulate is the right granularity.)
+    static const char* const kGeomPrefixes[] = {
+        "brep:", "region:", "shell:", "faceuse:", "face:", "loop:",
+        "edgeuse:", "edge:", "wireEdge:", "vertex:",
+        "primvars:tessellation:"
+    };
+    for (const TfToken& p : properties) {
+        const std::string& name = p.GetString();
+        for (const char* pre : kGeomPrefixes) {
+            if (TfStringStartsWith(name, pre)) {
+                result.insert(HdDataSourceLocator(
+                    UsdImagingTokens->stageSceneIndexRepopulate));
+                return result;
+            }
+        }
+    }
+    return result;
 }
 
 // ----------------------------------------------------------------------------
