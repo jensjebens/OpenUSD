@@ -14,6 +14,7 @@ option(PXR_BUILD_USD_TOOLS "Build commandline tools" ON)
 option(PXR_BUILD_IMAGING "Build imaging components" ON)
 option(PXR_BUILD_EMBREE_PLUGIN "Build embree imaging plugin" OFF)
 option(PXR_BUILD_OCCT_PLUGIN "Build OpenCASCADE tessellation plugin for BrepArray" OFF)
+option(PXR_BUILD_SMLIB_PLUGIN "Build SMLib tessellation plugin for BrepArray" OFF)
 option(PXR_BUILD_OPENIMAGEIO_PLUGIN "Build OpenImageIO plugin" OFF)
 if(APPLE)
     option(PXR_BUILD_IMAGEIO_PLUGIN "Build the ImageIO.framework plugin for Apple platforms" ON)
@@ -246,6 +247,14 @@ if (${PXR_BUILD_EMBREE_PLUGIN})
             "Setting PXR_BUILD_EMBREE_PLUGIN=OFF because "
             "PXR_BUILD_GPU_SUPPORT=OFF")
         set(PXR_BUILD_EMBREE_PLUGIN "OFF" CACHE BOOL "" FORCE)
+    endif()
+endif()
+
+if (${PXR_BUILD_SMLIB_PLUGIN})
+    if (NOT ${PXR_BUILD_IMAGING})
+        message(STATUS
+            "Setting PXR_BUILD_SMLIB_PLUGIN=OFF because PXR_BUILD_IMAGING=OFF")
+        set(PXR_BUILD_SMLIB_PLUGIN "OFF" CACHE BOOL "" FORCE)
     endif()
 endif()
 
