@@ -1796,6 +1796,21 @@ _BrepArraySchemaUsage(const UsdPrim &usdPrim,
                                 it.ba, usdPrim.GetPath().GetText(),
                                 it.schemaToken, it.label));
         }
+        // Usage declared but the API schema never applied. Without this the
+        // two checks above are both conditioned on the schema being present or
+        // the usage being absent, so a prim that declares usage and applies
+        // nothing satisfies every rule here vacuously. Such a prim reads as
+        // empty in any consumer that resolves geometry through HasAPI.
+        if (count > 0 && !applied) {
+            _Err(&errors,
+                 UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
+                 usdPrim,
+                 TfStringPrintf("[%s] BrepArray <%s>: %s usage is declared but "
+                                "%s is not in apiSchemas, so its geometry is "
+                                "unreachable through the schema.",
+                                it.ba, usdPrim.GetPath().GetText(), it.label,
+                                it.schemaToken));
+        }
     }
     return errors;
 }
