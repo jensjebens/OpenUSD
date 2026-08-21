@@ -36,7 +36,7 @@ def Xform "World"
         uniform token[] edgeuse:orientationType = ["same", "same", "same", "same"]
         uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry"]
         uniform uint[] face:loopCount = [1]
-        uniform double2[] face:range = [(0, 0), (6.2831853072, 5)]
+        uniform double2[] face:range = [(0, 0), (6.2831853071795862, 5)]
         uniform token[] face:surfaceType = ["BrepSurfaceCylinderAPI"]
         uniform token[] face:trimType = ["general"]
         uniform uint[] faceuse:faceIndex = [0, 0]
