@@ -76,6 +76,16 @@ struct HDUSDBREP_API HdUsdBrepTessellationResult {
     /// equivalent.
     VtArray<VtIntArray> geomSubsetIndices;
 
+    /// Per-vertex UV coordinates. usd-brep's GetMeshData does not return a
+    /// texture parameterisation, so this stays empty; it exists because the
+    /// Hydra side is shared with hdOcct and reads the field.
+    VtArray<GfVec2f> uvs;
+
+    /// Per-face source face index within the Brep. Empty for the same reason:
+    /// usd-brep expresses the same information as geomSubsetIndices above,
+    /// which is richer, and the mesh exporter has not been moved onto it yet.
+    VtIntArray faceSolidFaceIndices;
+
     /// Index of this Brep within the source BrepArray.
     int brepIndex = -1;
 

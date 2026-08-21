@@ -25,9 +25,15 @@ pxr_plugin(${PXR_PACKAGE}
 
     PUBLIC_CLASSES
         tessellator
+        brepArrayAdapter
+        hydraGenerativePlugin
+        meshExporter
 
     PUBLIC_HEADERS
         api.h
+
+    RESOURCE_FILES
+        plugInfo.json
 
     DISABLE_PRECOMPILED_HEADERS
 )
