@@ -1,8 +1,8 @@
 set(PXR_PREFIX pxr/imaging)
-set(PXR_PACKAGE hdSmlib)
+set(PXR_PACKAGE hdUsdBrep)
 
-if (NOT SMLib_FOUND)
-    message(WARNING "Not building ${PXR_PACKAGE} because of missing dependency: SMLib")
+if (NOT UsdBrep_FOUND)
+    message(WARNING "Not building ${PXR_PACKAGE} because of missing dependency: usd-brep")
     return()
 endif()
 
@@ -18,10 +18,10 @@ pxr_plugin(${PXR_PACKAGE}
         hdGp
         hdsi
         usdImaging
-        ${SMLib_LIBRARIES}
+        ${UsdBrep_LIBRARIES}
 
     INCLUDE_DIRS
-        ${SMLib_INCLUDE_DIRS}
+        ${UsdBrep_INCLUDE_DIRS}
 
     PUBLIC_CLASSES
         tessellator

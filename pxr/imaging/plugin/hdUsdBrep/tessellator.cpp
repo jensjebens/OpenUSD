@@ -6,7 +6,7 @@
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/usd/usdGeom/gprim.h"
 
-// SMLib. SmuConvert and SmuTessellate take pxr types, so SMLib must be built
+// usd-brep (SMLib). SmuConvert and SmuTessellate take pxr types, so the kernel must be built
 // against the same OpenUSD this plugin links; see CMakeLists.txt.
 #include "SmuConvert.h"
 #include "SmuTessellate.h"
@@ -37,19 +37,19 @@ _GetSmContext()
 
 } // anonymous namespace
 
-UsdSolidSmlibTessellator::UsdSolidSmlibTessellator() = default;
-UsdSolidSmlibTessellator::~UsdSolidSmlibTessellator() = default;
+HdUsdBrepTessellator::HdUsdBrepTessellator() = default;
+HdUsdBrepTessellator::~HdUsdBrepTessellator() = default;
 
-std::vector<UsdSolidSmlibTessellationResult>
-UsdSolidSmlibTessellator::Tessellate(
+std::vector<HdUsdBrepTessellationResult>
+HdUsdBrepTessellator::Tessellate(
     const UsdPrim &brepArrayPrim,
-    const UsdSolidSmlibTessellationParams &params) const
+    const HdUsdBrepTessellationParams &params) const
 {
-    std::vector<UsdSolidSmlibTessellationResult> results;
+    std::vector<HdUsdBrepTessellationResult> results;
 
     const UsdGeomGprim gprim(brepArrayPrim);
     if (!gprim) {
-        UsdSolidSmlibTessellationResult r;
+        HdUsdBrepTessellationResult r;
         r.errorMessage = "prim is not a UsdGeomGprim: "
                        + brepArrayPrim.GetPath().GetString();
         results.push_back(std::move(r));
@@ -58,21 +58,21 @@ UsdSolidSmlibTessellator::Tessellate(
 
     SmContext *context = _GetSmContext();
     if (!context) {
-        UsdSolidSmlibTessellationResult r;
-        r.errorMessage = "could not create an SMLib context";
+        HdUsdBrepTessellationResult r;
+        r.errorMessage = "could not create a usd-brep kernel context";
         results.push_back(std::move(r));
         return results;
     }
 
-    // Schema arrays to kernel Breps. This is the whole reason hdSmlib links
-    // SMLib's USD layer rather than reimplementing the reader: BrepArray is
-    // SMLib's own serialisation, so it reconstructs topology directly.
+    // Schema arrays to kernel Breps. This is the whole reason hdUsdBrep links
+    // usd-brep's USD layer rather than reimplementing the reader: BrepArray is
+    // usd-brep's own serialisation, so it reconstructs topology directly.
     std::vector<SmBrep *> breps;
     const SmStatus readStatus = SMU_BrepConvert::BrepMove_UsdToSMLib(
         *context, gprim, breps, params.healerEnabled ? TRUE : FALSE);
 
     if (readStatus != SM_SUCCESS || breps.empty()) {
-        UsdSolidSmlibTessellationResult r;
+        HdUsdBrepTessellationResult r;
         r.errorMessage = "BrepMove_UsdToSMLib failed on "
                        + brepArrayPrim.GetPath().GetString();
         results.push_back(std::move(r));
@@ -82,7 +82,7 @@ UsdSolidSmlibTessellator::Tessellate(
     results.reserve(breps.size());
 
     for (size_t i = 0; i < breps.size(); ++i) {
-        UsdSolidSmlibTessellationResult r;
+        HdUsdBrepTessellationResult r;
         r.brepIndex = static_cast<int>(i);
 
         SmBrep *brep = breps[i];

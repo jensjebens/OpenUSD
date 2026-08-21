@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Takes a UsdSolid BrepArray prim and produces tessellated mesh data, using
-// SMLib as the geometry kernel.
+// usd-brep as the geometry kernel.
 //
 // The interface deliberately mirrors hdOcct's UsdSolidTessellator so the
 // Hydra-side pieces -- the UsdImaging adapter and the hdGp procedural -- are
 // identical between the two plugins and only the kernel differs.
 
-#ifndef PXR_IMAGING_PLUGIN_HD_SMLIB_TESSELLATOR_H
-#define PXR_IMAGING_PLUGIN_HD_SMLIB_TESSELLATOR_H
+#ifndef PXR_IMAGING_PLUGIN_HD_USD_BREP_TESSELLATOR_H
+#define PXR_IMAGING_PLUGIN_HD_USD_BREP_TESSELLATOR_H
 
 #include "api.h"
 
@@ -27,15 +27,15 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 /// Parameters controlling tessellation quality.
 ///
-/// SMLib is driven by chord height and angle rather than OCCT's linear and
-/// angular deflection. The names here follow SMLib; the defaults match what
+/// usd-brep is driven by chord height and angle rather than OCCT's linear and
+/// angular deflection. The names here follow the kernel; the defaults match what
 /// SmApiTessellate is normally called with.
-struct HDSMLIB_API UsdSolidSmlibTessellationParams {
+struct HDUSDBREP_API HdUsdBrepTessellationParams {
     /// Maximum distance between a facet and the true surface.
     double chordHeightTolerance = 0.001;
 
     /// Maximum angle, in degrees, between adjacent facet normals. Zero
-    /// disables the angular criterion. Note SMLib takes degrees where OCCT
+    /// disables the angular criterion. Note usd-brep takes degrees where OCCT
     /// takes radians.
     double angleToleranceDegrees = 0.0;
 
@@ -45,13 +45,21 @@ struct HDSMLIB_API UsdSolidSmlibTessellationParams {
     /// Maximum facet aspect ratio. Zero disables the constraint.
     double maxAspectRatio = 0.0;
 
-    /// Run SMLib's healer while converting from the schema. Disable to see
-    /// what the source data actually contains.
-    bool healerEnabled = true;
+    /// Run the kernel's healer while converting from the schema.
+    ///
+    /// Off by default. usd-brep heals every USD-sourced Brep whether or not it
+    /// needs it, because the provenance string the decision rests on is never
+    /// populated (OMPE-106060). On this schema's fixtures that usually
+    /// destroys geometry rather than repairing it -- a depressed plane reads
+    /// 623 points unhealed against 14 healed, and a healed Brep stops
+    /// responding to chordHeightTolerance altogether. It does genuinely repair
+    /// some inputs, so it stays available; it is not a sensible default for
+    /// data a producer has already validated.
+    bool healerEnabled = false;
 };
 
 /// Tessellated mesh data for one Brep.
-struct HDSMLIB_API UsdSolidSmlibTessellationResult {
+struct HDUSDBREP_API HdUsdBrepTessellationResult {
     VtArray<GfVec3f> points;
     VtIntArray faceVertexCounts;
     VtIntArray faceVertexIndices;
@@ -64,7 +72,7 @@ struct HDSMLIB_API UsdSolidSmlibTessellationResult {
     VtArray<GfVec3f> extent;
 
     /// Per-face index sets, one entry per GeomSubset the source Brep carries.
-    /// SMLib populates this from the Brep's face groupings; hdOcct has no
+    /// usd-brep populates this from the Brep's face groupings; hdOcct has no
     /// equivalent.
     VtArray<VtIntArray> geomSubsetIndices;
 
@@ -75,31 +83,31 @@ struct HDSMLIB_API UsdSolidSmlibTessellationResult {
     std::string errorMessage;
 };
 
-/// Tessellates UsdSolid BrepArray prims into triangle meshes with SMLib.
+/// Tessellates UsdSolid BrepArray prims into triangle meshes with usd-brep.
 ///
 /// \code
-///   UsdSolidSmlibTessellator tess;
+///   HdUsdBrepTessellator tess;
 ///   for (const auto &r : tess.Tessellate(brepArrayPrim)) {
 ///       // r.points, r.faceVertexIndices, ...
 ///   }
 /// \endcode
-class HDSMLIB_API UsdSolidSmlibTessellator {
+class HDUSDBREP_API HdUsdBrepTessellator {
 public:
-    UsdSolidSmlibTessellator();
-    ~UsdSolidSmlibTessellator();
+    HdUsdBrepTessellator();
+    ~HdUsdBrepTessellator();
 
-    UsdSolidSmlibTessellator(const UsdSolidSmlibTessellator &) = delete;
-    UsdSolidSmlibTessellator &operator=(const UsdSolidSmlibTessellator &) = delete;
+    HdUsdBrepTessellator(const HdUsdBrepTessellator &) = delete;
+    HdUsdBrepTessellator &operator=(const HdUsdBrepTessellator &) = delete;
 
     /// Tessellate every Brep in \p brepArrayPrim, one result per Brep, in the
     /// order the BrepArray stores them. A Brep that fails to tessellate still
     /// gets a result, with success false and errorMessage set, so callers can
     /// report per-body failures rather than losing the whole array.
-    std::vector<UsdSolidSmlibTessellationResult> Tessellate(
+    std::vector<HdUsdBrepTessellationResult> Tessellate(
         const UsdPrim &brepArrayPrim,
-        const UsdSolidSmlibTessellationParams &params = {}) const;
+        const HdUsdBrepTessellationParams &params = {}) const;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
 
-#endif // PXR_IMAGING_PLUGIN_HD_SMLIB_TESSELLATOR_H
+#endif // PXR_IMAGING_PLUGIN_HD_USD_BREP_TESSELLATOR_H
