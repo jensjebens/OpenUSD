@@ -1796,22 +1796,60 @@ _BrepArraySchemaUsage(const UsdPrim &usdPrim,
                                 it.ba, usdPrim.GetPath().GetText(),
                                 it.schemaToken, it.label));
         }
-        // Usage declared but the API schema never applied. Without this the
-        // two checks above are both conditioned on the schema being present or
-        // the usage being absent, so a prim that declares usage and applies
-        // nothing satisfies every rule here vacuously. Such a prim reads as
-        // empty in any consumer that resolves geometry through HasAPI.
+        // BA.583: usage declared but the API schema never applied. The two
+        // checks above are each conditioned on the schema being present or the
+        // usage being absent, so a prim that declares usage and applies nothing
+        // satisfies both vacuously while reading as empty in any consumer that
+        // resolves geometry through HasAPI.
         if (count > 0 && !applied) {
             _Err(&errors,
                  UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
                  usdPrim,
-                 TfStringPrintf("[%s] BrepArray <%s>: %s usage is declared but "
-                                "%s is not in apiSchemas, so its geometry is "
-                                "unreachable through the schema.",
-                                it.ba, usdPrim.GetPath().GetText(), it.label,
-                                it.schemaToken));
+                 TfStringPrintf("[BA.583] BrepArray <%s>: %s contains %zu '%s' "
+                                "occurrence(s), but required applied geometry "
+                                "API '%s' is absent from apiSchemas.",
+                                usdPrim.GetPath().GetText(),
+                                it.isVertexDriver ? "vertex:pointType"
+                                                  : "face:surfaceType",
+                                count, it.driverValue, it.schemaToken));
         }
     }
+
+    // BA.583, second clause. UV pcurves have no topology type-token array of
+    // their own, so presence is inferred from the packed record: a non-zero
+    // order or vertexCount for any edgeuse means pcurve data is authored, and
+    // that requires BrepCurveUvNurbAPI. Data authored without the schema is
+    // unreachable exactly as above.
+    {
+        const VtArray<unsigned int> uvOrder
+            = _Read<unsigned int>(usdPrim.GetAttribute(
+                TfToken("brep:curveUv:nurb:order")));
+        const VtArray<unsigned int> uvVertexCount
+            = _Read<unsigned int>(usdPrim.GetAttribute(
+                TfToken("brep:curveUv:nurb:vertexCount")));
+
+        bool hasUvRecord = false;
+        for (const unsigned int v : uvOrder) {
+            if (v != 0) { hasUvRecord = true; break; }
+        }
+        if (!hasUvRecord) {
+            for (const unsigned int v : uvVertexCount) {
+                if (v != 0) { hasUvRecord = true; break; }
+            }
+        }
+
+        if (hasUvRecord
+            && !_HasAppliedSchema(usdPrim, TfToken("BrepCurveUvNurbAPI"))) {
+            _Err(&errors,
+                 UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
+                 usdPrim,
+                 TfStringPrintf("[BA.583] BrepArray <%s>: authored UV NURBS "
+                                "pcurve data requires BrepCurveUvNurbAPI, which "
+                                "is absent from apiSchemas.",
+                                usdPrim.GetPath().GetText()));
+        }
+    }
+
     return errors;
 }
 
