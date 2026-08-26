@@ -488,12 +488,13 @@ TestRegistration()
         UsdSolidValidatorNameTokens->brepArraySolidClosure,
         UsdSolidValidatorNameTokens->brepArrayDegenerateEdges,
         UsdSolidValidatorNameTokens->brepArrayEdgeCurveVertices,
+        UsdSolidValidatorNameTokens->brepArrayUvTrim,
     };
 
     const UsdValidationValidatorMetadataVector metadata
         = registry.GetValidatorMetadataForPlugin(
             _tokens->usdSolidValidatorsPlugin);
-    TF_AXIOM(metadata.size() == 18);
+    TF_AXIOM(metadata.size() == 19);
 
     std::set<TfToken> validatorNames;
     for (const UsdValidationValidatorMetadata &m : metadata) {

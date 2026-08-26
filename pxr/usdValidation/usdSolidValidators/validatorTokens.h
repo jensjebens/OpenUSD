@@ -38,7 +38,8 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((brepArrayDegenerateEdges,                                                 \
       "usdSolidValidators:BrepArrayDegenerateEdges"))                           \
     ((brepArrayEdgeCurveVertices,                                               \
-      "usdSolidValidators:BrepArrayEdgeCurveVertices"))
+      "usdSolidValidators:BrepArrayEdgeCurveVertices"))                         \
+    ((brepArrayUvTrim, "usdSolidValidators:BrepArrayUvTrim"))
 
 #define USD_SOLID_VALIDATOR_KEYWORD_TOKENS                                     \
     (UsdSolidValidators)                                                       \
@@ -146,7 +147,14 @@ PXR_NAMESPACE_OPEN_SCOPE
     /* BrepArrayDegenerateEdges */                                             \
     ((degenerateEdge, "DegenerateEdge"))                                       \
     /* BrepArrayEdgeCurveVertices */                                           \
-    ((edgeCurveVertexMismatch, "EdgeCurveVertexMismatch"))
+    ((edgeCurveVertexMismatch, "EdgeCurveVertexMismatch"))                     \
+    /* BrepArrayUvTrim */                                                      \
+    ((uvTrimCurveOutsideFaceDomain, "UvTrimCurveOutsideFaceDomain"))           \
+    ((fullPeriodFaceNoSeamEdgeuse, "FullPeriodFaceNoSeamEdgeuse"))             \
+    ((fullPeriodFaceDomainNotAligned, "FullPeriodFaceDomainNotAligned"))       \
+    ((uvLoopNotClosed, "UvLoopNotClosed"))                                     \
+    ((zeroLengthUvTrimCurve, "ZeroLengthUvTrimCurve"))                         \
+    ((analyticPeriodicDomainOutOfBounds, "AnalyticPeriodicDomainOutOfBounds"))
 
 /// \def USD_SOLID_VALIDATOR_NAME_TOKENS
 /// Tokens representing validator names. Note that for plugin provided

@@ -165,6 +165,15 @@
                             "UsdSolidBrepArray"
                         ]
                     },
+                    "BrepArrayUvTrim": {
+                        "doc": "Validates the UV trim curves and periodic face domains of a UsdSolid BrepArray. BA.750: every brep:curveUv:nurb control vertex of a face lies within that face's face:range widened by half a domain span. BA.761: a full-period analytic periodic face (cylinder, cone, sphere in U; torus in U or V) repeats an edgeuse:edgeIndex within the face, the topological signal that one 3D seam edge carries two edgeuses; reported as a Warning because the repeat is a heuristic and does not prove the repeated edge is the geometric seam. BA.762: a full-period angular face:range is authored as [0, 2*pi] and not an equivalent shifted interval. BA.763: the pcurves of each loop meet head to tail in parameter space, with each pcurve's endpoints taken from a de Boor evaluation at its own parametric ends. BA.764: no pcurve collapses to a point in parameter space. BA.765: a partial-period angular face:range stays within [0, 2*pi].",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
                     "keywords": [
                         "UsdSolidValidators"
                     ]

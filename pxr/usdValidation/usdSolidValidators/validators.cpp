@@ -3823,6 +3823,742 @@ _BrepArrayNurbs(const UsdPrim &usdPrim,
     return errors;
 }
 
+// ========================================================================== //
+// BrepArrayUvTrim                                                            //
+// ========================================================================== //
+// The trim / winding family: BA.750, BA.761, BA.762, BA.763, BA.764, BA.765.
+// These are the rules that read the UV (parameter-space) trim curves in the
+// brep:curveUv:nurb stratum together with the periodic face domains in
+// face:range, so they are grouped into one validator that resolves the
+// curveUv arrays once.
+
+// Period tolerance shared by the periodic-domain rules (BA.761/762/765) and
+// closure tolerance for BA.763; both are 1e-6 in the Python validator.
+constexpr double _UvTrimPeriodTol = 1e-6;
+constexpr double _UvClosureTol = 1e-6;
+// A UV trim curve whose control polygon spans no more than this has collapsed.
+constexpr double _UvZeroLengthTol = 1e-12;
+// BA.750 allows a trim curve to stray half a domain span (or half a unit,
+// whichever is larger) outside face:range before it is reported.
+constexpr double _UvDomainMargin = 0.5;
+
+// "BrepSurfaceCylinderAPI" -> "Cylinder": the label the Python messages use.
+std::string
+_SurfaceLabel(const TfToken &surfaceType)
+{
+    std::string s = surfaceType.GetString();
+    static const std::string prefix = "BrepSurface";
+    static const std::string suffix = "API";
+    if (s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0) {
+        s.erase(0, prefix.size());
+    }
+    if (s.size() >= suffix.size()
+        && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        s.erase(s.size() - suffix.size());
+    }
+    return s;
+}
+
+struct _Uv2 {
+    double u = 0.0;
+    double v = 0.0;
+};
+
+// Evaluate a rational 2D B-spline at parameter t with de Boor's algorithm.
+// Ported from BrepValidator._de_boor_evaluate_2d: the control vertices are
+// lifted to homogeneous (w*u, w*v, w), the knot span containing t is found by
+// linear scan, p rounds of corner cutting collapse the local hull to the
+// point, and the result is projected back. Returns false wherever the Python
+// returns None (malformed sizing, out-of-range span index, zero weight), which
+// the callers treat as "cannot evaluate" rather than "invalid".
+bool
+_DeBoorEvaluate2d(unsigned int order, const std::vector<double> &knots,
+                  const std::vector<GfVec2d> &cvs,
+                  const std::vector<double> &weights, double t, _Uv2 *out)
+{
+    const size_t n = cvs.size();
+    if (order < 1 || n < order || knots.size() < n + order
+        || weights.size() < n) {
+        return false;
+    }
+    const size_t p = order - 1;
+    t = std::max(knots[p], std::min(t, knots[n]));
+
+    // Knot span index. Python's for/else means the clamped-end fallback below
+    // applies only when no span strictly contains t, which is the t == knots[n]
+    // case at the curve's far end.
+    size_t k = p;
+    bool found = false;
+    for (size_t i = p; i < n; ++i) {
+        if (knots[i] <= t && t < knots[i + 1]) {
+            k = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        const double b = knots[n];
+        const double bound
+            = std::max(1e-12 * std::max(std::abs(t), std::abs(b)), 1e-14);
+        if (std::abs(t - b) <= bound) {
+            k = n - 1;
+        }
+    }
+
+    // Homogeneous de Boor points (w*u, w*v, w).
+    struct _H3 {
+        double c[3];
+    };
+    std::vector<_H3> d(p + 1);
+    for (size_t j = 0; j <= p; ++j) {
+        const ptrdiff_t idx
+            = static_cast<ptrdiff_t>(k) - static_cast<ptrdiff_t>(p)
+            + static_cast<ptrdiff_t>(j);
+        if (idx < 0 || static_cast<size_t>(idx) >= n) {
+            return false;
+        }
+        const double w = weights[idx];
+        d[j].c[0] = cvs[idx][0] * w;
+        d[j].c[1] = cvs[idx][1] * w;
+        d[j].c[2] = w;
+    }
+
+    for (size_t r = 1; r <= p; ++r) {
+        for (size_t j = p; j >= r; --j) {
+            const ptrdiff_t left
+                = static_cast<ptrdiff_t>(k) - static_cast<ptrdiff_t>(p)
+                + static_cast<ptrdiff_t>(j);
+            const ptrdiff_t right = left + static_cast<ptrdiff_t>(p)
+                - static_cast<ptrdiff_t>(r) + 1;
+            if (left < 0 || right < 0
+                || static_cast<size_t>(left) >= knots.size()
+                || static_cast<size_t>(right) >= knots.size()) {
+                return false;
+            }
+            const double denom = knots[right] - knots[left];
+            const double alpha = std::abs(denom) < 1e-30
+                ? 0.0
+                : (t - knots[left]) / denom;
+            for (int c = 0; c < 3; ++c) {
+                d[j].c[c] = (1.0 - alpha) * d[j - 1].c[c] + alpha * d[j].c[c];
+            }
+        }
+    }
+
+    const double w = d[p].c[2];
+    if (std::abs(w) < 1e-30) {
+        return false;
+    }
+    out->u = d[p].c[0] / w;
+    out->v = d[p].c[1] / w;
+    return true;
+}
+
+// --- BA.750: UV trim curve domain containment ---------------------------- //
+// Every UV control vertex of a face's trim curves should sit within the face's
+// own face:range, widened by _UvDomainMargin. Like the Python rule this stops
+// at the first offending control vertex: the failure mode it catches (a whole
+// pcurve stratum indexed against the wrong face) produces hundreds of hits from
+// one cause, and one is enough to name it.
+void
+_CheckUvTrimDomainContainment(const UsdPrim &usdPrim,
+                              const UsdSolidBrepArray &brep,
+                              UsdValidationErrorVector *errors)
+{
+    const VtArray<unsigned int> uvVc
+        = _ReadName<unsigned int>(usdPrim, "brep:curveUv:nurb:vertexCount");
+    const VtArray<GfVec2d> uvCvs
+        = _ReadName<GfVec2d>(usdPrim, "brep:curveUv:nurb:controlVertices");
+    const VtArray<GfVec2d> faceRange = _Read<GfVec2d>(brep.GetFaceRangeAttr());
+    const VtArray<unsigned int> loopCounts
+        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
+    const VtArray<unsigned int> euCounts
+        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
+
+    if (uvVc.empty() || uvCvs.empty() || faceRange.empty()
+        || loopCounts.empty() || euCounts.empty()) {
+        return;
+    }
+
+    const size_t numFaces = loopCounts.size();
+    size_t loopOffset = 0;
+    size_t euOffset = 0;
+    size_t cvOffset = 0;
+
+    for (size_t faceIdx = 0; faceIdx < numFaces; ++faceIdx) {
+        if (2 * faceIdx + 1 >= faceRange.size()) {
+            break;
+        }
+        const GfVec2d &uvMin = faceRange[2 * faceIdx];
+        const GfVec2d &uvMax = faceRange[2 * faceIdx + 1];
+        const double uMin = uvMin[0], vMin = uvMin[1];
+        const double uMax = uvMax[0], vMax = uvMax[1];
+        const double uPad
+            = _UvDomainMargin * std::max(std::abs(uMax - uMin), 1.0);
+        const double vPad
+            = _UvDomainMargin * std::max(std::abs(vMax - vMin), 1.0);
+        const double uLo = uMin - uPad, uHi = uMax + uPad;
+        const double vLo = vMin - vPad, vHi = vMax + vPad;
+
+        const size_t nLoops = loopCounts[faceIdx];
+        const size_t faceEuStart = euOffset;
+        for (size_t lp = 0; lp < nLoops; ++lp) {
+            const size_t lpIdx = loopOffset + lp;
+            if (lpIdx < euCounts.size()) {
+                euOffset += euCounts[lpIdx];
+            }
+        }
+        const size_t faceEuEnd = euOffset;
+        loopOffset += nLoops;
+
+        const size_t euLimit = std::min(faceEuEnd, uvVc.size());
+        for (size_t euIdx = faceEuStart; euIdx < euLimit; ++euIdx) {
+            const size_t nCv = uvVc[euIdx];
+            for (size_t j = 0; j < nCv; ++j) {
+                const size_t ci = cvOffset + j;
+                if (ci >= uvCvs.size()) {
+                    break;
+                }
+                const double uVal = uvCvs[ci][0];
+                const double vVal = uvCvs[ci][1];
+                if (uVal < uLo || uVal > uHi || vVal < vLo || vVal > vHi) {
+                    _Err(errors,
+                         UsdSolidValidationErrorNameTokens
+                             ->uvTrimCurveOutsideFaceDomain,
+                         usdPrim,
+                         TfStringPrintf(
+                             "[BA.750] BrepArray <%s>: face #%zu edgeuse #%zu "
+                             "UV control vertex [%zu] = (%.6f, %.6f) is far "
+                             "outside face UV domain [%.4f..%.4f] x "
+                             "[%.4f..%.4f].",
+                             usdPrim.GetPath().GetText(), faceIdx, euIdx, ci,
+                             uVal, vVal, uMin, uMax, vMin, vMax));
+                    return;
+                }
+            }
+            cvOffset += nCv;
+        }
+    }
+}
+
+// --- BA.761: full-period face seam edgeuse heuristic ---------------------- //
+// A cylinder / cone / sphere face whose U domain covers a full 2*pi (or a torus
+// face full in U or V) closes on itself, so its loop should walk the seam edge
+// twice: one 3D edge, two edgeuses, hence a repeated edgeuse:edgeIndex within
+// the face. A face with no repeat has authored the seam as two separate edges
+// (or has no seam at all). Reported as a Warning: the repeat is a topological
+// signal, not a proof that the repeated edge is geometrically the seam.
+void
+_CheckFullPeriodFaceSeamEdgeuse(const UsdPrim &usdPrim,
+                                const UsdSolidBrepArray &brep,
+                                UsdValidationErrorVector *errors)
+{
+    const VtArray<TfToken> faceSurfaceType
+        = _Read<TfToken>(brep.GetFaceSurfaceTypeAttr());
+    const VtArray<GfVec2d> faceRange = _Read<GfVec2d>(brep.GetFaceRangeAttr());
+    const VtArray<unsigned int> faceLoopCount
+        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
+    const VtArray<unsigned int> loopEdgeuseCount
+        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
+    // edgeuse:edgeIndex is deliberately not required to be non-empty. A
+    // full-period face whose loops carry no edgeuses at all is exactly the "no
+    // seam" case this rule exists to flag; gating on a populated stream would
+    // silence it. Every read below is bounds-checked against the stream size.
+    const VtArray<unsigned int> edgeuseEdgeIndex
+        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
+
+    if (faceSurfaceType.empty() || faceRange.empty() || faceLoopCount.empty()) {
+        return;
+    }
+
+    const size_t numFaces = std::min(
+        { faceSurfaceType.size(), faceLoopCount.size(), faceRange.size() / 2 });
+    if (numFaces == 0) {
+        return;
+    }
+
+    std::vector<size_t> loopEdgeuseStart(loopEdgeuseCount.size(), 0);
+    size_t running = 0;
+    for (size_t i = 0; i < loopEdgeuseCount.size(); ++i) {
+        loopEdgeuseStart[i] = running;
+        running += loopEdgeuseCount[i];
+    }
+
+    static const TfToken sphereTok("BrepSurfaceSphereAPI");
+    static const TfToken cylinderTok("BrepSurfaceCylinderAPI");
+    static const TfToken coneTok("BrepSurfaceConeAPI");
+    static const TfToken torusTok("BrepSurfaceTorusAPI");
+
+    const _BrepOffsets offsets = _ComputeOffsets(brep);
+
+    size_t loopOffset = 0;
+    for (size_t faceIdx = 0; faceIdx < numFaces; ++faceIdx) {
+        const TfToken &stype = faceSurfaceType[faceIdx];
+        const size_t loopCount = faceLoopCount[faceIdx];
+        const GfVec2d &uvMin = faceRange[2 * faceIdx];
+        const GfVec2d &uvMax = faceRange[2 * faceIdx + 1];
+        const double uSpan = uvMax[0] - uvMin[0];
+        const double vSpan = uvMax[1] - uvMin[1];
+
+        std::vector<std::string> fullPeriodAxes;
+        if (stype == sphereTok || stype == cylinderTok || stype == coneTok) {
+            if (std::abs(uSpan - _TwoPi) <= _UvTrimPeriodTol) {
+                fullPeriodAxes.push_back("U");
+            }
+        } else if (stype == torusTok) {
+            if (std::abs(uSpan - _TwoPi) <= _UvTrimPeriodTol) {
+                fullPeriodAxes.push_back("U");
+            }
+            if (std::abs(vSpan - _TwoPi) <= _UvTrimPeriodTol) {
+                fullPeriodAxes.push_back("V");
+            }
+        }
+
+        if (fullPeriodAxes.empty()) {
+            loopOffset += loopCount;
+            continue;
+        }
+        if (loopCount == 0 || loopOffset + loopCount > loopEdgeuseCount.size()) {
+            loopOffset += loopCount;
+            continue;
+        }
+
+        std::vector<unsigned int> faceEdgeIndices;
+        bool topologyComplete = true;
+        for (size_t lp = loopOffset; lp < loopOffset + loopCount; ++lp) {
+            const size_t start = loopEdgeuseStart[lp];
+            const size_t end = start + loopEdgeuseCount[lp];
+            if (end > edgeuseEdgeIndex.size()) {
+                topologyComplete = false;
+                break;
+            }
+            for (size_t eu = start; eu < end; ++eu) {
+                faceEdgeIndices.push_back(edgeuseEdgeIndex[eu]);
+            }
+        }
+        loopOffset += loopCount;
+
+        if (!topologyComplete) {
+            continue;
+        }
+
+        std::unordered_map<unsigned int, size_t> edgeCounts;
+        for (const unsigned int e : faceEdgeIndices) {
+            ++edgeCounts[e];
+        }
+        size_t seamSignals = 0;
+        for (const auto &kv : edgeCounts) {
+            if (kv.second > 1) {
+                ++seamSignals;
+            }
+        }
+        if (seamSignals >= fullPeriodAxes.size()) {
+            continue;
+        }
+
+        size_t brepIdx = 0;
+        size_t localFaceIdx = faceIdx;
+        for (size_t bi = 0; bi + 1 < offsets.face.size(); ++bi) {
+            if (offsets.face[bi] <= faceIdx && faceIdx < offsets.face[bi + 1]) {
+                brepIdx = bi;
+                localFaceIdx = faceIdx - offsets.face[bi];
+                break;
+            }
+        }
+
+        std::string axes = fullPeriodAxes[0];
+        for (size_t a = 1; a < fullPeriodAxes.size(); ++a) {
+            axes += "/" + fullPeriodAxes[a];
+        }
+
+        _Err(errors,
+             UsdSolidValidationErrorNameTokens->fullPeriodFaceNoSeamEdgeuse,
+             usdPrim,
+             TfStringPrintf(
+                 "[BA.761] BrepArray <%s>: %s face #%zu in brep #%zu has a "
+                 "full-period %s domain but no repeated edgeuse:edgeIndex "
+                 "within the face. Full-period periodic faces are expected to "
+                 "expose seam-like topology as multiple edgeuses on the same "
+                 "3D edge; this is a schema-level heuristic and does not prove "
+                 "a geometric seam exists.",
+                 usdPrim.GetPath().GetText(), _SurfaceLabel(stype).c_str(),
+                 localFaceIdx, brepIdx, axes.c_str()),
+             UsdValidationErrorType::Warn);
+    }
+}
+
+// --- BA.762 / BA.765: analytic periodic domain placement ------------------ //
+// Both rules read the angular axes of an analytic periodic face:range.
+// BA.762 covers the full-period case: a 2*pi span must be authored as
+// [0, 2*pi], not an equivalent shifted interval such as [-pi, pi].
+// BA.765 covers everything else: a partial-period span must lie inside
+// [0, 2*pi]. The U axis of every periodic surface, and the V axis of a torus,
+// are the angular ones; a cylinder or cone V is a length and a sphere V is a
+// latitude, so neither is checked here.
+void
+_CheckAnalyticPeriodicDomains(const UsdPrim &usdPrim,
+                              const UsdSolidBrepArray &brep,
+                              UsdValidationErrorVector *errors)
+{
+    const VtArray<TfToken> faceSurfaceType
+        = _Read<TfToken>(brep.GetFaceSurfaceTypeAttr());
+    const VtArray<GfVec2d> faceRange = _Read<GfVec2d>(brep.GetFaceRangeAttr());
+    if (faceSurfaceType.empty() || faceRange.empty()) {
+        return;
+    }
+    const size_t numFaces = faceSurfaceType.size();
+    if (faceRange.size() < numFaces * 2) {
+        return;
+    }
+
+    static const TfToken sphereTok("BrepSurfaceSphereAPI");
+    static const TfToken cylinderTok("BrepSurfaceCylinderAPI");
+    static const TfToken coneTok("BrepSurfaceConeAPI");
+    static const TfToken torusTok("BrepSurfaceTorusAPI");
+
+    // (axis label, component index, "wrapping" axis). The U axis of every
+    // periodic surface wraps, so a U-max past 2*pi is the wrapped continuation
+    // of the same sweep and is not reported by BA.765; a torus V-max past 2*pi
+    // is.
+    struct _Axis {
+        const char *name;
+        int index;
+        bool uAxis;
+    };
+
+    static const _Axis uAxisOnly[] = { { "U", 0, true } };
+    static const _Axis uAndVAxes[] = { { "U", 0, true }, { "V", 1, false } };
+
+    for (size_t faceIdx = 0; faceIdx < numFaces; ++faceIdx) {
+        const TfToken &stype = faceSurfaceType[faceIdx];
+        const _Axis *axes = nullptr;
+        size_t numAxes = 0;
+        if (stype == cylinderTok || stype == coneTok || stype == sphereTok) {
+            axes = uAxisOnly;
+            numAxes = 1;
+        } else if (stype == torusTok) {
+            axes = uAndVAxes;
+            numAxes = 2;
+        } else {
+            continue;
+        }
+
+        const GfVec2d &uvMin = faceRange[2 * faceIdx];
+        const GfVec2d &uvMax = faceRange[2 * faceIdx + 1];
+        const std::string label = _SurfaceLabel(stype);
+
+        for (size_t a = 0; a < numAxes; ++a) {
+            const _Axis &axis = axes[a];
+            const double paramMin = uvMin[axis.index];
+            const double paramMax = uvMax[axis.index];
+            const double span = paramMax - paramMin;
+
+            if (std::abs(span - _TwoPi) <= _UvTrimPeriodTol) {
+                // BA.762: full period, must be the primary [0, 2*pi] interval.
+                if (std::abs(paramMin) <= _UvTrimPeriodTol
+                    && std::abs(paramMax - _TwoPi) <= _UvTrimPeriodTol) {
+                    continue;
+                }
+                _Err(errors,
+                     UsdSolidValidationErrorNameTokens
+                         ->fullPeriodFaceDomainNotAligned,
+                     usdPrim,
+                     TfStringPrintf(
+                         "[BA.762] BrepArray <%s>: %s face #%zu has a "
+                         "full-period %s range [%.6f, %.6f] rad. Full-period "
+                         "angular domains must be aligned to [0, 2*pi] = "
+                         "[0.000000, %.6f].",
+                         usdPrim.GetPath().GetText(), label.c_str(), faceIdx,
+                         axis.name, paramMin, paramMax, _TwoPi));
+                continue;
+            }
+
+            // BA.765: partial period, must stay inside [0, 2*pi].
+            const bool minOutOfRange = paramMin < -_UvTrimPeriodTol;
+            const bool maxOutOfRange = !axis.uAxis
+                && paramMax > _TwoPi + _UvTrimPeriodTol;
+            if (!minOutOfRange && !maxOutOfRange) {
+                continue;
+            }
+            _Err(errors,
+                 UsdSolidValidationErrorNameTokens
+                     ->analyticPeriodicDomainOutOfBounds,
+                 usdPrim,
+                 TfStringPrintf(
+                     "[BA.765] BrepArray <%s>: %s face #%zu has partial-period "
+                     "%s range [%.6f, %.6f] rad outside the primary angular "
+                     "domain [0, 2*pi] = [0.000000, %.6f].",
+                     usdPrim.GetPath().GetText(), label.c_str(), faceIdx,
+                     axis.name, paramMin, paramMax, _TwoPi));
+        }
+    }
+}
+
+// --- BA.763: UV loop closure --------------------------------------------- //
+// Each loop's pcurves must run head to tail in parameter space: the UV point
+// one pcurve ends at is the UV point the next one starts at, and the last wraps
+// back to the first. The endpoints come from evaluating each pcurve with de
+// Boor at its own parametric ends (knots[order-1] and knots[vertexCount]), not
+// from its first and last control vertex, so a periodic or non-clamped pcurve
+// is measured at the point the curve actually reaches.
+//
+// Known behaviour on conformant assets: a loop bounded by a degenerate
+// parameter line reports a gap here. Where a sphere face reaches a pole, or a
+// NURBS patch has a control row collapsed to a point, the whole V = const line
+// is one 3D point, no edge exists along it, and so no pcurve is authored for
+// it. The two pcurves either side jump in U with V pinned at the degenerate
+// parameter. The gap is real in parameter space and the rule has no local
+// signal that separates it from an open loop: every adjacent pcurve pair in a
+// loop shares a vertex, so a shared-vertex test would silence the rule
+// outright.
+void
+_CheckUvLoopClosure(const UsdPrim &usdPrim, const UsdSolidBrepArray &brep,
+                    UsdValidationErrorVector *errors)
+{
+    const VtArray<unsigned int> orderVals
+        = _ReadName<unsigned int>(usdPrim, "brep:curveUv:nurb:order");
+    const VtArray<unsigned int> vcVals
+        = _ReadName<unsigned int>(usdPrim, "brep:curveUv:nurb:vertexCount");
+    const VtArray<GfVec2d> cvVals
+        = _ReadName<GfVec2d>(usdPrim, "brep:curveUv:nurb:controlVertices");
+    const VtArray<double> knVals
+        = _ReadName<double>(usdPrim, "brep:curveUv:nurb:knots");
+    const VtArray<unsigned int> faceLoopCounts
+        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
+    const VtArray<unsigned int> loopEdgeuseCounts
+        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
+    const VtArray<unsigned int> edgeuseEdgeIndices
+        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
+
+    if (orderVals.empty() || vcVals.empty() || cvVals.empty() || knVals.empty()
+        || faceLoopCounts.empty() || loopEdgeuseCounts.empty()
+        || edgeuseEdgeIndices.empty()) {
+        return;
+    }
+
+    // brep:curveUv:nurb:weights is optional: an omitted array means a
+    // non-rational curve, every weight 1.0, which is how the schema, the
+    // converter and OpenCASCADE all read it. Requiring it authored would skip
+    // the check on exactly the assets that need it.
+    std::vector<double> weightsAll;
+    {
+        const VtArray<double> authored
+            = _ReadName<double>(usdPrim, "brep:curveUv:nurb:weights");
+        if (authored.empty()) {
+            weightsAll.assign(cvVals.size(), 1.0);
+        } else {
+            weightsAll.assign(authored.begin(), authored.end());
+        }
+    }
+
+    const size_t numEdgeuses = edgeuseEdgeIndices.size();
+    if (orderVals.size() < numEdgeuses || vcVals.size() < numEdgeuses) {
+        return;
+    }
+
+    struct _Endpoints {
+        bool valid = false;
+        _Uv2 start;
+        _Uv2 end;
+    };
+
+    std::vector<_Endpoints> curveEndpoints;
+    curveEndpoints.reserve(numEdgeuses);
+    size_t cvOffset = 0;
+    size_t knotOffset = 0;
+    for (size_t curveIdx = 0; curveIdx < numEdgeuses; ++curveIdx) {
+        const unsigned int order = orderVals[curveIdx];
+        const unsigned int nCv = vcVals[curveIdx];
+
+        // A face with no authored pcurve for this edgeuse: skip it without
+        // advancing the control-vertex or knot cursors.
+        if (order == 0 && nCv == 0) {
+            curveEndpoints.push_back(_Endpoints());
+            continue;
+        }
+        if (order < 1 || nCv < order) {
+            return;
+        }
+
+        const size_t nKnots = static_cast<size_t>(nCv) + order;
+        if (cvOffset + nCv > cvVals.size()
+            || knotOffset + nKnots > knVals.size()) {
+            return;
+        }
+        if (cvOffset + nCv > weightsAll.size()) {
+            weightsAll.resize(cvOffset + nCv, 1.0);
+        }
+
+        const std::vector<double> knots(knVals.begin() + knotOffset,
+                                        knVals.begin() + knotOffset + nKnots);
+        const std::vector<GfVec2d> cvs(cvVals.begin() + cvOffset,
+                                       cvVals.begin() + cvOffset + nCv);
+        const std::vector<double> weights(weightsAll.begin() + cvOffset,
+                                          weightsAll.begin() + cvOffset + nCv);
+        const double tStart = knots[order - 1];
+        const double tEnd = knots[nCv];
+
+        _Endpoints ep;
+        if (!_DeBoorEvaluate2d(order, knots, cvs, weights, tStart, &ep.start)
+            || !_DeBoorEvaluate2d(order, knots, cvs, weights, tEnd, &ep.end)) {
+            return;
+        }
+        ep.valid = true;
+        curveEndpoints.push_back(ep);
+        cvOffset += nCv;
+        knotOffset += nKnots;
+    }
+
+    size_t loopIdx = 0;
+    size_t edgeuseOffset = 0;
+    for (size_t faceIdx = 0; faceIdx < faceLoopCounts.size(); ++faceIdx) {
+        const size_t nLoops = faceLoopCounts[faceIdx];
+        for (size_t localLoopIdx = 0; localLoopIdx < nLoops; ++localLoopIdx) {
+            if (loopIdx >= loopEdgeuseCounts.size()) {
+                return;
+            }
+            const size_t nEdgeuses = loopEdgeuseCounts[loopIdx];
+            const size_t loopStart = edgeuseOffset;
+            const size_t loopEnd = edgeuseOffset + nEdgeuses;
+            ++loopIdx;
+            edgeuseOffset = loopEnd;
+
+            if (nEdgeuses == 0) {
+                continue;
+            }
+            if (loopEnd > curveEndpoints.size()) {
+                return;
+            }
+
+            bool allValid = true;
+            for (size_t i = loopStart; i < loopEnd; ++i) {
+                if (!curveEndpoints[i].valid) {
+                    allValid = false;
+                    break;
+                }
+            }
+            if (!allValid) {
+                continue;
+            }
+
+            for (size_t local = 0; local < nEdgeuses; ++local) {
+                const size_t edgeuseIdx = loopStart + local;
+                const size_t nextLocal = (local + 1) % nEdgeuses;
+                const size_t nextEdgeuseIdx = loopStart + nextLocal;
+                const _Uv2 &uvEnd = curveEndpoints[edgeuseIdx].end;
+                const _Uv2 &nextUvStart = curveEndpoints[nextEdgeuseIdx].start;
+                const double du = uvEnd.u - nextUvStart.u;
+                const double dv = uvEnd.v - nextUvStart.v;
+                const double dist = std::sqrt(du * du + dv * dv);
+                if (dist > _UvClosureTol) {
+                    _Err(errors,
+                         UsdSolidValidationErrorNameTokens->uvLoopNotClosed,
+                         usdPrim,
+                         TfStringPrintf(
+                             "[BA.763] BrepArray <%s>: face #%zu loop #%zu "
+                             "edgeuse #%zu UV endpoint (%.6f, %.6f) does not "
+                             "meet next edgeuse #%zu UV start (%.6f, %.6f); "
+                             "gap %.6f exceeds tolerance 1e-06.",
+                             usdPrim.GetPath().GetText(), faceIdx,
+                             localLoopIdx, edgeuseIdx, uvEnd.u, uvEnd.v,
+                             nextEdgeuseIdx, nextUvStart.u, nextUvStart.v,
+                             dist));
+                }
+            }
+        }
+    }
+}
+
+// --- BA.764: zero-length UV trim curve ------------------------------------ //
+// A pcurve whose control vertices all coincide trims nothing; the face boundary
+// it belongs to has a hole in parameter space. Measured on the control polygon
+// extent, which bounds the curve from above, so a curve only registers as
+// collapsed when even that bound vanishes.
+void
+_CheckZeroLengthUvTrimCurves(const UsdPrim &usdPrim,
+                             UsdValidationErrorVector *errors)
+{
+    const VtArray<unsigned int> uvOrders
+        = _ReadName<unsigned int>(usdPrim, "brep:curveUv:nurb:order");
+    const VtArray<unsigned int> uvVc
+        = _ReadName<unsigned int>(usdPrim, "brep:curveUv:nurb:vertexCount");
+    const VtArray<GfVec2d> uvCvs
+        = _ReadName<GfVec2d>(usdPrim, "brep:curveUv:nurb:controlVertices");
+
+    if (uvOrders.empty() || uvVc.empty() || uvCvs.empty()) {
+        return;
+    }
+
+    size_t cvOffset = 0;
+    for (size_t curveIdx = 0; curveIdx < uvVc.size(); ++curveIdx) {
+        if (curveIdx >= uvOrders.size()) {
+            return;
+        }
+        const unsigned int order = uvOrders[curveIdx];
+        const size_t nCv = uvVc[curveIdx];
+        if (nCv == 0) {
+            continue;
+        }
+        if (cvOffset + nCv > uvCvs.size()) {
+            // The flat control-vertex stream is truncated: stop scanning.
+            // Continuing here would leave cvOffset unadvanced and let a later,
+            // smaller vertexCount re-slice the same tail, which reports
+            // collapsed curves that are not there.
+            break;
+        }
+
+        double uLo = uvCvs[cvOffset][0], uHi = uLo;
+        double vLo = uvCvs[cvOffset][1], vHi = vLo;
+        for (size_t j = 1; j < nCv; ++j) {
+            uLo = std::min(uLo, uvCvs[cvOffset + j][0]);
+            uHi = std::max(uHi, uvCvs[cvOffset + j][0]);
+            vLo = std::min(vLo, uvCvs[cvOffset + j][1]);
+            vHi = std::max(vHi, uvCvs[cvOffset + j][1]);
+        }
+        const double firstU = uvCvs[cvOffset][0];
+        const double firstV = uvCvs[cvOffset][1];
+        cvOffset += nCv;
+
+        if (order == 0) {
+            continue;
+        }
+
+        const double uExtent = uHi - uLo;
+        const double vExtent = vHi - vLo;
+        const double diagonal
+            = std::sqrt(uExtent * uExtent + vExtent * vExtent);
+        if (diagonal <= _UvZeroLengthTol) {
+            _Err(errors,
+                 UsdSolidValidationErrorNameTokens->zeroLengthUvTrimCurve,
+                 usdPrim,
+                 TfStringPrintf(
+                     "[BA.764] BrepArray <%s>: UV trim curve #%zu has collapsed "
+                     "control vertices at (%.6f, %.6f); control polygon extent "
+                     "%.6e is at or below tolerance %.1e.",
+                     usdPrim.GetPath().GetText(), curveIdx, firstU, firstV,
+                     diagonal, _UvZeroLengthTol));
+        }
+    }
+}
+
+UsdValidationErrorVector
+_BrepArrayUvTrim(const UsdPrim &usdPrim,
+                 const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
+    }
+    const UsdSolidBrepArray brep(usdPrim);
+
+    UsdValidationErrorVector errors;
+    _CheckUvTrimDomainContainment(usdPrim, brep, &errors);
+    _CheckFullPeriodFaceSeamEdgeuse(usdPrim, brep, &errors);
+    _CheckAnalyticPeriodicDomains(usdPrim, brep, &errors);
+    _CheckUvLoopClosure(usdPrim, brep, &errors);
+    _CheckZeroLengthUvTrimCurves(usdPrim, &errors);
+    return errors;
+}
+
 } // anonymous namespace
 
 TF_REGISTRY_FUNCTION(UsdValidationRegistry)
@@ -3892,6 +4628,9 @@ TF_REGISTRY_FUNCTION(UsdValidationRegistry)
     registry.RegisterPluginValidator(
         UsdSolidValidatorNameTokens->brepArrayEdgeCurveVertices,
         _BrepArrayEdgeCurveVertices);
+
+    registry.RegisterPluginValidator(
+        UsdSolidValidatorNameTokens->brepArrayUvTrim, _BrepArrayUvTrim);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
