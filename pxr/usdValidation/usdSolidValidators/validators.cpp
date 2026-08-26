@@ -126,23 +126,74 @@ _CheckSize(const UsdPrim &prim, const char *attrName, size_t actual,
     }
 }
 
+// Renders an allowed-token list the way the Python brep_validator prints it
+// ("['solidRegion', 'voidRegion']"), so the native message for a token-validity
+// rule reads the same as its Python counterpart. The allowed sets below are
+// vectors because the order they are written in reaches the reader in this
+// tail; a std::set<TfToken> would sort them lexicographically and the two
+// validators would print the same set in two different orders.
+std::string
+_FormatAllowedTokens(const std::vector<TfToken> &allowed)
+{
+    std::vector<std::string> quoted;
+    quoted.reserve(allowed.size());
+    for (const TfToken &token : allowed) {
+        quoted.push_back(TfStringPrintf("'%s'", token.GetText()));
+    }
+    return "[" + TfStringJoin(quoted, ", ") + "]";
+}
+
+// The token-validity rules BA.075 / BA.090 / BA.110 / BA.130 / BA.135 /
+// BA.190 / BA.195 / BA.245 / BA.260 / BA.315 all reduce to "every entry of this
+// token[] attribute is drawn from this fixed set". Python reports one finding
+// per attribute (naming every offending index) instead of one finding per
+// offending index; this reproduces that grouping so a file with N bad tokens in
+// one attribute produces one finding here and one finding there.
 void
 _CheckAllowedTokens(const UsdPrim &prim, const VtArray<TfToken> &values,
-                    const std::set<TfToken> &allowed, const char *attrName,
+                    const std::vector<TfToken> &allowed, const char *ruleId,
+                    const char *attrName, const char *itemName,
                     const TfToken &errorName,
                     UsdValidationErrorVector *errors)
 {
+    std::vector<size_t> invalid;
     for (size_t i = 0; i < values.size(); ++i) {
-        if (allowed.find(values[i]) == allowed.end()) {
-            errors->emplace_back(
-                errorName, UsdValidationErrorType::Error, _PrimSites(prim),
-                TfStringPrintf(
-                    "BrepArray <%s>: %s value '%s' at index %zu is not an "
-                    "allowed token.",
-                    prim.GetPath().GetText(), attrName,
-                    values[i].GetText(), i));
+        if (std::find(allowed.begin(), allowed.end(), values[i])
+            == allowed.end()) {
+            invalid.push_back(i);
         }
     }
+    if (invalid.empty()) {
+        return;
+    }
+
+    const std::string allowedDesc = _FormatAllowedTokens(allowed);
+
+    if (invalid.size() == 1) {
+        const size_t i = invalid.front();
+        errors->emplace_back(
+            errorName, UsdValidationErrorType::Error, _PrimSites(prim),
+            TfStringPrintf(
+                "[%s] BrepArray <%s>: %s[%zu] has invalid value '%s' for %s "
+                "#%zu. Allowed values are %s.",
+                ruleId, prim.GetPath().GetText(), attrName, i,
+                values[i].GetText(), itemName, i, allowedDesc.c_str()));
+        return;
+    }
+
+    std::vector<std::string> details;
+    details.reserve(invalid.size());
+    for (const size_t i : invalid) {
+        details.push_back(TfStringPrintf("[%zu]='%s'", i,
+                                         values[i].GetText()));
+    }
+    errors->emplace_back(
+        errorName, UsdValidationErrorType::Error, _PrimSites(prim),
+        TfStringPrintf(
+            "[%s] BrepArray <%s>: %s has invalid values at indices: %s. "
+            "Allowed values are %s.",
+            ruleId, prim.GetPath().GetText(), attrName,
+            TfStringJoin(details, ", ").c_str(), allowedDesc.c_str()));
 }
 
 // -------------------------------------------------------------------------- //
@@ -479,71 +530,92 @@ _BrepArrayTokenValues(const UsdPrim &usdPrim,
     }
     const UsdSolidBrepArray brep(usdPrim);
 
-    static const std::set<TfToken> regionTypes
+    // Each set is listed in the order the Python brep_validator declares it.
+    // The membership of all ten sets is taken from the Python implementation
+    // and agrees entry-for-entry with the allowedTokens metadata on
+    // pxr/usd/usdSolid/schema.usda.
+    static const std::vector<TfToken> regionTypes
         = { TfToken("solidRegion"), TfToken("voidRegion") };
-    static const std::set<TfToken> shellPointTypes
+    static const std::vector<TfToken> shellPointTypes
         = { TfToken("BrepPointAPI"), TfToken("none") };
-    static const std::set<TfToken> orientationTypes
+    static const std::vector<TfToken> orientationTypes
         = { TfToken("same"), TfToken("opposite") };
-    static const std::set<TfToken> surfaceTypes
-        = { TfToken("BrepSurfaceNurbAPI"), TfToken("BrepSurfacePlaneAPI"),
-            TfToken("BrepSurfaceCylinderAPI"), TfToken("BrepSurfaceConeAPI"),
-            TfToken("BrepSurfaceSphereAPI"), TfToken("BrepSurfaceTorusAPI") };
-    static const std::set<TfToken> trimTypes
+    static const std::vector<TfToken> surfaceTypes
+        = { TfToken("BrepSurfaceNurbAPI"), TfToken("BrepSurfaceSphereAPI"),
+            TfToken("BrepSurfacePlaneAPI"), TfToken("BrepSurfaceCylinderAPI"),
+            TfToken("BrepSurfaceConeAPI"), TfToken("BrepSurfaceTorusAPI") };
+    static const std::vector<TfToken> trimTypes
         = { TfToken("rectangular"), TfToken("general") };
-    static const std::set<TfToken> radialEntryTypes
+    static const std::vector<TfToken> radialEntryTypes
         = { TfToken("topEntry"), TfToken("bottomEntry") };
-    static const std::set<TfToken> curveTypes
-        = { TfToken("BrepCurve3dNurbAPI"), TfToken("BrepCurve3dLineAPI"),
-            TfToken("BrepCurve3dCircleAPI"),
+    static const std::vector<TfToken> curveTypes
+        = { TfToken("BrepCurve3dNurbAPI"), TfToken("BrepCurve3dCircleAPI"),
+            TfToken("BrepCurve3dLineAPI"),
             TfToken("BrepCurve3dEllipseAPI") };
-    static const std::set<TfToken> vertexPointTypes
+    static const std::vector<TfToken> vertexPointTypes
         = { TfToken("BrepPointAPI") };
 
     UsdValidationErrorVector errors;
 
+    // BA.075: region:type.
     _CheckAllowedTokens(usdPrim, _Read<TfToken>(brep.GetRegionTypeAttr()),
-                        regionTypes, "region:type",
+                        regionTypes, "BA.075", "region:type", "region",
                         UsdSolidValidationErrorNameTokens->invalidRegionType,
                         &errors);
+    // BA.090: shell:pointType. 'none' is allowed: a shell that carries no
+    // representative point authors the token rather than omitting the entry,
+    // so the array stays parallel to the other shell arrays.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetShellPointTypeAttr()), shellPointTypes,
-        "shell:pointType",
+        "BA.090", "shell:pointType", "shell",
         UsdSolidValidationErrorNameTokens->invalidShellPointType, &errors);
+    // BA.110: faceuse:orientationType.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetFaceuseOrientationTypeAttr()),
-        orientationTypes, "faceuse:orientationType",
+        orientationTypes, "BA.110", "faceuse:orientationType", "faceuse",
         UsdSolidValidationErrorNameTokens->invalidFaceuseOrientationType,
         &errors);
+    // BA.130: face:surfaceType.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetFaceSurfaceTypeAttr()), surfaceTypes,
-        "face:surfaceType",
+        "BA.130", "face:surfaceType", "face",
         UsdSolidValidationErrorNameTokens->invalidFaceSurfaceType, &errors);
+    // BA.135: face:trimType.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetFaceTrimTypeAttr()), trimTypes,
-        "face:trimType",
+        "BA.135", "face:trimType", "face",
         UsdSolidValidationErrorNameTokens->invalidFaceTrimType, &errors);
+    // BA.190: edgeuse:orientationType.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetEdgeuseOrientationTypeAttr()),
-        orientationTypes, "edgeuse:orientationType",
+        orientationTypes, "BA.190", "edgeuse:orientationType", "edgeuse",
         UsdSolidValidationErrorNameTokens->invalidEdgeuseOrientationType,
         &errors);
+    // BA.195: edgeuse:thisRadialEntryType.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetEdgeuseThisRadialEntryTypeAttr()),
-        radialEntryTypes, "edgeuse:thisRadialEntryType",
+        radialEntryTypes, "BA.195", "edgeuse:thisRadialEntryType", "edgeuse",
         UsdSolidValidationErrorNameTokens->invalidEdgeuseRadialEntryType,
         &errors);
+    // BA.245: edge:curveType.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetEdgeCurveTypeAttr()), curveTypes,
-        "edge:curveType",
+        "BA.245", "edge:curveType", "edge",
         UsdSolidValidationErrorNameTokens->invalidEdgeCurveType, &errors);
+    // BA.260: wireEdge:curveType. Python reaches this check only when
+    // sum(shell:wireEdgeCount) > 0; the guard makes no difference here because
+    // an empty wireEdge:curveType has nothing to reject, and a BrepArray that
+    // authors wire-edge curve types while declaring no wire edges is exactly
+    // the case worth reporting.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr()), curveTypes,
-        "wireEdge:curveType",
+        "BA.260", "wireEdge:curveType", "wireEdge",
         UsdSolidValidationErrorNameTokens->invalidWireEdgeCurveType, &errors);
+    // BA.315: vertex:pointType. Unlike shell:pointType there is no 'none':
+    // every vertex has a point.
     _CheckAllowedTokens(
         usdPrim, _Read<TfToken>(brep.GetVertexPointTypeAttr()),
-        vertexPointTypes, "vertex:pointType",
+        vertexPointTypes, "BA.315", "vertex:pointType", "vertex",
         UsdSolidValidationErrorNameTokens->invalidVertexPointType, &errors);
 
     return errors;
@@ -704,18 +776,26 @@ _BrepArrayFaceOuterLoop(const UsdPrim &usdPrim,
 // BrepArrayAnalyticSurfaces                                                  //
 // -------------------------------------------------------------------------- //
 
-// A radius-like parameter and whether it must be strictly positive (false =>
-// non-negative is sufficient, as for cone apex radius).
+// A radius-like parameter, its rule number, and whether it must be strictly
+// positive (false => non-negative is sufficient, as for cone apex radius).
 struct _RadiusParam {
     TfToken attr;
     const char *name;
     bool strictlyPositive;
+    const char *ba;              // BA.481/501/511/521/522
 };
 
-// Description of one analytic surface type's parameter attributes.
+// Description of one analytic surface type's parameter attributes, together
+// with the rule numbers that govern them. Each surface family has its own
+// numbering for the same four checks (size, axis unit length, refDirection unit
+// length, axis/refDirection orthogonality), so the numbers travel with the
+// description instead of being spelled out at each emit site.
 struct _SurfaceDesc {
     TfToken faceSurfaceType;     // face:surfaceType token value
     const char *label;           // human-readable surface type
+    TfToken originAttr;          // surface position (plane/cylinder/cone/torus
+                                 // origin, sphere center)
+    const char *originName;
     TfToken axisAttr;            // surface frame axis (unit)
     const char *axisName;
     TfToken refDirAttr;          // surface frame reference direction (unit)
@@ -723,38 +803,63 @@ struct _SurfaceDesc {
     std::vector<_RadiusParam> radii;
     TfToken semiAngleAttr;       // empty token unless a cone
     const char *semiAngleName;
+    const char *baSize;          // BA.480/490/500/510/520
+    const char *baAxisUnit;      // BA.482/491/502/512/523
+    const char *baRefDirUnit;    // BA.483/492/503/513/524
+    const char *baOrtho;         // BA.484/493/504/514/525
 };
+
+// Array-size check for one analytic surface parameter. Mirrors _CheckSize but
+// tags the message with the surface family's own rule number, so a size failure
+// on a cone attributes to BA.510 and the same failure on a torus to BA.520.
+void
+_CheckSurfaceParamSize(const UsdPrim &usdPrim, const char *ba,
+                       const char *attrName, size_t actual, size_t expected,
+                       const std::string &expectedDesc,
+                       UsdValidationErrorVector *errors)
+{
+    if (actual != expected) {
+        errors->emplace_back(
+            UsdSolidValidationErrorNameTokens
+                ->inconsistentAnalyticSurfaceCount,
+            UsdValidationErrorType::Error, _PrimSites(usdPrim),
+            TfStringPrintf(
+                "[%s] BrepArray <%s>: attribute %s has size %zu but expected "
+                "%zu (%s).",
+                ba, usdPrim.GetPath().GetText(), attrName, actual, expected,
+                expectedDesc.c_str()));
+    }
+}
 
 void
 _CheckAnalyticSurface(const UsdPrim &usdPrim, const _SurfaceDesc &desc,
                       size_t count, UsdValidationErrorVector *errors)
 {
+    const VtArray<GfVec3d> origin
+        = _Read<GfVec3d>(usdPrim.GetAttribute(desc.originAttr));
     const VtArray<GfVec3d> axis
         = _Read<GfVec3d>(usdPrim.GetAttribute(desc.axisAttr));
     const VtArray<GfVec3d> refDir
         = _Read<GfVec3d>(usdPrim.GetAttribute(desc.refDirAttr));
 
     const std::string countDesc = TfStringPrintf(
-        "number of faces with face:surfaceType '%s' = %zu", desc.label, count);
+        "number of faces with face:surfaceType '%s' = %zu",
+        desc.faceSurfaceType.GetText(), count);
 
     // BA.480/490/500/510/520: parameter array sizes must match the face count.
-    _CheckSize(usdPrim, desc.axisName, axis.size(), count, countDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentAnalyticSurfaceCount,
-               errors);
-    _CheckSize(usdPrim, desc.refDirName, refDir.size(), count, countDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentAnalyticSurfaceCount,
-               errors);
+    _CheckSurfaceParamSize(usdPrim, desc.baSize, desc.originName,
+                           origin.size(), count, countDesc, errors);
+    _CheckSurfaceParamSize(usdPrim, desc.baSize, desc.axisName, axis.size(),
+                           count, countDesc, errors);
+    _CheckSurfaceParamSize(usdPrim, desc.baSize, desc.refDirName,
+                           refDir.size(), count, countDesc, errors);
 
     // BA.481/501/511/521/522: radius positivity (or non-negativity).
     for (const _RadiusParam &radius : desc.radii) {
         const VtArray<double> values
             = _Read<double>(usdPrim.GetAttribute(radius.attr));
-        _CheckSize(usdPrim, radius.name, values.size(), count, countDesc,
-                   UsdSolidValidationErrorNameTokens
-                       ->inconsistentAnalyticSurfaceCount,
-                   errors);
+        _CheckSurfaceParamSize(usdPrim, desc.baSize, radius.name,
+                               values.size(), count, countDesc, errors);
         for (size_t i = 0; i < values.size(); ++i) {
             const bool bad = radius.strictlyPositive ? (values[i] <= 0.0)
                                                      : (values[i] < 0.0);
@@ -764,42 +869,44 @@ _CheckAnalyticSurface(const UsdPrim &usdPrim, const _SurfaceDesc &desc,
                         ->nonPositiveSurfaceRadius,
                     UsdValidationErrorType::Error, _PrimSites(usdPrim),
                     TfStringPrintf(
-                        "BrepArray <%s>: %s surface %s[%zu] = %g must be %s.",
-                        usdPrim.GetPath().GetText(), desc.label, radius.name,
-                        i, values[i],
+                        "[%s] BrepArray <%s>: %s surface %s[%zu] = %g must be "
+                        "%s.",
+                        radius.ba, usdPrim.GetPath().GetText(), desc.label,
+                        radius.name, i, values[i],
                         radius.strictlyPositive ? "positive"
                                                 : "non-negative"));
             }
         }
     }
 
-    // BA.482/483 (and analogues): axis and refDirection must be unit length.
+    // BA.482/491/502/512/523: axis must be unit length.
     for (size_t i = 0; i < axis.size(); ++i) {
         if (std::abs(axis[i].GetLength() - 1.0) > _FrameTol) {
             errors->emplace_back(
                 UsdSolidValidationErrorNameTokens->nonUnitSurfaceAxis,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: %s surface %s[%zu] is not unit length "
-                    "(length %g).",
-                    usdPrim.GetPath().GetText(), desc.label, desc.axisName, i,
-                    axis[i].GetLength()));
+                    "[%s] BrepArray <%s>: %s surface %s[%zu] is not unit "
+                    "length (length %g).",
+                    desc.baAxisUnit, usdPrim.GetPath().GetText(), desc.label,
+                    desc.axisName, i, axis[i].GetLength()));
         }
     }
+    // BA.483/492/503/513/524: refDirection must be unit length.
     for (size_t i = 0; i < refDir.size(); ++i) {
         if (std::abs(refDir[i].GetLength() - 1.0) > _FrameTol) {
             errors->emplace_back(
                 UsdSolidValidationErrorNameTokens->nonUnitSurfaceRefDirection,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: %s surface %s[%zu] is not unit length "
-                    "(length %g).",
-                    usdPrim.GetPath().GetText(), desc.label, desc.refDirName,
-                    i, refDir[i].GetLength()));
+                    "[%s] BrepArray <%s>: %s surface %s[%zu] is not unit "
+                    "length (length %g).",
+                    desc.baRefDirUnit, usdPrim.GetPath().GetText(), desc.label,
+                    desc.refDirName, i, refDir[i].GetLength()));
         }
     }
 
-    // BA.484 (and analogues): axis and refDirection must be orthogonal.
+    // BA.484/493/504/514/525: axis and refDirection must be orthogonal.
     const size_t frameCount = std::min(axis.size(), refDir.size());
     for (size_t i = 0; i < frameCount; ++i) {
         const double dot = GfDot(axis[i], refDir[i]);
@@ -808,10 +915,10 @@ _CheckAnalyticSurface(const UsdPrim &usdPrim, const _SurfaceDesc &desc,
                 UsdSolidValidationErrorNameTokens->nonOrthogonalSurfaceAxes,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: %s surface %s and %s at index %zu are not "
-                    "orthogonal (dot product %g).",
-                    usdPrim.GetPath().GetText(), desc.label, desc.axisName,
-                    desc.refDirName, i, dot));
+                    "[%s] BrepArray <%s>: %s surface %s and %s at index %zu "
+                    "are not orthogonal (dot product %g).",
+                    desc.baOrtho, usdPrim.GetPath().GetText(), desc.label,
+                    desc.axisName, desc.refDirName, i, dot));
         }
     }
 
@@ -819,19 +926,16 @@ _CheckAnalyticSurface(const UsdPrim &usdPrim, const _SurfaceDesc &desc,
     if (!desc.semiAngleAttr.IsEmpty()) {
         const VtArray<double> semiAngle
             = _Read<double>(usdPrim.GetAttribute(desc.semiAngleAttr));
-        _CheckSize(usdPrim, desc.semiAngleName, semiAngle.size(), count,
-                   countDesc,
-                   UsdSolidValidationErrorNameTokens
-                       ->inconsistentAnalyticSurfaceCount,
-                   errors);
+        _CheckSurfaceParamSize(usdPrim, desc.baSize, desc.semiAngleName,
+                               semiAngle.size(), count, countDesc, errors);
         for (size_t i = 0; i < semiAngle.size(); ++i) {
             if (semiAngle[i] <= 0.0 || semiAngle[i] >= _HalfPi) {
                 errors->emplace_back(
                     UsdSolidValidationErrorNameTokens->invalidConeSemiAngle,
                     UsdValidationErrorType::Error, _PrimSites(usdPrim),
                     TfStringPrintf(
-                        "BrepArray <%s>: %s surface %s[%zu] = %g must lie in "
-                        "the open interval (0, pi/2).",
+                        "[BA.515] BrepArray <%s>: %s surface %s[%zu] = %g must "
+                        "lie in the open interval (0, pi/2).",
                         usdPrim.GetPath().GetText(), desc.label,
                         desc.semiAngleName, i, semiAngle[i]));
             }
@@ -853,43 +957,54 @@ _BrepArrayAnalyticSurfaces(const UsdPrim &usdPrim,
 
     const std::vector<_SurfaceDesc> descs = {
         { TfToken("BrepSurfacePlaneAPI"), "plane",
+          UsdSolidTokens->brepSurfacePlaneOrigin, "brep:surface:plane:origin",
           UsdSolidTokens->brepSurfacePlaneAxis, "brep:surface:plane:axis",
           UsdSolidTokens->brepSurfacePlaneRefDirection,
           "brep:surface:plane:refDirection",
           {},
-          TfToken(), nullptr },
+          TfToken(), nullptr,
+          "BA.490", "BA.491", "BA.492", "BA.493" },
         { TfToken("BrepSurfaceCylinderAPI"), "cylinder",
+          UsdSolidTokens->brepSurfaceCylinderOrigin,
+          "brep:surface:cylinder:origin",
           UsdSolidTokens->brepSurfaceCylinderAxis,
           "brep:surface:cylinder:axis",
           UsdSolidTokens->brepSurfaceCylinderRefDirection,
           "brep:surface:cylinder:refDirection",
           { { UsdSolidTokens->brepSurfaceCylinderRadius,
-              "brep:surface:cylinder:radius", true } },
-          TfToken(), nullptr },
+              "brep:surface:cylinder:radius", true, "BA.501" } },
+          TfToken(), nullptr,
+          "BA.500", "BA.502", "BA.503", "BA.504" },
         { TfToken("BrepSurfaceConeAPI"), "cone",
+          UsdSolidTokens->brepSurfaceConeOrigin, "brep:surface:cone:origin",
           UsdSolidTokens->brepSurfaceConeAxis, "brep:surface:cone:axis",
           UsdSolidTokens->brepSurfaceConeRefDirection,
           "brep:surface:cone:refDirection",
           { { UsdSolidTokens->brepSurfaceConeRadius,
-              "brep:surface:cone:radius", false } },
+              "brep:surface:cone:radius", false, "BA.511" } },
           UsdSolidTokens->brepSurfaceConeSemiAngle,
-          "brep:surface:cone:semiAngle" },
+          "brep:surface:cone:semiAngle",
+          "BA.510", "BA.512", "BA.513", "BA.514" },
         { TfToken("BrepSurfaceSphereAPI"), "sphere",
+          UsdSolidTokens->brepSurfaceSphereCenter, "brep:surface:sphere:center",
           UsdSolidTokens->brepSurfaceSphereAxis, "brep:surface:sphere:axis",
           UsdSolidTokens->brepSurfaceSphereRefDirection,
           "brep:surface:sphere:refDirection",
           { { UsdSolidTokens->brepSurfaceSphereRadius,
-              "brep:surface:sphere:radius", true } },
-          TfToken(), nullptr },
+              "brep:surface:sphere:radius", true, "BA.481" } },
+          TfToken(), nullptr,
+          "BA.480", "BA.482", "BA.483", "BA.484" },
         { TfToken("BrepSurfaceTorusAPI"), "torus",
+          UsdSolidTokens->brepSurfaceTorusOrigin, "brep:surface:torus:origin",
           UsdSolidTokens->brepSurfaceTorusAxis, "brep:surface:torus:axis",
           UsdSolidTokens->brepSurfaceTorusRefDirection,
           "brep:surface:torus:refDirection",
           { { UsdSolidTokens->brepSurfaceTorusMajorRadius,
-              "brep:surface:torus:majorRadius", true },
+              "brep:surface:torus:majorRadius", true, "BA.521" },
             { UsdSolidTokens->brepSurfaceTorusMinorRadius,
-              "brep:surface:torus:minorRadius", true } },
-          TfToken(), nullptr },
+              "brep:surface:torus:minorRadius", true, "BA.522" } },
+          TfToken(), nullptr,
+          "BA.520", "BA.523", "BA.524", "BA.525" },
     };
 
     UsdValidationErrorVector errors;
@@ -2942,6 +3057,367 @@ _BrepArraySpans(const UsdPrim &usdPrim,
 // -------------------------------------------------------------------------- //
 // BrepArrayAnalyticCurves                                                    //
 // -------------------------------------------------------------------------- //
+
+// The smallest brep:intersectTol3d an edge check will accept as a usable
+// distance bound. A tolerance below it, or a non-finite one, leaves the edge
+// without a bound, which BA.600/601/602/610 report rather than treating as
+// "everything passes". Matches BrepConstants.NUMERICAL_TOLERANCE in the Python
+// brep_validator, whose _get_edge_intersect_tolerance applies the same floor.
+constexpr double _MinUsableEdgeTol = 1e-11;
+
+// One edge's resolved intersection tolerance, and which Brep supplied it.
+struct _EdgeTol {
+    bool resolved = false;
+    double tol = 0.0;
+    size_t brepIdx = 0;
+};
+
+// Resolve a per-edge brep:intersectTol3d for every edge. Unlike
+// _FirstAuthoredIntersectTol3d, which takes Brep 0's tolerance for the whole
+// prim, this attributes each edge to its own Brep: _ComputeOffsets partitions
+// the flat edgeuse array per Brep and edgeuse:edgeIndex names the edge each
+// edgeuse uses, so an edge belongs to the Brep of the first edgeuse that
+// references it. An edge that no edgeuse references stays unattributed, except
+// when a single tolerance is authored, where there is only one value it could
+// take. There is no reader-side fallback here: these rules report an
+// unresolvable tolerance instead of substituting one.
+std::vector<_EdgeTol>
+_ResolveEdgeTolerances(const UsdSolidBrepArray &brep, size_t numEdges)
+{
+    std::vector<_EdgeTol> out(numEdges);
+    const VtArray<double> tols
+        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
+    if (tols.empty() || numEdges == 0) {
+        return out;
+    }
+
+    constexpr size_t unattributed = static_cast<size_t>(-1);
+    std::vector<size_t> edgeBrep(numEdges, unattributed);
+    const _BrepOffsets offsets = _ComputeOffsets(brep);
+    if (offsets.ok) {
+        const VtArray<unsigned int> edgeuseEdgeIndex
+            = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
+        for (size_t b = 0; b + 1 < offsets.edgeuse.size(); ++b) {
+            const size_t hi
+                = std::min(offsets.edgeuse[b + 1], edgeuseEdgeIndex.size());
+            for (size_t eu = offsets.edgeuse[b]; eu < hi; ++eu) {
+                const size_t e = edgeuseEdgeIndex[eu];
+                if (e < numEdges && edgeBrep[e] == unattributed) {
+                    edgeBrep[e] = b;
+                }
+            }
+        }
+    }
+
+    for (size_t e = 0; e < numEdges; ++e) {
+        size_t b = edgeBrep[e];
+        if (b == unattributed && tols.size() == 1) {
+            b = 0;
+        }
+        if (b == unattributed || b >= tols.size()) {
+            continue;
+        }
+        if (!std::isfinite(tols[b]) || tols[b] < _MinUsableEdgeTol) {
+            continue;
+        }
+        out[e] = { true, tols[b], b };
+    }
+    return out;
+}
+
+void
+_ReportUnresolvedEdgeTol(const UsdPrim &prim, const char *ba,
+                         const char *checkLabel, size_t edgeIdx,
+                         UsdValidationErrorVector *errors)
+{
+    _Err(errors,
+         UsdSolidValidationErrorNameTokens->unresolvedEdgeIntersectTol3d, prim,
+         TfStringPrintf(
+             "[%s] BrepArray <%s>: %s for edge #%zu could not be validated "
+             "because no positive brep:intersectTol3d value could be resolved "
+             "for the edge. The tolerance is missing, invalid, or the edge "
+             "could not be associated with a Brep.",
+             ba, prim.GetPath().GetText(), checkLabel, edgeIdx));
+}
+
+// BA.600/601/602: an analytic edge's 3D curve, evaluated at the two authored
+// edge:range parameters, must reach the positions of the two vertices named by
+// edge:vertexIndices, in that order, within the edge's brep:intersectTol3d.
+// The requirement set numbers this per curve family: a line edge attributes to
+// BA.600, a circle edge to BA.601, an ellipse edge to BA.602. It covers edges
+// only; there is no wireEdge equivalent.
+//
+// Instances of one curve family are packed in edge order, so the family cursors
+// advance on every edge of that family even when the edge itself is skipped.
+//
+// BA.240 (BrepArrayEdgeCurveVertices) tests the same relation, but across every
+// edge and wireEdge including NURBS, against Brep 0's tolerance with a
+// reader-side fallback, and exempts an edge whose two vertices coincide. These
+// rules are narrower and stricter: analytic edges only, each against the
+// tolerance of the Brep that owns it, no fallback and no exemption. A file that
+// fails one usually fails the other.
+void
+_CheckAnalyticEdgeEndpointVertices(const UsdPrim &prim,
+                                   const UsdSolidBrepArray &brep,
+                                   const std::vector<_EdgeTol> &edgeTol,
+                                   UsdValidationErrorVector *errors)
+{
+    const VtArray<TfToken> curveType
+        = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
+    const VtArray<double> range = _Read<double>(brep.GetEdgeRangeAttr());
+    const VtArray<GfVec2i> vtxIdx
+        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr());
+    const VtArray<GfVec3d> vpos
+        = _ReadName<GfVec3d>(prim, "brep:vertexPoint:point:position");
+
+    const size_t numEdges = curveType.size();
+    if (numEdges == 0 || range.empty() || vtxIdx.empty() || vpos.empty()
+        || edgeTol.size() < numEdges) {
+        return;
+    }
+    // A short edge:range cannot supply both parameters for every edge; the size
+    // itself is BrepArrayStructure's report (BA.115).
+    if (range.size() < 2 * numEdges) {
+        return;
+    }
+
+    const std::string lineBase = "brep:edge3dLine:curve3d:line:";
+    const VtArray<GfVec3d> lineOrigin
+        = _ReadName<GfVec3d>(prim, lineBase + "origin");
+    const VtArray<GfVec3d> lineDir
+        = _ReadName<GfVec3d>(prim, lineBase + "direction");
+
+    const std::string circleBase = "brep:edge3dCircle:curve3d:circle:";
+    const VtArray<GfVec3d> circleCenter
+        = _ReadName<GfVec3d>(prim, circleBase + "center");
+    const VtArray<GfVec3d> circleAxis
+        = _ReadName<GfVec3d>(prim, circleBase + "axis");
+    const VtArray<GfVec3d> circleRef
+        = _ReadName<GfVec3d>(prim, circleBase + "refDirection");
+    const VtArray<double> circleRadius
+        = _ReadName<double>(prim, circleBase + "radius");
+
+    const std::string ellipseBase = "brep:edge3dEllipse:curve3d:ellipse:";
+    const VtArray<GfVec3d> ellipseCenter
+        = _ReadName<GfVec3d>(prim, ellipseBase + "center");
+    const VtArray<GfVec3d> ellipseAxis
+        = _ReadName<GfVec3d>(prim, ellipseBase + "axis");
+    const VtArray<GfVec3d> ellipseRef
+        = _ReadName<GfVec3d>(prim, ellipseBase + "refDirection");
+    const VtArray<double> ellipseX
+        = _ReadName<double>(prim, ellipseBase + "xRadius");
+    const VtArray<double> ellipseY
+        = _ReadName<double>(prim, ellipseBase + "yRadius");
+
+    static const TfToken lineTok("BrepCurve3dLineAPI");
+    static const TfToken circleTok("BrepCurve3dCircleAPI");
+    static const TfToken ellipseTok("BrepCurve3dEllipseAPI");
+
+    // center + cos(t)*xr*ref + sin(t)*yr*(axis x ref).
+    const auto conicAt = [](const GfVec3d &center, const GfVec3d &axis,
+                            const GfVec3d &ref, double xr, double yr,
+                            double t) {
+        return center + std::cos(t) * xr * ref
+            + std::sin(t) * yr * GfCross(axis, ref);
+    };
+
+    // Compare a curve's two endpoints against the edge's two vertices; at most
+    // one error per edge, naming the first endpoint that is out of tolerance.
+    const auto compare
+        = [&](const char *ba, const char *shape, size_t e, double t0,
+              double t1, const GfVec3d &start, const GfVec3d &end, int v0,
+              int v1, double tol, size_t brepIdx) {
+              const double ts[2] = { t0, t1 };
+              const GfVec3d pts[2] = { start, end };
+              const int vs[2] = { v0, v1 };
+              const char *names[2] = { "start", "end" };
+              for (int k = 0; k < 2; ++k) {
+                  const GfVec3d &vp = vpos[vs[k]];
+                  const double dist = (pts[k] - vp).GetLength();
+                  if (dist <= tol) {
+                      continue;
+                  }
+                  _Err(errors,
+                       UsdSolidValidationErrorNameTokens
+                           ->analyticCurveEndpointVertexMismatch,
+                       prim,
+                       TfStringPrintf(
+                           "[%s] BrepArray <%s>: %s edge #%zu %s point "
+                           "evaluated at t=%.6f is (%.6f, %.6f, %.6f), but "
+                           "vertex #%d is at (%.6f, %.6f, %.6f); distance "
+                           "%.6f exceeds brep:intersectTol3d[%zu] = %g.",
+                           ba, prim.GetPath().GetText(), shape, e, names[k],
+                           ts[k], pts[k][0], pts[k][1], pts[k][2], vs[k],
+                           vp[0], vp[1], vp[2], dist, brepIdx, tol));
+                  break;
+              }
+          };
+
+    size_t lineInst = 0;
+    size_t circleInst = 0;
+    size_t ellipseInst = 0;
+
+    for (size_t e = 0; e < numEdges; ++e) {
+        const TfToken &ct = curveType[e];
+        const bool isLine = (ct == lineTok);
+        const bool isCircle = (ct == circleTok);
+        const bool isEllipse = (ct == ellipseTok);
+        if (!isLine && !isCircle && !isEllipse) {
+            continue;
+        }
+
+        const double t0 = range[2 * e];
+        const double t1 = range[2 * e + 1];
+        const bool haveVerts = e < vtxIdx.size()
+            && vtxIdx[e][0] >= 0 && vtxIdx[e][1] >= 0
+            && vtxIdx[e][0] < static_cast<int>(vpos.size())
+            && vtxIdx[e][1] < static_cast<int>(vpos.size());
+        const int v0 = haveVerts ? vtxIdx[e][0] : 0;
+        const int v1 = haveVerts ? vtxIdx[e][1] : 0;
+        const _EdgeTol &et = edgeTol[e];
+
+        if (isLine) {
+            const size_t i = lineInst++;
+            if (i >= lineOrigin.size() || i >= lineDir.size()) {
+                continue;
+            }
+            // Out-of-range vertex indices are BrepArrayReferences' report
+            // (BA.200); an edge that has none is out of this rule's reach, so
+            // it is not held against the tolerance either.
+            if (!haveVerts) {
+                continue;
+            }
+            if (!et.resolved) {
+                _ReportUnresolvedEdgeTol(prim, "BA.600",
+                                         "line endpoint-to-vertex consistency",
+                                         e, errors);
+                continue;
+            }
+            compare("BA.600", "line", e, t0, t1,
+                    lineOrigin[i] + t0 * lineDir[i],
+                    lineOrigin[i] + t1 * lineDir[i], v0, v1, et.tol,
+                    et.brepIdx);
+        } else if (isCircle) {
+            const size_t i = circleInst++;
+            if (i >= circleCenter.size() || i >= circleAxis.size()
+                || i >= circleRef.size() || i >= circleRadius.size()) {
+                continue;
+            }
+            if (!haveVerts) {
+                continue;
+            }
+            if (!et.resolved) {
+                _ReportUnresolvedEdgeTol(
+                    prim, "BA.601", "circle endpoint-to-vertex consistency", e,
+                    errors);
+                continue;
+            }
+            const double r = circleRadius[i];
+            compare("BA.601", "circle", e, t0, t1,
+                    conicAt(circleCenter[i], circleAxis[i], circleRef[i], r, r,
+                            t0),
+                    conicAt(circleCenter[i], circleAxis[i], circleRef[i], r, r,
+                            t1),
+                    v0, v1, et.tol, et.brepIdx);
+        } else {
+            const size_t i = ellipseInst++;
+            if (i >= ellipseCenter.size() || i >= ellipseAxis.size()
+                || i >= ellipseRef.size() || i >= ellipseX.size()
+                || i >= ellipseY.size()) {
+                continue;
+            }
+            if (!haveVerts) {
+                continue;
+            }
+            if (!et.resolved) {
+                _ReportUnresolvedEdgeTol(
+                    prim, "BA.602", "ellipse endpoint-to-vertex consistency",
+                    e, errors);
+                continue;
+            }
+            compare("BA.602", "ellipse", e, t0, t1,
+                    conicAt(ellipseCenter[i], ellipseAxis[i], ellipseRef[i],
+                            ellipseX[i], ellipseY[i], t0),
+                    conicAt(ellipseCenter[i], ellipseAxis[i], ellipseRef[i],
+                            ellipseX[i], ellipseY[i], t1),
+                    v0, v1, et.tol, et.brepIdx);
+        }
+    }
+}
+
+// BA.610: both vertices of a circle edge must lie at the circle's authored
+// radius from its center, within the edge's brep:intersectTol3d. This needs
+// only the center and radius, so it still applies where BA.601 cannot reach --
+// a circle whose axis or refDirection is missing, or an edge whose edge:range
+// is too short to evaluate -- and it judges each vertex on its own rather than
+// requiring both to be in range.
+void
+_CheckCircleVertexRadius(const UsdPrim &prim, const UsdSolidBrepArray &brep,
+                         const std::vector<_EdgeTol> &edgeTol,
+                         UsdValidationErrorVector *errors)
+{
+    const VtArray<TfToken> curveType
+        = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
+    const VtArray<GfVec2i> vtxIdx
+        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr());
+    const VtArray<GfVec3d> vpos
+        = _ReadName<GfVec3d>(prim, "brep:vertexPoint:point:position");
+    const std::string circleBase = "brep:edge3dCircle:curve3d:circle:";
+    const VtArray<GfVec3d> center
+        = _ReadName<GfVec3d>(prim, circleBase + "center");
+    const VtArray<double> radius
+        = _ReadName<double>(prim, circleBase + "radius");
+
+    if (curveType.empty() || vtxIdx.empty() || vpos.empty() || center.empty()
+        || radius.empty() || edgeTol.size() < curveType.size()) {
+        return;
+    }
+
+    static const TfToken circleTok("BrepCurve3dCircleAPI");
+    size_t circleInst = 0;
+    for (size_t e = 0; e < curveType.size(); ++e) {
+        if (curveType[e] != circleTok) {
+            continue;
+        }
+        const size_t i = circleInst++;
+        if (i >= center.size() || i >= radius.size() || e >= vtxIdx.size()) {
+            continue;
+        }
+        const _EdgeTol &et = edgeTol[e];
+        if (!et.resolved) {
+            _ReportUnresolvedEdgeTol(prim, "BA.610",
+                                     "circle vertex-radius consistency", e,
+                                     errors);
+            continue;
+        }
+        const int vs[2] = { vtxIdx[e][0], vtxIdx[e][1] };
+        const char *names[2] = { "start", "end" };
+        for (int k = 0; k < 2; ++k) {
+            if (vs[k] < 0 || vs[k] >= static_cast<int>(vpos.size())) {
+                continue;
+            }
+            const GfVec3d &v = vpos[vs[k]];
+            const double dist = (v - center[i]).GetLength();
+            const double diff = std::abs(dist - radius[i]);
+            if (diff <= et.tol) {
+                continue;
+            }
+            _Err(errors,
+                 UsdSolidValidationErrorNameTokens->circleVertexRadiusMismatch,
+                 prim,
+                 TfStringPrintf(
+                     "[BA.610] BrepArray <%s>: circle edge #%zu %s vertex #%d "
+                     "is at distance %.6f from center (%.6f, %.6f, %.6f), but "
+                     "radius is %.6f; difference %.6f exceeds "
+                     "brep:intersectTol3d[%zu] = %g.",
+                     prim.GetPath().GetText(), e, names[k], vs[k], dist,
+                     center[i][0], center[i][1], center[i][2], radius[i], diff,
+                     et.brepIdx, et.tol));
+            break;
+        }
+    }
+}
+
 UsdValidationErrorVector
 _BrepArrayAnalyticCurves(const UsdPrim &usdPrim,
                          const UsdValidationTimeRange & /*timeRange*/)
@@ -2973,6 +3449,13 @@ _BrepArrayAnalyticCurves(const UsdPrim &usdPrim,
                           _CountToken(edgeCurveType, ellipse), &errors);
     _CheckEllipseInstance(usdPrim, "wireEdge3dEllipse",
                           _CountToken(wireCurveType, ellipse), &errors);
+
+    // BA.600/601/602 and BA.610 relate the analytic curve parameters above to
+    // the edge's vertices, so both need the edge's own tolerance.
+    const std::vector<_EdgeTol> edgeTol
+        = _ResolveEdgeTolerances(brep, edgeCurveType.size());
+    _CheckAnalyticEdgeEndpointVertices(usdPrim, brep, edgeTol, &errors);
+    _CheckCircleVertexRadius(usdPrim, brep, edgeTol, &errors);
 
     return errors;
 }

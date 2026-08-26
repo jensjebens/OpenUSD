@@ -49,7 +49,7 @@
                         ]
                     },
                     "BrepArrayAnalyticSurfaces": {
-                        "doc": "Validates analytic surface parameters of a UsdSolid BrepArray (plane, cylinder, cone, sphere, torus): the parameter arrays match the number of faces of that surface type, radii are positive, axis and refDirection are unit-length and mutually orthogonal, and cone semiAngle lies in (0, pi/2).",
+                        "doc": "Validates analytic surface parameters of a UsdSolid BrepArray (plane, cylinder, cone, sphere, torus): the origin/center, axis, refDirection, radius and semiAngle arrays match the number of faces of that surface type, radii are positive, axis and refDirection are unit-length and mutually orthogonal, and cone semiAngle lies in (0, pi/2).",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -121,7 +121,7 @@
                         ]
                     },
                     "BrepArrayAnalyticCurves": {
-                        "doc": "Validates analytic curve parameters of a UsdSolid BrepArray (circle, line, ellipse for edge and wireEdge instances): parameter arrays match the number of edges of that curve type, radii are positive, axis/refDirection/direction are unit-length, and axis and refDirection are orthogonal.",
+                        "doc": "Validates analytic curve parameters of a UsdSolid BrepArray (circle, line, ellipse for edge and wireEdge instances): parameter arrays match the number of edges of that curve type, radii are positive, axis/refDirection/direction are unit-length, and axis and refDirection are orthogonal. For edges it also evaluates each analytic curve at its authored edge:range endpoints and requires the results to reach the edge's start and end vertex positions, and requires a circle edge's vertices to lie at the authored radius from its center, both within the owning Brep's brep:intersectTol3d.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],

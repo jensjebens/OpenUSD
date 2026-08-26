@@ -122,6 +122,10 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((analyticCurveAxisRefDirectionNotOrthogonal,                             \
       "AnalyticCurveAxisRefDirectionNotOrthogonal"))                           \
     ((lineDirectionNotUnitLength, "LineDirectionNotUnitLength"))               \
+    ((analyticCurveEndpointVertexMismatch,                                     \
+      "AnalyticCurveEndpointVertexMismatch"))                                  \
+    ((circleVertexRadiusMismatch, "CircleVertexRadiusMismatch"))               \
+    ((unresolvedEdgeIntersectTol3d, "UnresolvedEdgeIntersectTol3d"))           \
     /* BrepArrayNurbs */                                                       \
     ((nurbSizeArrayMismatch, "NurbSizeArrayMismatch"))                         \
     ((nurbNonPositiveOrder, "NurbNonPositiveOrder"))                           \
