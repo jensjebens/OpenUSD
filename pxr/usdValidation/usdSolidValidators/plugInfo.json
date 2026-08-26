@@ -13,7 +13,7 @@
                         ]
                     },
                     "BrepArrayTopology": {
-                        "doc": "Validates that the flat-packed Radial Edge topology arrays of a UsdSolid BrepArray have consistent sizes: each level (region, shell, faceuse, face, loop, edgeuse, edge, wireEdge, vertex) must have array sizes derived from the counts at the level above it.",
+                        "doc": "Validates that the flat-packed Radial Edge topology arrays of a UsdSolid BrepArray have consistent sizes: each level (region, shell, faceuse, face, loop, edgeuse, edge, wireEdge, vertex) must have array sizes derived from the counts at the level above it. Also checks that edgeuse:nextRadialEUIndex partitions each Brep's edgeuses into radial chains whose members all name one edge through edgeuse:edgeIndex, and that every edgeuse naming a given edge falls in a single chain.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -31,7 +31,7 @@
                         ]
                     },
                     "BrepArrayRanges": {
-                        "doc": "Validates parameter ranges of a UsdSolid BrepArray: face:loopCount is at least one, face:range U and V intervals are non-degenerate, and edge:range / wireEdge:range pairs are ordered (min<=max).",
+                        "doc": "Validates parameter ranges of a UsdSolid BrepArray: face:loopCount is at least one, face:range U and V intervals are non-degenerate, and edge:range / wireEdge:range pairs are ordered (min<=max). Also checks that angular parameter maxima stay in the primary period (0, 2*pi] for circle and ellipse edges and for the U direction of cylinder, cone, sphere and torus faces; that cylinder and cone faces have V-min <= V-max; and that no floating-point array holds a NaN or an Inf.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -94,7 +94,7 @@
                         ]
                     },
                     "BrepArrayCompleteness": {
-                        "doc": "Validates Brep graph integrity of a UsdSolid BrepArray: every face is referenced by exactly two faceuses, the radial edgeuse chains close into cycles, and no edge is orphaned (every edge is referenced by at least one edgeuse).",
+                        "doc": "Validates Brep graph integrity of a UsdSolid BrepArray: every face is referenced by exactly two faceuses, the radial edgeuse chains close into cycles, and no edge is orphaned (every edge is referenced by at least one edgeuse). BA.720, BA.721 and BA.722 additionally require every edge:curveType, wireEdge:curveType and face:surfaceType entry to name a recognized curve or surface category, so the per-category counts sum to the total edge, wireEdge and face counts.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -103,7 +103,7 @@
                         ]
                     },
                     "BrepArrayContainment": {
-                        "doc": "Validates spatial containment on a UsdSolid BrepArray: each brep:extent box lies within the prim's extent, and vertex positions and NURBS control points lie within their owning Brep's brep:extent box.",
+                        "doc": "Validates spatial containment on a UsdSolid BrepArray: each brep:extent box lies within the prim's extent, and vertex positions and NURBS control points lie within their owning Brep's brep:extent box. Also checks that an analytic surface's origin (a sphere's center) lies within the brep:extent union expanded by twice its diagonal, unless the face that surface carries does, and that each shell point lies within its own Brep's brep:extent box.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -112,7 +112,7 @@
                         ]
                     },
                     "BrepArraySpans": {
-                        "doc": "Validates parametric-domain limits on analytic geometry of a UsdSolid BrepArray: periodic surface/curve domains (sphere/cylinder/cone/torus faces, circle/ellipse edge and wireEdge parameter ranges) span at most one period (2*pi), and sphere latitude lies within [-pi/2, pi/2]. The periodic edge-range span bound is tolerance-aware, using the authored brep:intersectTol3d (BA.240 fallback) floored at the analytic domain tolerance.",
+                        "doc": "Validates parametric-domain limits on analytic geometry of a UsdSolid BrepArray: periodic surface/curve domains (sphere/cylinder/cone/torus faces, circle/ellipse edge and wireEdge parameter ranges) span at most one period (2*pi), and sphere latitude lies within [-pi/2, pi/2]. The periodic edge-range span bound is tolerance-aware, using the authored brep:intersectTol3d (proposal-434 fallback) floored at the analytic domain tolerance.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -130,7 +130,7 @@
                         ]
                     },
                     "BrepArrayNurbs": {
-                        "doc": "Validates NURBS geometry coherence of a UsdSolid BrepArray (surface, edge3d, wireEdge3d, curveUv): array sizes, orders positive and >= 2, order <= vertexCount, control-vertex/weight/knot vector sizes, positive weights, non-decreasing knot vectors, and schema/data usage consistency.",
+                        "doc": "Validates NURBS geometry coherence of a UsdSolid BrepArray (surface, edge3d, wireEdge3d, curveUv): array sizes, orders positive and >= 2, order <= vertexCount, control-vertex/weight/knot vector sizes, positive weights, non-decreasing knot vectors, and schema/data usage consistency. BA.650-BA.658 repeat the edge3d checks over the wireEdge3d stratum and additionally require every wireEdge3dNurb control vertex to lie within a brep:extent box.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -157,7 +157,7 @@
                         ]
                     },
                     "BrepArrayEdgeCurveVertices": {
-                        "doc": "Validates proposal rule 434 (the curve runs from the start vertex to the end vertex) on a UsdSolid BrepArray: for each edge and wireEdge, the 3D curve evaluated at its parametric endpoints must match the positions of the vertices named by its vertexIndices, in that order, within brep:intersectTol3d. Flags edge:vertexIndices authored in topological rather than curve-parametric order (reversed edges). Degenerate edges (start vertex == end vertex) are exempt.",
+                        "doc": "Validates proposal rule 434 (the curve runs from the start vertex to the end vertex) on a UsdSolid BrepArray: for each edge and wireEdge, the 3D curve evaluated at its parametric endpoints must match the positions of the vertices named by its vertexIndices, in that order, within brep:intersectTol3d. Flags edge:vertexIndices authored in topological rather than curve-parametric order (reversed edges). Degenerate edges (start vertex == end vertex) are exempt. For NURBS edges the curve is additionally evaluated with de Boor's algorithm at the authored edge:range endpoints, rather than read off the control hull, and measured against the edge's own Brep's brep:intersectTol3d.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -167,6 +167,15 @@
                     },
                     "BrepArrayUvTrim": {
                         "doc": "Validates the UV trim curves and periodic face domains of a UsdSolid BrepArray. BA.750: every brep:curveUv:nurb control vertex of a face lies within that face's face:range widened by half a domain span. BA.761: a full-period analytic periodic face (cylinder, cone, sphere in U; torus in U or V) repeats an edgeuse:edgeIndex within the face, the topological signal that one 3D seam edge carries two edgeuses; reported as a Warning because the repeat is a heuristic and does not prove the repeated edge is the geometric seam. BA.762: a full-period angular face:range is authored as [0, 2*pi] and not an equivalent shifted interval. BA.763: the pcurves of each loop meet head to tail in parameter space, with each pcurve's endpoints taken from a de Boor evaluation at its own parametric ends. BA.764: no pcurve collapses to a point in parameter space. BA.765: a partial-period angular face:range stays within [0, 2*pi].",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayGeomSubsets": {
+                        "doc": "Validates the UsdGeomSubset children of a UsdSolid BrepArray: subset indices address an existing Brep (elementType 'brep') or face (elementType 'face'), no two subsets of one elementType claim the same index, and every material:binding target names a prim on the stage.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],

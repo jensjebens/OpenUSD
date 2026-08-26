@@ -39,7 +39,8 @@ PXR_NAMESPACE_OPEN_SCOPE
       "usdSolidValidators:BrepArrayDegenerateEdges"))                           \
     ((brepArrayEdgeCurveVertices,                                               \
       "usdSolidValidators:BrepArrayEdgeCurveVertices"))                         \
-    ((brepArrayUvTrim, "usdSolidValidators:BrepArrayUvTrim"))
+    ((brepArrayUvTrim, "usdSolidValidators:BrepArrayUvTrim"))                  \
+    ((brepArrayGeomSubsets, "usdSolidValidators:BrepArrayGeomSubsets"))
 
 #define USD_SOLID_VALIDATOR_KEYWORD_TOKENS                                     \
     (UsdSolidValidators)                                                       \
@@ -52,6 +53,15 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((nonPositiveIntersectTol3d, "NonPositiveIntersectTol3d"))                 \
     ((nonFiniteIntersectTol3d, "NonFiniteIntersectTol3d"))                     \
     ((invalidExtentOrder, "InvalidExtentOrder"))                               \
+    ((invalidWireEdgeRangeStructure, "InvalidWireEdgeRangeStructure"))         \
+    ((vertexArraySizeMismatch, "VertexArraySizeMismatch"))                     \
+    ((vertexPointPositionSizeMismatch,                                         \
+      "VertexPointPositionSizeMismatch"))                                      \
+    ((shellPointPositionSizeMismatch,                                          \
+      "ShellPointPositionSizeMismatch"))                                       \
+    ((regionCountBelowMinimum, "RegionCountBelowMinimum"))                     \
+    ((regionShellCountBelowMinimum, "RegionShellCountBelowMinimum"))           \
+    ((shellWithoutContent, "ShellWithoutContent"))                             \
     /* BrepArrayTopology */                                                    \
     ((inconsistentRegionArraySizes, "InconsistentRegionArraySizes"))           \
     ((inconsistentShellArraySizes, "InconsistentShellArraySizes"))             \
@@ -62,6 +72,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((inconsistentEdgeArraySizes, "InconsistentEdgeArraySizes"))               \
     ((inconsistentWireEdgeArraySizes, "InconsistentWireEdgeArraySizes"))       \
     ((inconsistentVertexArraySizes, "InconsistentVertexArraySizes"))           \
+    ((radialChainEdgeInconsistent, "RadialChainEdgeInconsistent"))             \
     /* BrepArrayTokenValues */                                                 \
     ((invalidRegionType, "InvalidRegionType"))                                 \
     ((invalidShellPointType, "InvalidShellPointType"))                         \
@@ -79,6 +90,10 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((degenerateFaceVRange, "DegenerateFaceVRange"))                           \
     ((invalidEdgeRangeOrder, "InvalidEdgeRangeOrder"))                         \
     ((invalidWireEdgeRangeOrder, "InvalidWireEdgeRangeOrder"))                 \
+    ((angularRangeOutsidePrimaryPeriod,                                        \
+      "AngularRangeOutsidePrimaryPeriod"))                                     \
+    ((faceVDomainNotOrdered, "FaceVDomainNotOrdered"))                         \
+    ((nonFiniteFloatArrayValue, "NonFiniteFloatArrayValue"))                   \
     /* BrepArrayFaceOuterLoop */                                               \
     ((faceOuterLoopNoEdges, "FaceOuterLoopNoEdges"))                           \
     /* BrepArrayAnalyticSurfaces */                                            \
@@ -105,10 +120,17 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((faceusePairingViolation, "FaceusePairingViolation"))                     \
     ((radialEdgeuseChainNotClosed, "RadialEdgeuseChainNotClosed"))             \
     ((orphanEdge, "OrphanEdge"))                                               \
+    ((edgeCurveTypeNotExhaustive, "EdgeCurveTypeNotExhaustive"))               \
+    ((wireEdgeCurveTypeNotExhaustive, "WireEdgeCurveTypeNotExhaustive"))       \
+    ((faceSurfaceTypeNotExhaustive, "FaceSurfaceTypeNotExhaustive"))           \
     /* BrepArrayContainment */                                                 \
     ((brepExtentOutsidePrimExtent, "BrepExtentOutsidePrimExtent"))             \
     ((vertexPositionOutsideBrepExtent, "VertexPositionOutsideBrepExtent"))     \
     ((controlPointOutsideBrepExtent, "ControlPointOutsideBrepExtent"))         \
+    ((analyticSurfaceOriginOutsideBrepExtent,                                  \
+      "AnalyticSurfaceOriginOutsideBrepExtent"))                               \
+    ((shellPointPositionOutsideBrepExtent,                                     \
+      "ShellPointPositionOutsideBrepExtent"))                                  \
     /* BrepArraySpans */                                                       \
     ((surfaceDomainSpanExceeded, "SurfaceDomainSpanExceeded"))                 \
     ((sphereVDomainOutOfBounds, "SphereVDomainOutOfBounds"))                   \
@@ -148,13 +170,20 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((degenerateEdge, "DegenerateEdge"))                                       \
     /* BrepArrayEdgeCurveVertices */                                           \
     ((edgeCurveVertexMismatch, "EdgeCurveVertexMismatch"))                     \
+    ((nurbsEdgeEndpointVertexMismatch,                                         \
+      "NurbsEdgeEndpointVertexMismatch"))                                      \
     /* BrepArrayUvTrim */                                                      \
     ((uvTrimCurveOutsideFaceDomain, "UvTrimCurveOutsideFaceDomain"))           \
     ((fullPeriodFaceNoSeamEdgeuse, "FullPeriodFaceNoSeamEdgeuse"))             \
     ((fullPeriodFaceDomainNotAligned, "FullPeriodFaceDomainNotAligned"))       \
     ((uvLoopNotClosed, "UvLoopNotClosed"))                                     \
     ((zeroLengthUvTrimCurve, "ZeroLengthUvTrimCurve"))                         \
-    ((analyticPeriodicDomainOutOfBounds, "AnalyticPeriodicDomainOutOfBounds"))
+    ((analyticPeriodicDomainOutOfBounds, "AnalyticPeriodicDomainOutOfBounds")) \
+    /* BrepArrayGeomSubsets */                                                 \
+    ((geomSubsetIndexOutOfRange, "GeomSubsetIndexOutOfRange"))                 \
+    ((geomSubsetIndicesOverlap, "GeomSubsetIndicesOverlap"))                   \
+    ((geomSubsetMaterialBindingTargetMissing,                                  \
+      "GeomSubsetMaterialBindingTargetMissing"))
 
 /// \def USD_SOLID_VALIDATOR_NAME_TOKENS
 /// Tokens representing validator names. Note that for plugin provided

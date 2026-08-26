@@ -325,7 +325,7 @@ def Xform "World"
         uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
     }
 
-    # BA.062 (BrepArrayDataTypes): analytic geometry attributes authored with
+    # BA.061 (BrepArrayDataTypes): analytic geometry attributes authored with
     # the wrong value type. A production STEP->UsdSolid conversion authored
     # analytic axes/positions with wrong precision/role and scalar parameters
     # with the wrong scalar type; those "type" mistakes previously produced no
@@ -489,12 +489,13 @@ TestRegistration()
         UsdSolidValidatorNameTokens->brepArrayDegenerateEdges,
         UsdSolidValidatorNameTokens->brepArrayEdgeCurveVertices,
         UsdSolidValidatorNameTokens->brepArrayUvTrim,
+        UsdSolidValidatorNameTokens->brepArrayGeomSubsets,
     };
 
     const UsdValidationValidatorMetadataVector metadata
         = registry.GetValidatorMetadataForPlugin(
             _tokens->usdSolidValidatorsPlugin);
-    TF_AXIOM(metadata.size() == 19);
+    TF_AXIOM(metadata.size() == 20);
 
     std::set<TfToken> validatorNames;
     for (const UsdValidationValidatorMetadata &m : metadata) {
@@ -574,7 +575,7 @@ TestBrepArrayStructureNonFiniteTol()
 static void
 TestBrepArrayDataTypes()
 {
-    // BA.062: analytic geometry attribute types. A wrong-precision axis
+    // BA.061: analytic geometry attribute types. A wrong-precision axis
     // (float3[]) and a wrong scalar radius (float[]) must be flagged with
     // InvalidAttributeDataType; the conformant cylinder (using the accepted
     // point3d/vector3d role-aliases and double[]) must stay clean.
@@ -999,6 +1000,200 @@ TestBrepArrayCurveFrameTol()
     TF_AXIOM(_CountError(errors, ".AnalyticCurveAxisNotUnitLength") == 1);
 }
 
+static const std::string countsAndSubsetsContents = R"usda(#usda 1.0
+(
+    defaultPrim = "World"
+)
+def Xform "World"
+{
+    def Scope "Materials"
+    {
+        def Material "Red"
+        {
+        }
+    }
+
+    def BrepArray "CountsBelowMinimum"
+    {
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
+        uniform uint[] brep:regionCount = [0]
+        uniform uint[] region:shellCount = [0]
+        uniform uint[] shell:faceuseCount = [0]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] shell:pointType = ["none"]
+    }
+
+    def BrepArray "PointPositionSizes"
+    {
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
+        uniform uint[] brep:regionCount = [1]
+        uniform uint[] region:shellCount = [1]
+        uniform uint[] shell:faceuseCount = [2]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] shell:pointType = ["BrepPointAPI"]
+        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (1, 0, 0)]
+    }
+
+    def BrepArray "WireEdgeRangeStructure"
+    {
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
+        uniform uint[] brep:regionCount = [1]
+        uniform uint[] region:shellCount = [1]
+        uniform uint[] shell:faceuseCount = [2]
+        uniform uint[] shell:wireEdgeCount = [1]
+        uniform token[] shell:pointType = ["none"]
+        uniform double[] wireEdge:range = [0, 1, 0]
+    }
+
+    def BrepArray "GeomSubsetsBad"
+    {
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
+        uniform uint[] brep:regionCount = [1]
+        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI"]
+
+        def GeomSubset "outOfRange"
+        {
+            uniform token elementType = "face"
+            int[] indices = [0, 7]
+        }
+
+        def GeomSubset "overlapA"
+        {
+            uniform token elementType = "face"
+            int[] indices = [1]
+        }
+
+        def GeomSubset "overlapB"
+        {
+            uniform token elementType = "face"
+            int[] indices = [1]
+        }
+
+        def GeomSubset "danglingMaterial"
+        {
+            uniform token elementType = "face"
+            int[] indices = [2]
+            rel material:binding = </World/Materials/Missing>
+        }
+    }
+
+    def BrepArray "GeomSubsetsGood"
+    {
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
+        uniform uint[] brep:regionCount = [1]
+        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI"]
+
+        def GeomSubset "facesA"
+        {
+            uniform token elementType = "face"
+            int[] indices = [0, 1]
+            rel material:binding = </World/Materials/Red>
+        }
+
+        def GeomSubset "facesB"
+        {
+            uniform token elementType = "face"
+            int[] indices = [2]
+            rel material:binding = </World/Materials/Red>
+        }
+
+        def GeomSubset "wholeBrep"
+        {
+            uniform token elementType = "brep"
+            int[] indices = [0]
+            rel material:binding = </World/Materials/Red>
+        }
+    }
+}
+)usda";
+
+static void
+TestBrepArrayMinimumCountsAndSizes()
+{
+    // BA.270 / BA.295 / BA.320 / BA.325 / BA.700 / BA.701 / BA.702.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayStructure);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(countsAndSubsetsContents);
+
+    {
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/CountsBelowMinimum"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountError(errors, ".RegionCountBelowMinimum") == 1);
+        TF_AXIOM(_CountError(errors, ".RegionShellCountBelowMinimum") == 1);
+        TF_AXIOM(_CountError(errors, ".ShellWithoutContent") == 1);
+    }
+
+    {
+        // vertex:pointType holds 3 entries where edge:vertexIndices reaches
+        // vertex 3, the position array holds 2 of the 3 BrepPointAPI vertices,
+        // and the BrepPointAPI shell has no shellPoint position at all.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/PointPositionSizes"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountError(errors, ".VertexArraySizeMismatch") == 1);
+        TF_AXIOM(_CountError(errors, ".VertexPointPositionSizeMismatch") == 1);
+        TF_AXIOM(_CountError(errors, ".ShellPointPositionSizeMismatch") == 1);
+        TF_AXIOM(!_HasError(errors, ".RegionCountBelowMinimum"));
+        TF_AXIOM(!_HasError(errors, ".ShellWithoutContent"));
+    }
+
+    {
+        // One wire edge asks for a 2-element wireEdge:range; 3 are authored.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/WireEdgeRangeStructure"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountError(errors, ".InvalidWireEdgeRangeStructure") == 1);
+    }
+}
+
+static void
+TestBrepArrayGeomSubsets()
+{
+    // BA.680 / BA.681 / BA.682.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayGeomSubsets);
+    TF_AXIOM(validator);
+
+    UsdStageRefPtr stage = _OpenLayer(countsAndSubsetsContents);
+
+    {
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/GeomSubsetsBad"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountError(errors, ".GeomSubsetIndexOutOfRange") == 1);
+        TF_AXIOM(_CountError(errors, ".GeomSubsetIndicesOverlap") == 1);
+        TF_AXIOM(
+            _CountError(errors, ".GeomSubsetMaterialBindingTargetMissing")
+            == 1);
+    }
+
+    {
+        // Two disjoint face subsets and one brep subset, all bound to a
+        // material that is on the stage.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/GeomSubsetsGood"));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(errors.empty());
+    }
+}
+
 int
 main()
 {
@@ -1023,6 +1218,8 @@ main()
     TestBrepArrayUnauthoredTolFallback();
     TestBrepArrayContainmentFloatSlop();
     TestBrepArrayCurveFrameTol();
+    TestBrepArrayMinimumCountsAndSizes();
+    TestBrepArrayGeomSubsets();
 
     std::cout << "OK\n";
     return EXIT_SUCCESS;
