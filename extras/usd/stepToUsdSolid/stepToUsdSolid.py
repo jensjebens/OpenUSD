@@ -407,6 +407,20 @@ def bspline_curve(rd, ref):
 def _bump(a, b):
     return (a, b) if b > a + 1e-12 else (a, a + 2*math.pi)
 
+def _primary_period(a0, a1):
+    """Shift an angular (start, end) pair by whole periods so the end lands in
+    the primary period (0, 2*pi], which is what BA.630 requires of a circle or
+    ellipse edge:range max.
+
+    math.atan2 returns (-pi, pi], so a half of every circle STEP describes comes
+    out with a negative parameter. Shifting by a whole period is exact for a
+    circle and leaves the span unchanged. The start may stay negative: that is
+    how an arc crossing the seam is expressed, and the requirement bounds only
+    the max."""
+    two = 2 * math.pi
+    k = math.ceil(a1 / two) - 1
+    return (a0 - k * two, a1 - k * two)
+
 def _ellipse_edge_range(cg, ps, pe):
     """Eccentric-angle range for an ELLIPSE edge (OCCT Geom_Ellipse param, what the
     validator inverts). Returns (t0,t1) with t1>t0."""
@@ -418,7 +432,7 @@ def _ellipse_edge_range(cg, ps, pe):
     a0, a1 = ecc(ps), ecc(pe)
     if a1 <= a0 + 1e-12:
         a1 += 2 * math.pi
-    return (a0, a1)
+    return _primary_period(a0, a1)
 
 def edge_range(ctok, cg, ps, pe):
     if ctok == "BrepCurve3dLineAPI":
@@ -427,12 +441,12 @@ def edge_range(ctok, cg, ps, pe):
         return _bump(min(ts, te), max(ts, te))
     if ctok == "BrepCurve3dEllipseAPI":
         return _ellipse_edge_range(cg, ps, pe)
-    if ctok in ("BrepCurve3dCircleAPI", "BrepCurve3dEllipseAPI"):
+    if ctok == "BrepCurve3dCircleAPI":
         c, ax, u = cg["center"], cg["axis"], cg["refDirection"]; v = vcross(ax, u)
         ang = lambda p: math.atan2(vdot(vsub(p, c), v), vdot(vsub(p, c), u))
         a0, a1 = ang(ps), ang(pe)
         if a1 <= a0: a1 += 2*math.pi
-        return _bump(a0, a1)
+        return _primary_period(*_bump(a0, a1))
     if cg.get("nurb"):
         return (cg["knots"][0], cg["knots"][-1])
     return (0.0, 1.0)
@@ -634,7 +648,19 @@ def _pad(lo, hi, natural, frac=0.02, absmin=1e-4):
     return lo, hi
 
 def _pad_angular(lo, hi):
-    lo, hi = _pad(lo, hi, None); span = hi - lo
+    """Widen a periodic-direction window, without pushing it out of the primary
+    period.
+
+    The padding exists so a face is not trimmed exactly through its boundary
+    vertices. A window that ends at the seam has nothing to gain from it there
+    and everything to lose: 2% of the span past 2*pi turns a window that sits
+    inside the period into one that appears to straddle the seam. On the
+    Toolbox sample that accounted for 130 of the 139 out-of-period windows
+    BA.631 and BA.765 reported. Clamp when the unpadded window is inside the
+    period; a window that genuinely straddles the seam is left alone."""
+    natural = ((0.0, _TWO_PI)
+               if (lo >= -1e-9 and hi <= _TWO_PI + 1e-9) else None)
+    lo, hi = _pad(lo, hi, natural); span = hi - lo
     if span >= _TWO_PI - 1e-4: return 0.0, _TWO_PI
     return lo, hi
 
