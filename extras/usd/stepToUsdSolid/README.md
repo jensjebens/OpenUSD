@@ -52,14 +52,9 @@ test assets, not a production STEP exporter.
   UsdSolid` resolves and `BrepArray` is a registered type.
 - No third-party Python packages: the STEP reader uses only the standard library.
 
-## Sample
-
-`samples/toolbox.step` is a small toolbox part (a SolidWorks export, 7 solids,
-1.7 MB) you can run the tool on directly.
-
 ## Round trip
 
 ```
-python stepToUsdSolid.py samples/toolbox.step toolbox.usdc   # STEP -> UsdSolid B-rep
-usdsolidtessellate toolbox.usdc toolbox_mesh.usdc            # UsdSolid B-rep -> Mesh (usdSolidTessellator)
+python stepToUsdSolid.py part.step part.usdc   # STEP -> UsdSolid B-rep
+usdsolidtessellate part.usdc part_mesh.usdc    # UsdSolid B-rep -> Mesh (usdSolidTessellator)
 ```
