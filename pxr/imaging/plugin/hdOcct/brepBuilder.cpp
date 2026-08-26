@@ -2168,8 +2168,27 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         const double* wt = data.trimCurveWeights.empty()
                             ? nullptr
                             : data.trimCurveWeights.cdata() + trimCPOff[euIdx];
+                        // The schema authors a cone's v as AXIAL distance
+                        // along the axis; OCCT's Geom_ConicalSurface measures
+                        // v as SLANT distance along the generator. face:range
+                        // is converted where it is read, but the authored
+                        // pcurve control vertices live in the same surface
+                        // parameter space and need the same conversion, or the
+                        // trim sits at v*cos(semiAngle) instead of v. On
+                        // testCone that trimmed the cone to 0.894 of its
+                        // height: 219.2 against a true area of 254.2.
+                        std::vector<GfVec2d> cpConv;
+                        const GfVec2d* cpUse = cp;
+                        if (!Handle(Geom_ConicalSurface)::DownCast(surface)
+                                 .IsNull()) {
+                            cpConv.assign(cp, cp + tvc);
+                            for (GfVec2d& q : cpConv) {
+                                q[1] = _ConeAxialToSlantV(surface, q[1]);
+                            }
+                            cpUse = cpConv.data();
+                        }
                         auto c2d = _MakeBSplineCurve2d(
-                            cp, tvc, tord, kn, tvc + tord, wt, wt ? tvc : 0);
+                            cpUse, tvc, tord, kn, tvc + tord, wt, wt ? tvc : 0);
                         if (!c2d.IsNull()) {
                             double t0 = kn[0];
                             double t1 = kn[tvc + tord - 1];
