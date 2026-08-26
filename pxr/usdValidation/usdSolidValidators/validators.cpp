@@ -58,7 +58,8 @@ constexpr double _HalfPi = 1.5707963267948966;
 // authors no positive brep:intersectTol3d. Real CAD producers carry positional
 // noise on the order of a micron (STEP files commonly declare uncertainty
 // ~1e-6..1e-5 model units), so the older 1e-9 default was tighter than any real
-// producer and turned benign endpoint/degeneracy noise into systematic BA.230 /
+// producer and turned benign endpoint/degeneracy noise into systematic
+// proposal-381 /
 // proposal-434 false positives on float-pathed real files. 1e-6 is the reader-side
 // analogue of the builder's weld floor policy max(1e-4, 10*tol) in
 // brepBuilder.cpp: both express "how far apart two points may be before we treat
@@ -88,7 +89,8 @@ _Read(const UsdAttribute &attr)
 }
 
 // The first authored, finite, positive brep:intersectTol3d, or the reader-side
-// _FallbackIntersectTol3d. Centralizes the fallback expression that BA.230,
+// _FallbackIntersectTol3d. Centralizes the fallback expression that
+// proposal-381,
 // proposal-434 and BA.375 all need (previously
 // "(!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9" copy-pasted at three sites,
 // each with the fallback magnitude unexplained). A per-Brep tolerance would need
@@ -114,18 +116,23 @@ _Sum(const VtArray<unsigned int> &values)
     return sum;
 }
 
+// Each stratum's array-size requirement has its own rule number, so the rule is
+// a parameter rather than a property of this helper: region sizes are BA.065,
+// shells BA.080, faceuses BA.100, faces BA.120, face:range BA.150, loops
+// BA.165, edgeuses BA.180, edges BA.210, edge:range BA.230, wire edges BA.250
+// and wireEdge:range BA.270.
 void
-_CheckSize(const UsdPrim &prim, const char *attrName, size_t actual,
-           size_t expected, const std::string &expectedDesc,
+_CheckSize(const UsdPrim &prim, const char *rule, const char *attrName,
+           size_t actual, size_t expected, const std::string &expectedDesc,
            const TfToken &errorName, UsdValidationErrorVector *errors)
 {
     if (actual != expected) {
         errors->emplace_back(
             errorName, UsdValidationErrorType::Error, _PrimSites(prim),
             TfStringPrintf(
-                "BrepArray <%s>: attribute %s has size %zu but expected %zu "
-                "(%s).",
-                prim.GetPath().GetText(), attrName, actual, expected,
+                "[%s] BrepArray <%s>: attribute %s has size %zu but expected "
+                "%zu (%s).",
+                rule, prim.GetPath().GetText(), attrName, actual, expected,
                 expectedDesc.c_str()));
     }
 }
@@ -285,7 +292,8 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
             UsdSolidValidationErrorNameTokens->missingBrepAttributes,
             UsdValidationErrorType::Error, _PrimSites(usdPrim),
             TfStringPrintf(
-                "BrepArray <%s> is missing required brep attribute(s): %s.",
+                "[BA.005] BrepArray <%s> is missing required brep "
+                "attribute(s): %s.",
                 usdPrim.GetPath().GetText(),
                 TfStringJoin(missing, ", ").c_str()));
     }
@@ -298,25 +306,37 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
     // BA.000 / BA.020: array sizes must be consistent with the number of
     // Breps. brep:regionCount and brep:intersectTol3d have one entry per Brep;
     // brep:extent has two (min, max corner) entries per Brep.
+    // BA.000 covers the one-entry-per-Brep attributes; BA.020 covers
+    // brep:extent's two-corners-per-Brep structure. They are separate
+    // requirements, so they report separately.
     const size_t numBreps = regionCount.size();
-    if (tol.size() != numBreps || extent.size() != 2 * numBreps) {
+    if (tol.size() != numBreps) {
         errors.emplace_back(
             UsdSolidValidationErrorNameTokens->inconsistentBrepArraySizes,
             UsdValidationErrorType::Error, _PrimSites(usdPrim),
             TfStringPrintf(
-                "BrepArray <%s>: brep-level array sizes are inconsistent. For "
-                "%zu Brep(s) (brep:regionCount size), expected "
-                "brep:intersectTol3d size %zu (got %zu) and brep:extent size "
-                "%zu (got %zu).",
-                usdPrim.GetPath().GetText(), numBreps, numBreps, tol.size(),
-                2 * numBreps, extent.size()));
+                "[BA.000] BrepArray <%s>: for %zu Brep(s) (brep:regionCount "
+                "size), expected brep:intersectTol3d size %zu but got %zu.",
+                usdPrim.GetPath().GetText(), numBreps, numBreps, tol.size()));
+    }
+    if (extent.size() != 2 * numBreps) {
+        errors.emplace_back(
+            UsdSolidValidationErrorNameTokens->inconsistentBrepArraySizes,
+            UsdValidationErrorType::Error, _PrimSites(usdPrim),
+            TfStringPrintf(
+                "[BA.020] BrepArray <%s>: for %zu Brep(s) (brep:regionCount "
+                "size), expected brep:extent size %zu (two corners per Brep) "
+                "but got %zu.",
+                usdPrim.GetPath().GetText(), numBreps, 2 * numBreps,
+                extent.size()));
     }
 
     // BA.010: brep:intersectTol3d values must be positive and finite. A
     // non-finite tolerance (NaN/Inf) silently breaks every tolerance-based rule
     // downstream: NaN fails every comparison (so an authored NaN slips past the
     // <= 0.0 test here), and the shared tolerance resolution
-    // (_FirstAuthoredIntersectTol3d, used by BA.230/240/375) would carry a
+    // (_FirstAuthoredIntersectTol3d, used by proposal-381/434 and BA.375)
+    // would carry a
     // poisoned tolerance into endpoint/degeneracy checks -- which is why that
     // helper additionally requires std::isfinite before accepting the authored
     // value. Flag the finiteness violation
@@ -328,8 +348,8 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
                 UsdSolidValidationErrorNameTokens->nonFiniteIntersectTol3d,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: brep:intersectTol3d[%zu] = %g is not "
-                    "finite; the intersection tolerance must be a finite "
+                    "[BA.010] BrepArray <%s>: brep:intersectTol3d[%zu] = %g "
+                    "is not finite; the intersection tolerance must be a finite "
                     "positive number.",
                     usdPrim.GetPath().GetText(), i, tol[i]));
         } else if (tol[i] <= 0.0) {
@@ -337,15 +357,17 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
                 UsdSolidValidationErrorNameTokens->nonPositiveIntersectTol3d,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: brep:intersectTol3d[%zu] = %g is not "
-                    "positive.",
+                    "[BA.010] BrepArray <%s>: brep:intersectTol3d[%zu] = %g "
+                    "is not positive.",
                     usdPrim.GetPath().GetText(), i, tol[i]));
         }
     }
 
     // BA.025 / BA.030 / BA.035: each brep:extent bounding box corner pair must
-    // be ordered min <= max on every axis.
+    // be ordered min <= max on every axis. One requirement per axis:
+    // X is BA.025, Y is BA.030, Z is BA.035.
     const char *const axisNames[3] = { "X", "Y", "Z" };
+    const char *const axisRules[3] = { "BA.025", "BA.030", "BA.035" };
     for (size_t box = 0; 2 * box + 1 < extent.size(); ++box) {
         const GfVec3d &mn = extent[2 * box];
         const GfVec3d &mx = extent[2 * box + 1];
@@ -355,9 +377,10 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
                     UsdSolidValidationErrorNameTokens->invalidExtentOrder,
                     UsdValidationErrorType::Error, _PrimSites(usdPrim),
                     TfStringPrintf(
-                        "BrepArray <%s>: brep:extent for Brep %zu has %smin "
-                        "(%g) > %smax (%g).",
-                        usdPrim.GetPath().GetText(), box, axisNames[a],
+                        "[%s] BrepArray <%s>: brep:extent for Brep %zu has "
+                        "%smin (%g) > %smax (%g).",
+                        axisRules[a], usdPrim.GetPath().GetText(), box,
+                        axisNames[a],
                         mn[a], axisNames[a], mx[a]));
             }
         }
@@ -738,11 +761,11 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
         = _Read<TfToken>(brep.GetRegionTypeAttr());
     const std::string regionsDesc
         = TfStringPrintf("sum of brep:regionCount = %zu", numRegions);
-    _CheckSize(usdPrim, "region:shellCount", regionShellCount.size(),
+    _CheckSize(usdPrim, "BA.065", "region:shellCount", regionShellCount.size(),
                numRegions, regionsDesc,
                UsdSolidValidationErrorNameTokens->inconsistentRegionArraySizes,
                &errors);
-    _CheckSize(usdPrim, "region:type", regionType.size(), numRegions,
+    _CheckSize(usdPrim, "BA.065", "region:type", regionType.size(), numRegions,
                regionsDesc,
                UsdSolidValidationErrorNameTokens->inconsistentRegionArraySizes,
                &errors);
@@ -757,15 +780,15 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
         = _Read<TfToken>(brep.GetShellPointTypeAttr());
     const std::string shellsDesc
         = TfStringPrintf("sum of region:shellCount = %zu", numShells);
-    _CheckSize(usdPrim, "shell:faceuseCount", shellFaceuseCount.size(),
+    _CheckSize(usdPrim, "BA.080", "shell:faceuseCount", shellFaceuseCount.size(),
                numShells, shellsDesc,
                UsdSolidValidationErrorNameTokens->inconsistentShellArraySizes,
                &errors);
-    _CheckSize(usdPrim, "shell:wireEdgeCount", shellWireEdgeCount.size(),
+    _CheckSize(usdPrim, "BA.080", "shell:wireEdgeCount", shellWireEdgeCount.size(),
                numShells, shellsDesc,
                UsdSolidValidationErrorNameTokens->inconsistentShellArraySizes,
                &errors);
-    _CheckSize(usdPrim, "shell:pointType", shellPointType.size(), numShells,
+    _CheckSize(usdPrim, "BA.080", "shell:pointType", shellPointType.size(), numShells,
                shellsDesc,
                UsdSolidValidationErrorNameTokens->inconsistentShellArraySizes,
                &errors);
@@ -778,12 +801,12 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
         = _Read<TfToken>(brep.GetFaceuseOrientationTypeAttr());
     const std::string faceusesDesc
         = TfStringPrintf("sum of shell:faceuseCount = %zu", numFaceuses);
-    _CheckSize(usdPrim, "faceuse:faceIndex", faceuseFaceIndex.size(),
+    _CheckSize(usdPrim, "BA.100", "faceuse:faceIndex", faceuseFaceIndex.size(),
                numFaceuses, faceusesDesc,
                UsdSolidValidationErrorNameTokens
                    ->inconsistentFaceuseArraySizes,
                &errors);
-    _CheckSize(usdPrim, "faceuse:orientationType",
+    _CheckSize(usdPrim, "BA.100", "faceuse:orientationType",
                faceuseOrientationType.size(), numFaceuses, faceusesDesc,
                UsdSolidValidationErrorNameTokens
                    ->inconsistentFaceuseArraySizes,
@@ -802,19 +825,19 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
     const VtArray<GfVec2d> faceRange = _Read<GfVec2d>(brep.GetFaceRangeAttr());
     const std::string facesDesc
         = TfStringPrintf("faceuse count / 2 = %zu", numFaces);
-    _CheckSize(usdPrim, "face:loopCount", faceLoopCount.size(), numFaces,
+    _CheckSize(usdPrim, "BA.120", "face:loopCount", faceLoopCount.size(), numFaces,
                facesDesc,
                UsdSolidValidationErrorNameTokens->inconsistentFaceArraySizes,
                &errors);
-    _CheckSize(usdPrim, "face:surfaceType", faceSurfaceType.size(), numFaces,
+    _CheckSize(usdPrim, "BA.120", "face:surfaceType", faceSurfaceType.size(), numFaces,
                facesDesc,
                UsdSolidValidationErrorNameTokens->inconsistentFaceArraySizes,
                &errors);
-    _CheckSize(usdPrim, "face:trimType", faceTrimType.size(), numFaces,
+    _CheckSize(usdPrim, "BA.120", "face:trimType", faceTrimType.size(), numFaces,
                facesDesc,
                UsdSolidValidationErrorNameTokens->inconsistentFaceArraySizes,
                &errors);
-    _CheckSize(usdPrim, "face:range", faceRange.size(), 2 * numFaces,
+    _CheckSize(usdPrim, "BA.150", "face:range", faceRange.size(), 2 * numFaces,
                TfStringPrintf("2 * number of faces = %zu", 2 * numFaces),
                UsdSolidValidationErrorNameTokens->inconsistentFaceArraySizes,
                &errors);
@@ -827,11 +850,11 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
         = _Read<unsigned int>(brep.GetLoopVertexIndexAttr());
     const std::string loopsDesc
         = TfStringPrintf("sum of face:loopCount = %zu", numLoops);
-    _CheckSize(usdPrim, "loop:edgeuseCount", loopEdgeuseCount.size(), numLoops,
+    _CheckSize(usdPrim, "BA.165", "loop:edgeuseCount", loopEdgeuseCount.size(), numLoops,
                loopsDesc,
                UsdSolidValidationErrorNameTokens->inconsistentLoopArraySizes,
                &errors);
-    _CheckSize(usdPrim, "loop:vertexIndex", loopVertexIndex.size(), numLoops,
+    _CheckSize(usdPrim, "BA.165", "loop:vertexIndex", loopVertexIndex.size(), numLoops,
                loopsDesc,
                UsdSolidValidationErrorNameTokens->inconsistentLoopArraySizes,
                &errors);
@@ -840,26 +863,26 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
     const size_t numEdgeuses = _Sum(loopEdgeuseCount);
     const std::string edgeusesDesc
         = TfStringPrintf("sum of loop:edgeuseCount = %zu", numEdgeuses);
-    _CheckSize(usdPrim, "edgeuse:edgeIndex",
+    _CheckSize(usdPrim, "BA.180", "edgeuse:edgeIndex",
                _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr()).size(),
                numEdgeuses, edgeusesDesc,
                UsdSolidValidationErrorNameTokens
                    ->inconsistentEdgeuseArraySizes,
                &errors);
-    _CheckSize(usdPrim, "edgeuse:orientationType",
+    _CheckSize(usdPrim, "BA.180", "edgeuse:orientationType",
                _Read<TfToken>(brep.GetEdgeuseOrientationTypeAttr()).size(),
                numEdgeuses, edgeusesDesc,
                UsdSolidValidationErrorNameTokens
                    ->inconsistentEdgeuseArraySizes,
                &errors);
-    _CheckSize(usdPrim, "edgeuse:nextRadialEUIndex",
+    _CheckSize(usdPrim, "BA.180", "edgeuse:nextRadialEUIndex",
                _Read<unsigned int>(
                    brep.GetEdgeuseNextRadialEUIndexAttr()).size(),
                numEdgeuses, edgeusesDesc,
                UsdSolidValidationErrorNameTokens
                    ->inconsistentEdgeuseArraySizes,
                &errors);
-    _CheckSize(usdPrim, "edgeuse:thisRadialEntryType",
+    _CheckSize(usdPrim, "BA.180", "edgeuse:thisRadialEntryType",
                _Read<TfToken>(
                    brep.GetEdgeuseThisRadialEntryTypeAttr()).size(),
                numEdgeuses, edgeusesDesc,
@@ -873,13 +896,13 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
     const VtArray<TfToken> edgeCurveType
         = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
     const size_t numEdges = edgeCurveType.size();
-    _CheckSize(usdPrim, "edge:vertexIndices",
+    _CheckSize(usdPrim, "BA.210", "edge:vertexIndices",
                _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()).size(),
                numEdges,
                TfStringPrintf("number of edges = %zu", numEdges),
                UsdSolidValidationErrorNameTokens->inconsistentEdgeArraySizes,
                &errors);
-    _CheckSize(usdPrim, "edge:range",
+    _CheckSize(usdPrim, "BA.230", "edge:range",
                _Read<double>(brep.GetEdgeRangeAttr()).size(), 2 * numEdges,
                TfStringPrintf("2 * number of edges = %zu", 2 * numEdges),
                UsdSolidValidationErrorNameTokens->inconsistentEdgeArraySizes,
@@ -889,26 +912,20 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
     const size_t numWireEdges = _Sum(shellWireEdgeCount);
     const std::string wireEdgesDesc
         = TfStringPrintf("sum of shell:wireEdgeCount = %zu", numWireEdges);
-    _CheckSize(usdPrim, "wireEdge:curveType",
+    _CheckSize(usdPrim, "BA.250", "wireEdge:curveType",
                _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr()).size(),
                numWireEdges, wireEdgesDesc,
                UsdSolidValidationErrorNameTokens
                    ->inconsistentWireEdgeArraySizes,
                &errors);
-    _CheckSize(usdPrim, "wireEdge:vertexIndices",
+    _CheckSize(usdPrim, "BA.250", "wireEdge:vertexIndices",
                _Read<GfVec2i>(brep.GetWireEdgeVertexIndicesAttr()).size(),
                numWireEdges, wireEdgesDesc,
                UsdSolidValidationErrorNameTokens
                    ->inconsistentWireEdgeArraySizes,
                &errors);
-    _CheckSize(usdPrim, "wireEdge:range",
-               _Read<double>(brep.GetWireEdgeRangeAttr()).size(),
-               2 * numWireEdges,
-               TfStringPrintf("2 * sum of shell:wireEdgeCount = %zu",
-                              2 * numWireEdges),
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentWireEdgeArraySizes,
-               &errors);
+    // wireEdge:range's two-per-edge structure is BA.270, reported by
+    // BrepArrayStructure; checking it again here would double-report.
 
     // BA.670: edgeuse:nextRadialEUIndex must form per-Brep radial chains whose
     // members all name one edge, and each edge's edgeuses must share one chain.
@@ -1043,7 +1060,7 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
                 UsdSolidValidationErrorNameTokens->invalidFaceLoopCount,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: face:loopCount[%zu] = 0; each face must "
+                    "[BA.140] BrepArray <%s>: face:loopCount[%zu] = 0; each face must "
                     "have at least one loop.",
                     usdPrim.GetPath().GetText(), i));
         }
@@ -1060,7 +1077,8 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
                 UsdSolidValidationErrorNameTokens->degenerateFaceURange,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: face:range for face %zu has degenerate U "
+                    "[BA.155] BrepArray <%s>: face:range for face %zu has "
+                    "degenerate U "
                     "interval (Umin %g >= Umax %g).",
                     usdPrim.GetPath().GetText(), face, uvMin[0], uvMax[0]));
         }
@@ -1069,7 +1087,8 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
                 UsdSolidValidationErrorNameTokens->degenerateFaceVRange,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: face:range for face %zu has degenerate V "
+                    "[BA.160] BrepArray <%s>: face:range for face %zu has "
+                    "degenerate V "
                     "interval (Vmin %g >= Vmax %g).",
                     usdPrim.GetPath().GetText(), face, uvMin[1], uvMax[1]));
         }
@@ -1083,7 +1102,7 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
                 UsdSolidValidationErrorNameTokens->invalidEdgeRangeOrder,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: edge:range for edge %zu is not ordered "
+                    "[BA.235] BrepArray <%s>: edge:range for edge %zu is not ordered "
                     "(min %g > max %g).",
                     usdPrim.GetPath().GetText(), edge, edgeRange[2 * edge],
                     edgeRange[2 * edge + 1]));
@@ -1099,7 +1118,7 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
                 UsdSolidValidationErrorNameTokens->invalidWireEdgeRangeOrder,
                 UsdValidationErrorType::Error, _PrimSites(usdPrim),
                 TfStringPrintf(
-                    "BrepArray <%s>: wireEdge:range for wireEdge %zu is not "
+                    "[BA.275] BrepArray <%s>: wireEdge:range for wireEdge %zu is not "
                     "ordered (min %g > max %g).",
                     usdPrim.GetPath().GetText(), edge,
                     wireEdgeRange[2 * edge], wireEdgeRange[2 * edge + 1]));
@@ -2707,7 +2726,8 @@ _BrepArrayCompleteness(const UsdPrim &usdPrim,
 // full-circle rim or a seam ring, e.g. at the corner singularities of a
 // filleted solid) are exempt from the shared-edge count: they are full-length
 // legal edges, NOT rule-381 degenerate edges. Zero-length (degenerate) edges
-// are never exempted anywhere -- BA.230 (_BrepArrayDegenerateEdges) flags them
+// are never exempted anywhere -- proposal-381 (_BrepArrayDegenerateEdges)
+// flags them
 // as errors, measured against brep:intersectTol3d per proposal rule 381.
 // (BA.590/BA.591 are new checks; reconcile numbering with brep_validator.py.)
 UsdValidationErrorVector
@@ -2813,7 +2833,7 @@ _BrepArraySolidClosure(const UsdPrim &usdPrim,
             // or seam ring) is a legal single-use seam on a closed analytic
             // patch; exempt it from the shared-edge count. This is NOT a
             // rule-381 degenerate (zero-length) edge -- those are errors,
-            // flagged by BA.230.
+            // flagged by proposal-381.
             if (e < edgeVtx.size() && edgeVtx[e][0] == edgeVtx[e][1]) {
                 continue;
             }
@@ -3050,7 +3070,13 @@ _ResolveEdgeGeom(const UsdPrim &prim, const UsdSolidBrepArray &brep, bool wire)
 // previously used a hard-coded 1e-4 curve epsilon while the NURBS branch used
 // the Brep tolerance, so the same physical gap was called degenerate on one
 // curve family and healthy on another (register row 13). Both edge3d* and
-// wireEdge3d* instances are checked. (BA.230.)
+// wireEdge3d* instances are checked.
+//
+// Like the proposal-434 check below, this has no allocated requirement
+// number: it was written against proposal rule 381 and carried a "BA.230"
+// tag, but BA.230 is brep-edge-range-per-edge-structure, an unrelated size
+// rule implemented in BrepArrayStructure. It reports as [proposal-381]
+// until a number is allocated.
 UsdValidationErrorVector
 _BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
                           const UsdValidationTimeRange & /*timeRange*/)
@@ -3102,7 +3128,8 @@ _BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
                 _Err(&errors,
                      UsdSolidValidationErrorNameTokens->degenerateEdge, usdPrim,
                      TfStringPrintf(
-                         "[BA.230] BrepArray <%s>: %s %zu is degenerate (its 3D "
+                         "[proposal-381] BrepArray <%s>: %s %zu is degenerate "
+                         "(its 3D "
                          "curve has no extent within brep:intersectTol3d = %g; "
                          "%s). Degenerate geometry is not allowed (proposal rule "
                          "381).",
@@ -3130,7 +3157,7 @@ _BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
 // reversed edge whose curve start actually lands on the "end" vertex. Distances
 // are measured against brep:intersectTol3d. Degenerate edges (start vertex ==
 // end vertex) are exempt: their two endpoints coincide, so orientation is
-// meaningless (and rule 381 / BA.230 already reports them).
+// meaningless (and proposal-381 already reports them).
 //
 // This check has no allocated requirement number. It was written against
 // proposal rule 434 directly and carried a "BA.240" tag that the requirement
@@ -3187,7 +3214,7 @@ _BrepArrayEdgeCurveVertices(const UsdPrim &usdPrim,
                 continue;   // out-of-range indices are reported by References.
             }
             if (vs == ve) {
-                continue;   // degenerate edge: exempt (see BA.230).
+                continue;   // degenerate edge: exempt (see proposal-381).
             }
             const GfVec3d &pStart = vpos[vs];
             const GfVec3d &pEnd = vpos[ve];
