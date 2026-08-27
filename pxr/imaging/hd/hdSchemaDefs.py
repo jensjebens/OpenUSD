@@ -350,6 +350,28 @@
     ),
 
     #--------------------------------------------------------------------------
+    # purposeVisibility
+    dict(
+        SCHEMA_NAME = 'PurposeVisibility',
+        SCHEMA_TOKEN = 'purposeVisibility',
+        MEMBERS = [
+            ('guideVisibility', T_TOKEN, {}),
+            ('proxyVisibility', T_TOKEN, {}),
+            ('renderVisibility', T_TOKEN, {}),
+        ],
+        ADD_DEFAULT_LOCATOR = True,
+        DOC = '''
+                Per-purpose visibility, modelled after UsdGeomVisibilityAPI.
+                Each member takes "inherited", "visible" or "invisible", and
+                gates prims whose purpose matches that member. A prim is drawn
+                when its visibility is visible and the member matching its
+                purpose does not resolve to invisible; "inherited" defers to
+                the renderer, which is what makes these subtractive only.
+                Values are inherited down namespace by
+                HdFlattenedPurposeVisibilityDataSourceProvider.'''
+    ),
+
+    #--------------------------------------------------------------------------
     # purpose
     dict(
         SCHEMA_NAME = 'Purpose',

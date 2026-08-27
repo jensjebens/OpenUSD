@@ -86,6 +86,7 @@ pxr_library(hd
         flattenedOverlayDataSourceProvider
         flattenedPrimvarsDataSourceProvider
         flattenedPurposeDataSourceProvider
+        flattenedPurposeVisibilityDataSourceProvider
         flattenedVisibilityDataSourceProvider
         flattenedXformDataSourceProvider
         flatteningSceneIndex
@@ -152,6 +153,7 @@ pxr_library(hd
         primvarSchema
         primvarsSchema
         purposeSchema
+        purposeVisibilitySchema
         renderBuffer
         renderBufferSchema
         renderCapabilitiesSchema
