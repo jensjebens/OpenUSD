@@ -1387,6 +1387,168 @@ def derive_tolerance(rd, ents):
             unc = 1e-3; usrc = "fallback default"
     return max(5e-4, unc / 20.0), unc, usrc
 
+# ================================================================ assembly graph
+def _a2p_matrix(rd, ref):
+    """The 4x4 of an AXIS2_PLACEMENT_3D, columns (x, y, z, origin)."""
+    o, z, x = rd.placement(ref)
+    x = vnorm(vsub(x, tuple(vdot(x, z) * z[k] for k in range(3))))
+    y = vcross(z, x)
+    return (x, y, z, o)
+
+def _mat_mul(A, B):
+    """Compose two (x, y, z, origin) frames: apply B, then A."""
+    ax, ay, az, ao = A
+    def rot(v):
+        return tuple(ax[k]*v[0] + ay[k]*v[1] + az[k]*v[2] for k in range(3))
+    bx, by, bz, bo = B
+    ro = rot(bo)
+    return (rot(bx), rot(by), rot(bz), tuple(ao[k] + ro[k] for k in range(3)))
+
+_IDENTITY = ((1.0,0.0,0.0), (0.0,1.0,0.0), (0.0,0.0,1.0), (0.0,0.0,0.0))
+
+def _idt_matrix(rd, idt_ref):
+    """ITEM_DEFINED_TRANSFORMATION maps its first placement onto its second, so
+    the placement is `to * from^-1`."""
+    a = rd.args(idt_ref)
+    frames = [x for x in a if isinstance(x, tuple) and x[0] == "ref"
+              and rd.typ(x) == "AXIS2_PLACEMENT_3D"]
+    if len(frames) < 2:
+        return _IDENTITY
+    F = _a2p_matrix(rd, frames[0]); T = _a2p_matrix(rd, frames[1])
+    fx, fy, fz, fo = F
+    inv_rot = ((fx[0], fx[1], fx[2]), (fy[0], fy[1], fy[2]), (fz[0], fz[1], fz[2]))
+    inv_o = tuple(-(inv_rot[0][k]*fo[0] + inv_rot[1][k]*fo[1] + inv_rot[2][k]*fo[2])
+                  for k in range(3))
+    Finv = (tuple(inv_rot[k][0] for k in range(3)),
+            tuple(inv_rot[k][1] for k in range(3)),
+            tuple(inv_rot[k][2] for k in range(3)), inv_o)
+    return _mat_mul(T, Finv)
+
+def _complex_parts(rd, ref):
+    """The sub-entities of a complex instance, as {TYPE: args}."""
+    t = rd.get(ref)
+    if not t or t[0] != "__COMPLEX__":
+        return {}
+    return {name: args for name, args in t[1]}
+
+def assembly_placements(rd):
+    """Resolve NEXT_ASSEMBLY_USAGE_OCCURRENCE placements into a flat list of
+    (shape_representation_ref, name, matrix) with matrices composed down the
+    assembly tree.
+
+    The chain a SolidWorks AP214 export writes is
+
+        CONTEXT_DEPENDENT_SHAPE_REPRESENTATION( #rr, #pds )
+        #rr  =( REPRESENTATION_RELATIONSHIP( '', '', #child_sr, #parent_sr )
+                REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION( #idt )
+                SHAPE_REPRESENTATION_RELATIONSHIP( ) )
+        #pds =  PRODUCT_DEFINITION_SHAPE( '', '', #nauo )
+
+    Returns [] when the file has no assembly structure, which is the single-part
+    case and leaves the caller's flat path untouched."""
+    edges = []          # (parent_sr, child_sr, matrix, occurrence name)
+    for cd in rd.find("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"):
+        a = rd.args(("ref", cd))
+        rr = a[0] if a and isinstance(a[0], tuple) else None
+        pds = a[1] if len(a) > 1 and isinstance(a[1], tuple) else None
+        if rr is None:
+            continue
+        parts = _complex_parts(rd, rr)
+        rel = parts.get("REPRESENTATION_RELATIONSHIP")
+        wt = parts.get("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION")
+        if not rel or not wt:
+            continue
+        srs = [x for x in rel if isinstance(x, tuple) and x[0] == "ref"]
+        if len(srs) < 2:
+            continue
+        parent_sr, child_sr = srs[0], srs[1]
+        idt = next((x for x in wt if isinstance(x, tuple) and x[0] == "ref"), None)
+        M = _idt_matrix(rd, idt) if idt is not None else _IDENTITY
+        name = ""
+        if pds is not None:
+            nauo = next((x for x in rd.args(pds)
+                         if isinstance(x, tuple) and x[0] == "ref"
+                         and rd.typ(x) == "NEXT_ASSEMBLY_USAGE_OCCURRENCE"), None)
+            if nauo is not None:
+                pdrefs = [x for x in rd.args(nauo)
+                          if isinstance(x, tuple) and x[0] == "ref"]
+                if len(pdrefs) > 1:
+                    name = _product_name(rd, pdrefs[1])
+        edges.append((parent_sr[1], child_sr[1], M, name))
+    if not edges:
+        return []
+
+    children = {}
+    for parent, child, M, name in edges:
+        children.setdefault(parent, []).append((child, M, name))
+    all_children = {c for _, c, _, _ in edges}
+    roots = [p for p in children if p not in all_children]
+
+    out = []
+    def walk(sr, M, prefix):
+        kids = children.get(sr)
+        if not kids:
+            out.append((sr, prefix, M))
+            return
+        for child, Mc, name in kids:
+            label = name or f"part{len(out)}"
+            walk(child, _mat_mul(M, Mc), f"{prefix}___{label}" if prefix else label)
+    for r in roots:
+        walk(r, _IDENTITY, "")
+    return out
+
+def _product_name(rd, ref):
+    """The readable name behind a PRODUCT_DEFINITION, via PRODUCT_DEFINITION_FORMATION."""
+    seen = set()
+    stack = [ref]
+    while stack:
+        r = stack.pop()
+        if not isinstance(r, tuple) or r[1] in seen:
+            continue
+        seen.add(r[1])
+        t = rd.typ(r)
+        if t == "PRODUCT":
+            nm = rd.args(r)[1] if len(rd.args(r)) > 1 else ""
+            if isinstance(nm, str) and nm.strip():
+                return _sanitize(nm)
+        for x in rd.args(r):
+            if isinstance(x, tuple) and x[0] == "ref":
+                stack.append(x)
+    return ""
+
+def _sanitize(nm):
+    nm = "".join(c if (c.isalnum() or c == "_") else "_" for c in (nm or "")).strip("_")
+    return nm
+
+def solids_by_representation(rd):
+    """{shape_representation_ref: [solid_ref, ...]}. A part's geometry hangs off
+    an ADVANCED_BREP_SHAPE_REPRESENTATION; the assembly graph names the plain
+    SHAPE_REPRESENTATION, and SHAPE_REPRESENTATION_RELATIONSHIP joins the two."""
+    out = {}
+    for sr in rd.find("ADVANCED_BREP_SHAPE_REPRESENTATION", "SHAPE_REPRESENTATION"):
+        items = []
+        for x in rd.args(("ref", sr)):
+            if isinstance(x, tuple) and x[0] == "ref":
+                items.append(x[1])
+            elif isinstance(x, list):
+                items += [y[1] for y in x
+                          if isinstance(y, tuple) and y[0] == "ref"]
+        sol = [i for i in items
+               if rd.typ(("ref", i)) in ("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS")]
+        if sol:
+            out[sr] = sol
+    for rel in rd.find("SHAPE_REPRESENTATION_RELATIONSHIP"):
+        refs = [x[1] for x in rd.args(("ref", rel))
+                if isinstance(x, tuple) and x[0] == "ref"]
+        if len(refs) < 2:
+            continue
+        a, b = refs[0], refs[1]
+        if a in out and b not in out:
+            out[b] = out[a]
+        elif b in out and a not in out:
+            out[a] = out[b]
+    return out
+
 def solid_name(rd, solid_ref, i):
     nm = rd.args(("ref", solid_ref))[0]
     nm = "".join(c if (c.isalnum() or c == "_") else "_" for c in (nm or "")).strip("_")
@@ -1479,6 +1641,52 @@ def face_refs_for_solid(rd, solid):
     return refs
 
 # ================================================================ convert + CLI
+def _usd_matrix(M):
+    """A frame (x, y, z, origin) as a USD row-vector matrix4d."""
+    x, y, z, o = M
+    return Gf.Matrix4d(x[0], x[1], x[2], 0.0,
+                       y[0], y[1], y[2], 0.0,
+                       z[0], z[1], z[2], 0.0,
+                       o[0], o[1], o[2], 1.0)
+
+def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verbose):
+    """One Xform per assembly placement, carrying the composed transform, with
+    that part's solids as BrepArray children.
+
+    Geometry stays in the part's own coordinate system, where the STEP authored
+    it; the placement is the only thing that moves. That keeps a part used
+    several times -- the toolbox has three identical lid pins -- to one set of
+    authored surfaces per part rather than one per placement."""
+    sidx = {sref: k for k, sref in enumerate(solids)}
+    used = {}
+    for sr, nm, M in placed:
+        name = _sanitize(nm) or f"part_{sr}"
+        if name in used:
+            used[name] += 1
+            name = f"{name}_{used[name]}"
+        else:
+            used[name] = 0
+        xf = UsdGeom.Xform.Define(stage, f"/World/{name}")
+        xf.AddTransformOp().Set(_usd_matrix(M))
+        part_solids = srmap[sr]
+        body = colors.get(sidx.get(part_solids[0], -1))
+        if body:
+            cpv = UsdGeom.PrimvarsAPI(xf.GetPrim()).CreatePrimvar(
+                "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant)
+            cpv.Set(Vt.Vec3fArray([Gf.Vec3f(*body)]))
+        for j, sref in enumerate(part_solids):
+            b = extract_brep(rd, cfg, [sref])
+            fcolors = None
+            frefs = face_refs_for_solid(rd, sref)
+            if len(frefs) == len(b["faces"]):
+                base = body or (0.6, 0.6, 0.6)
+                fcolors = [face_col.get(fr[1], base) for fr in frefs]
+            child = "brep" if len(part_solids) == 1 else f"brep_{j}"
+            author_brep(stage, f"/World/{name}/{child}", b, cfg, face_colors=fcolors)
+            if verbose:
+                print(f"  {name}/{child:<8} faces={len(b['faces']):5} "
+                      f"verts={len(b['verts']):6}")
+
 def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
     """Convert one STEP file to a UsdSolid stage: one Xform + BrepArray prim per
     solid, under a /World Xform. Output format follows the extension (.usda text or
@@ -1502,6 +1710,21 @@ def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
     UsdGeom.SetStageMetersPerUnit(stage, meters_per_unit)
     world = UsdGeom.Xform.Define(stage, "/World")
     stage.SetDefaultPrim(world.GetPrim())
+
+    placements = assembly_placements(rd)
+    srmap = solids_by_representation(rd) if placements else {}
+    placed = [(sr, nm, M) for sr, nm, M in placements if srmap.get(sr)]
+    if placed:
+        if verbose:
+            uniq = len({sr for sr, _, _ in placed})
+            print(f"  assembly: {len(placed)} placements of {uniq} unique part(s), "
+                  f"{sum(len(srmap[sr]) for sr, _, _ in placed)} solid(s)")
+        _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids,
+                       verbose)
+        stage.Export(out)
+        if verbose:
+            print(f"wrote {out} ({len(placed)} placement(s))")
+        return
 
     used = {}
     for i, s in enumerate(solids):

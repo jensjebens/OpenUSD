@@ -38,9 +38,11 @@ from the file (from its `UNCERTAINTY_MEASURE`, with a bounding-box fallback).
 
 ## Scope
 
-Each STEP solid maps to a top-level prim in world coordinates (flat multi-body).
-Assembly instancing — `NEXT_ASSEMBLY_USAGE_OCCURRENCE` placement transforms — is not
-handled; a nested assembly comes through as its constituent solids in world space.
+An assembly comes through as one `Xform` per placement, with the transform composed
+down the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` chains and the part's solids as `BrepArray`
+children. Geometry stays in the part's own coordinate system, so a part placed several
+times has one set of authored surfaces rather than one per placement. A file with no
+assembly structure maps each solid to a top-level prim in world coordinates.
 
 This is a **reference / sample importer**, in the spirit of the Gaussian-splat
 `py3dgsPlyToUsd.py` sample: enough to exercise the schema end to end and to generate
