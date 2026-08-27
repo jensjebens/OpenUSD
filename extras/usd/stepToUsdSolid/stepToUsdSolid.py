@@ -105,6 +105,27 @@ def vcross(a, b):
 _HALF_PI = math.pi / 2.0
 _TWO_PI = 2.0 * math.pi
 
+# ---------------------------------------------------------------- tolerances
+# Every tolerance the reader uses, in one place. These are geometric decisions,
+# not tuning knobs: each says what counts as "the same" at a particular scale.
+#
+# PERIOD_TOL     how far past 2*pi an angular bound may sit and still count as
+#                the primary period. An exporter writing 2*pi as 6.2831853072
+#                overshoots by 2e-11; a domain that genuinely wraps twice is
+#                nowhere near this. Matches PERIOD_TOL in brep_validator.py.
+# DEGENERATE_TOL a parameter span at or below this is a point, not an interval.
+# COINCIDENT_TOL two positions this close are the same vertex, in model units.
+# SNAP_TOL       a NURBS knot or weight within this of a round value is that
+#                value; keeps rational arcs exactly rational.
+# PAD_FRAC       how far a derived face window is widened past its boundary
+# PAD_MIN        samples, so a face is not trimmed exactly through a vertex.
+PERIOD_TOL = 1e-6
+DEGENERATE_TOL = 1e-9
+COINCIDENT_TOL = 1e-12
+SNAP_TOL = 1e-6
+PAD_FRAC = 0.02
+PAD_MIN = 1e-4
+
 class Reader:
     def __init__(self, ents): self.e = ents
     def get(self, ref): return self.e.get(ref[1]) if isinstance(ref, tuple) and ref[0]=="ref" else None
@@ -879,6 +900,47 @@ def _sphere_pole_claim(windings, sense):
             claims.add(-1 if sense else 1)
     return claims.pop() if len(claims) == 1 else 0
 
+def rebase_periodic_u(stok, sg, rng):
+    """Re-parameterize a periodic surface so its face's U window starts at zero.
+
+    A face whose angular window happens to begin just before the seam comes out
+    of _wrap_span as, say, [6.220, 9.488] -- a perfectly ordinary partial face
+    that straddles u = 2*pi. BA.765 requires a partial-period domain to stay
+    inside the primary period, and the alternative reading, splitting the face
+    at the seam, means minting a seam edge and its vertices, splitting every
+    boundary edge that crosses u = 0, and rebuilding the radial chains through
+    the new edgeuses.
+
+    None of that is needed. The reference direction of a cylinder, cone, sphere
+    or torus is arbitrary: rotating it about the axis by the window's start
+    angle describes the same surface with the window at [0, span]. Each face
+    carries its own surface record, so this affects nothing else. Only a face
+    whose window genuinely exceeds a full period would need splitting, and such
+    a face is already the full-period case.
+
+    This reaches U only. A torus's V origin is fixed by its axis and the plane
+    of the major circle, with no free rotation, so a tube arc crossing V = 0
+    cannot be rebased this way and is left as authored.
+
+    Returns the (possibly rotated) surface dict and the rebased range."""
+    if stok not in ("BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI",
+                    "BrepSurfaceSphereAPI", "BrepSurfaceTorusAPI"):
+        return sg, rng
+    (ulo, uhi), v = rng
+    if -PERIOD_TOL <= ulo and uhi <= _TWO_PI + PERIOD_TOL:
+        return sg, rng
+    span = uhi - ulo
+    if span >= _TWO_PI - PERIOD_TOL:
+        return sg, rng                      # full period: nothing to rebase
+    z = vnorm(sg["axis"])
+    x = vnorm(sg["refDirection"])
+    x = vnorm(vsub(x, tuple(vdot(x, z) * z[k] for k in range(3))))
+    y = vcross(z, x)
+    c, sn = math.cos(ulo), math.sin(ulo)
+    sg = dict(sg)
+    sg["refDirection"] = vnorm(tuple(c * x[k] + sn * y[k] for k in range(3)))
+    return sg, ((0.0, span), v)
+
 def face_range(stok, sg, fverts, loop_pts=None, sense=True, nverts=0):
     """The face's UV window (face:range), taken from the boundary's actual UV
     footprint. loop_pts: ordered per-loop boundary sample chains, used for
@@ -1146,13 +1208,14 @@ def extract_brep(rd, cfg, solid_refs=None):
                 for ei in dict.fromkeys(ei for eis, _ in floop_edges for ei in eis):
                     fsamples += esamples[ei]
                 stok, sg = surface_geom(rd, fa[2], cfg, fverts)
+                rng = face_range(stok, sg, fsamples, loop_pts=floop_pts,
+                                 sense=sense, nverts=len(fverts))
+                sg, rng = rebase_periodic_u(stok, sg, rng)
                 for n, vi in loop_specs:
                     loops.append(n); loop_vidx.append(vi)
                 fi = len(faces)
                 faces.append(dict(loopCount=lc, stok=stok, geom=sg, sense=sense,
-                                  rng=face_range(stok, sg, fsamples,
-                                                 loop_pts=floop_pts, sense=sense,
-                                                 nverts=len(fverts))))
+                                  rng=rng))
                 solid_faces.append(fi)
         brep_faces.append(solid_faces)
 
