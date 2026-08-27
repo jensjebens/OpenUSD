@@ -46,7 +46,8 @@ def _parse_instance(s):
         while i < n:
             m = re.match(r"\s*([A-Za-z_0-9]+)\s*\(", inner[i:])
             if not m:
-                i += 1; continue
+                i += 1
+                continue
             popen = i + m.end() - 1
             pclose = _match_paren(inner, popen)
             argstr = inner[popen + 1:pclose]
@@ -70,11 +71,19 @@ def _match_paren(s, i):
 def _split_top(s):
     out, depth, buf, inq = [], 0, [], False
     for c in s:
-        if c == "'": inq = not inq; buf.append(c)
+        if c == "'":
+            inq = not inq
+            buf.append(c)
         elif inq: buf.append(c)
-        elif c == "(": depth += 1; buf.append(c)
-        elif c == ")": depth -= 1; buf.append(c)
-        elif c == "," and depth == 0: out.append("".join(buf)); buf = []
+        elif c == "(":
+            depth += 1
+            buf.append(c)
+        elif c == ")":
+            depth -= 1
+            buf.append(c)
+        elif c == "," and depth == 0:
+            out.append("".join(buf))
+            buf = []
         else: buf.append(c)
     if buf: out.append("".join(buf))
     return out
@@ -125,14 +134,21 @@ COINCIDENT_TOL = 1e-12
 SNAP_TOL = 1e-6
 PAD_FRAC = 0.02
 PAD_MIN = 1e-4
+# MIN_INTERSECT_TOL floors the tolerance derived from a file's own
+# UNCERTAINTY_MEASURE. Real CAD vertices meet to about 1e-6 of model scale;
+# a file declaring far tighter agreement than it delivers would otherwise
+# make every endpoint check fail.
+MIN_INTERSECT_TOL = 5e-4        # millimetres
 
 class Reader:
     def __init__(self, ents): self.e = ents
     def get(self, ref): return self.e.get(ref[1]) if isinstance(ref, tuple) and ref[0]=="ref" else None
     def typ(self, ref):
-        t = self.get(ref); return t[0] if t else None
+        t = self.get(ref)
+        return t[0] if t else None
     def args(self, ref):
-        t = self.get(ref); return t[1] if t else []
+        t = self.get(ref)
+        return t[1] if t else []
     def find(self, *types): return [i for i,(t,_) in self.e.items() if t in types]
     def point(self, ref): return tuple(float(x) for x in self.args(ref)[1])
     def direction(self, ref): return tuple(float(x) for x in self.args(ref)[1])
@@ -162,7 +178,7 @@ class Config:
         # Distance at which an authored control hull end is deemed already at a
         # vertex (skip the trim). A fixed geometric snap, independent of the
         # per-file tolerance, so which edges get hull-trimmed stays stable.
-        self.nurb_snap_tol = 1e-6
+        self.nurb_snap_tol = SNAP_TOL
 
 
 # ================================================================ plane-angle unit
@@ -194,7 +210,8 @@ def detect_length_uncertainty(rd, ents):
     best = None
     for i, (t, a) in ents.items():
         if t == "UNCERTAINTY_MEASURE_WITH_UNIT":
-            raw = a[0]; val = None
+            raw = a[0]
+            val = None
             if isinstance(raw, str) and "(" in raw:
                 try: val = float(raw[raw.index("(")+1:raw.rindex(")")])
                 except Exception: val = None
@@ -221,9 +238,12 @@ def expand_knots(knots, mults):
 def _lower_curve_to_nurb_local(rd, cref, ulo=None, uhi=None):
     """Lower a 3D curve to LOCAL-space NURBS poles (Martin Watt's LowerCurveToNurbLocal
     plus a CIRCLE/ELLIPSE rational-quadratic branch). Returns a poles dict or None."""
-    t = rd.typ(cref); a = rd.args(cref)
+    t = rd.typ(cref)
+    a = rd.args(cref)
     if t == "LINE":
-        o = rd.point(a[1]); vec = rd.args(a[2]); d = vnorm(rd.direction(vec[1]))
+        o = rd.point(a[1])
+        vec = rd.args(a[2])
+        d = vnorm(rd.direction(vec[1]))
         lo = 0.0 if ulo is None else ulo
         hi = 1.0 if uhi is None else uhi
         if not (hi > lo): lo, hi = 0.0, 1.0
@@ -231,8 +251,10 @@ def _lower_curve_to_nurb_local(rd, cref, ulo=None, uhi=None):
         p1 = tuple(o[k] + hi*d[k] for k in range(3))
         return dict(order=2, poles=[p0, p1], weights=[1.0, 1.0], knots=[lo, lo, hi, hi], plo=lo, phi=hi)
     if t in ("CIRCLE", "ELLIPSE"):
-        o, z, x = rd.placement(a[1]); y = vcross(z, x)
-        rx = float(a[2]); ry = float(a[2]) if t == "CIRCLE" else float(a[3])
+        o, z, x = rd.placement(a[1])
+        y = vcross(z, x)
+        rx = float(a[2])
+        ry = float(a[2]) if t == "CIRCLE" else float(a[3])
         a0 = 0.0 if ulo is None else ulo
         a1 = 2*math.pi if uhi is None else uhi
         if not (a1 > a0): a0, a1 = 0.0, 2*math.pi
@@ -248,21 +270,25 @@ def _arc_poles(center, xdir, ydir, rx, ry, a0, a1):
     def on(ang):
         return tuple(center[k] + rx*math.cos(ang)*xdir[k] + ry*math.sin(ang)*ydir[k] for k in range(3))
     span = a1 - a0
-    nseg = max(1, int(math.ceil(span/(math.pi/2) - 1e-9)))
-    seg = span/nseg; hw = math.cos(seg/2.0)
+    nseg = max(1, int(math.ceil(span/(math.pi/2) - DEGENERATE_TOL)))
+    seg = span/nseg
+    hw = math.cos(seg/2.0)
     poles, weights = [], []
     for i in range(2*nseg + 1):
         s = i // 2
         if i % 2 == 0:
-            poles.append(on(a0 + s*seg)); weights.append(1.0)
+            poles.append(on(a0 + s*seg))
+            weights.append(1.0)
         else:
             am = a0 + (s + 0.5)*seg
             p = tuple(center[k] + (rx/hw)*math.cos(am)*xdir[k] + (ry/hw)*math.sin(am)*ydir[k]
                       for k in range(3))
-            poles.append(p); weights.append(hw)
+            poles.append(p)
+            weights.append(hw)
     knots = [a0, a0, a0]
     for s in range(1, nseg):
-        k = a0 + s*seg; knots += [k, k]
+        k = a0 + s*seg
+        knots += [k, k]
     knots += [a1, a1, a1]
     return dict(order=3, poles=poles, weights=weights, knots=knots, plo=a0, phi=a1)
 
@@ -270,11 +296,15 @@ def lower_extrusion(rd, ref, vlo=0.0, vhi=1.0):
     a = rd.args(ref)
     basis = _lower_curve_to_nurb_local(rd, a[1])
     if basis is None: return None
-    vec = rd.args(a[2]); d = rd.direction(vec[1]); mag = float(vec[2])
+    vec = rd.args(a[2])
+    d = rd.direction(vec[1])
+    mag = float(vec[2])
     dirv = tuple(d[k]*mag for k in range(3))
-    nU = len(basis["poles"]); cps, wts = [], []
+    nU = len(basis["poles"])
+    cps, wts = [], []
     for iu in range(nU):
-        p = basis["poles"][iu]; w = basis["weights"][iu]
+        p = basis["poles"][iu]
+        w = basis["weights"][iu]
         cps.append(tuple(p[k] + vlo*dirv[k] for k in range(3)))
         cps.append(tuple(p[k] + vhi*dirv[k] for k in range(3)))
         wts += [w, w]
@@ -291,36 +321,47 @@ def lower_revolution(rd, ref, a0=0.0, a1=2*math.pi):
     a = rd.args(ref)
     basis = _lower_curve_to_nurb_local(rd, a[1])
     if basis is None: return None
-    ap = rd.args(a[2]); axp = rd.point(ap[1])
+    ap = rd.args(a[2])
+    axp = rd.point(ap[1])
     axd = vnorm(rd.direction(ap[2])) if len(ap) > 2 and isinstance(ap[2], tuple) else (0.,0.,1.)
     span = a1 - a0
-    nseg = max(1, int(math.ceil(span/(math.pi/2) - 1e-9)))
-    seg = span/nseg; hw = math.cos(seg/2.0)
-    nbV = len(basis["poles"]); nbU = 2*nseg + 1
+    nseg = max(1, int(math.ceil(span/(math.pi/2) - DEGENERATE_TOL)))
+    seg = span/nseg
+    hw = math.cos(seg/2.0)
+    nbV = len(basis["poles"])
+    nbU = 2*nseg + 1
     foot, radial = [], []
     for p in basis["poles"]:
         t = vdot(vsub(p, axp), axd)
         f = tuple(axp[k] + t*axd[k] for k in range(3))
-        foot.append(f); radial.append(vsub(p, f))
+        foot.append(f)
+        radial.append(vsub(p, f))
     ang, arcw, scale = [], [], []
     for iu in range(nbU):
         s = iu // 2
         if iu % 2 == 0:
-            ang.append(a0 + s*seg); arcw.append(1.0); scale.append(1.0)
+            ang.append(a0 + s*seg)
+            arcw.append(1.0)
+            scale.append(1.0)
         else:
-            ang.append(a0 + (s + 0.5)*seg); arcw.append(hw); scale.append(1.0/hw)
+            ang.append(a0 + (s + 0.5)*seg)
+            arcw.append(hw)
+            scale.append(1.0/hw)
     def rot(rvec, angle):
-        c, s = math.cos(angle), math.sin(angle); cx = vcross(axd, rvec)
+        c, s = math.cos(angle), math.sin(angle)
+        cx = vcross(axd, rvec)
         return tuple(c*rvec[k] + s*cx[k] for k in range(3))
     cps, wts = [], []
     for iu in range(nbU):
         for iv in range(nbV):
             rp = rot(radial[iv], ang[iu])
             pole = tuple(foot[iv][k] + rp[k]*scale[iu] for k in range(3))
-            cps.append(pole); wts.append(arcw[iu]*basis["weights"][iv])
+            cps.append(pole)
+            wts.append(arcw[iu]*basis["weights"][iv])
     uK = [a0, a0, a0]
     for s in range(1, nseg):
-        k = a0 + s*seg; uK += [k, k]
+        k = a0 + s*seg
+        uK += [k, k]
     uK += [a1, a1, a1]
     prof = dict(order=basis["order"], knots=basis["knots"],
                 controlVertices=basis["poles"], weights=basis["weights"], nurb=True)
@@ -335,31 +376,41 @@ def surface_geom(rd, ref, cfg, fverts=None):
     """(token, dict-of-arrays) for a face surface. cfg selects cone unit-context
     and swept-surface lowering. fverts (face boundary vertices) is required for
     the swept-surface param bounds (no PCURVE in these files)."""
-    t = rd.typ(ref); a = rd.args(ref)
+    t = rd.typ(ref)
+    a = rd.args(ref)
     if t == "PLANE":
-        o, z, x = rd.placement(a[1]); return ("BrepSurfacePlaneAPI", dict(origin=o, axis=z, refDirection=x))
+        o, z, x = rd.placement(a[1])
+        return ("BrepSurfacePlaneAPI", dict(origin=o, axis=z, refDirection=x))
     if t == "CYLINDRICAL_SURFACE":
-        o, z, x = rd.placement(a[1]); return ("BrepSurfaceCylinderAPI", dict(origin=o, axis=z, refDirection=x, radius=float(a[2])))
+        o, z, x = rd.placement(a[1])
+        return ("BrepSurfaceCylinderAPI", dict(origin=o, axis=z, refDirection=x, radius=float(a[2])))
     if t == "CONICAL_SURFACE":
         o, z, x = rd.placement(a[1])
         sa = float(a[3]) * cfg.angle_scale
         if sa < 0.0:
-            z = tuple(-c for c in z); sa = -sa
+            z = tuple(-c for c in z)
+            sa = -sa
         return ("BrepSurfaceConeAPI", dict(origin=o, axis=z, refDirection=x, radius=float(a[2]), semiAngle=sa))
     if t == "SPHERICAL_SURFACE":
-        o, z, x = rd.placement(a[1]); return ("BrepSurfaceSphereAPI", dict(center=o, axis=z, refDirection=x, radius=float(a[2])))
+        o, z, x = rd.placement(a[1])
+        return ("BrepSurfaceSphereAPI", dict(center=o, axis=z, refDirection=x, radius=float(a[2])))
     if t == "TOROIDAL_SURFACE":
-        o, z, x = rd.placement(a[1]); return ("BrepSurfaceTorusAPI", dict(origin=o, axis=z, refDirection=x, majorRadius=float(a[2]), minorRadius=float(a[3])))
+        o, z, x = rd.placement(a[1])
+        return ("BrepSurfaceTorusAPI", dict(origin=o, axis=z, refDirection=x, majorRadius=float(a[2]), minorRadius=float(a[3])))
     if t == "SURFACE_OF_LINEAR_EXTRUSION":
         vlo, vhi = 0.0, 1.0
-        vec = rd.args(a[2]); d = vnorm(rd.direction(vec[1])); mag = float(vec[2])
+        vec = rd.args(a[2])
+        d = vnorm(rd.direction(vec[1]))
+        mag = float(vec[2])
         if fverts:
             hs = [vdot(v, d) for v in fverts]
             base = _lower_curve_to_nurb_local(rd, a[1])
             if base and base["poles"]:
                 b0 = vdot(base["poles"][0], d)
-                vlo = (min(hs) - b0)/mag; vhi = (max(hs) - b0)/mag
-                if not (vhi > vlo + 1e-9): vlo, vhi = 0.0, 1.0
+                vlo = (min(hs) - b0)/mag
+                vhi = (max(hs) - b0)/mag
+                if not (vhi > vlo + DEGENERATE_TOL):
+                    vlo, vhi = 0.0, 1.0
         g = lower_extrusion(rd, ref, vlo, vhi)
         if g is not None:
             return ("BrepSurfaceNurbAPI", g)
@@ -378,15 +429,19 @@ def bspline_surface(rd, ref):
         subs = dict(rd.args(ref))
         base, wk = subs["B_SPLINE_SURFACE"], subs["B_SPLINE_SURFACE_WITH_KNOTS"]
         ud, vd, grid = int(base[0]), int(base[1]), base[2]
-        u_mults = [int(x) for x in wk[0]]; v_mults = [int(x) for x in wk[1]]
-        u_knots = [float(x) for x in wk[2]]; v_knots = [float(x) for x in wk[3]]
+        u_mults = [int(x) for x in wk[0]]
+        v_mults = [int(x) for x in wk[1]]
+        u_knots = [float(x) for x in wk[2]]
+        v_knots = [float(x) for x in wk[3]]
         rat = subs.get("RATIONAL_B_SPLINE_SURFACE")
         if rat: weights = [float(w) for row in rat[0] for w in row]
     else:
         a = rd.args(ref)
         ud, vd, grid = int(a[1]), int(a[2]), a[3]
-        u_mults = [int(x) for x in a[8]]; v_mults = [int(x) for x in a[9]]
-        u_knots = [float(x) for x in a[10]]; v_knots = [float(x) for x in a[11]]
+        u_mults = [int(x) for x in a[8]]
+        v_mults = [int(x) for x in a[9]]
+        u_knots = [float(x) for x in a[10]]
+        v_knots = [float(x) for x in a[11]]
     cps = [rd.point(p) for row in grid for p in row]
     nU, nV = len(grid), len(grid[0])
     uK, vK = expand_knots(u_knots, u_mults), expand_knots(v_knots, v_mults)
@@ -395,14 +450,19 @@ def bspline_surface(rd, ref):
                 uKnots=uK, vKnots=vK, controlVertices=cps, weights=weights)
 
 def curve_geom(rd, ref):
-    t = rd.typ(ref); a = rd.args(ref)
+    t = rd.typ(ref)
+    a = rd.args(ref)
     if t == "LINE":
-        o = rd.point(a[1]); vec = rd.args(a[2]); d = vnorm(rd.direction(vec[1]))
+        o = rd.point(a[1])
+        vec = rd.args(a[2])
+        d = vnorm(rd.direction(vec[1]))
         return ("BrepCurve3dLineAPI", dict(origin=o, direction=d))
     if t == "CIRCLE":
-        o, z, x = rd.placement(a[1]); return ("BrepCurve3dCircleAPI", dict(center=o, axis=z, refDirection=x, radius=float(a[2])))
+        o, z, x = rd.placement(a[1])
+        return ("BrepCurve3dCircleAPI", dict(center=o, axis=z, refDirection=x, radius=float(a[2])))
     if t == "ELLIPSE":
-        o, z, x = rd.placement(a[1]); return ("BrepCurve3dEllipseAPI", dict(center=o, axis=z, refDirection=x, xRadius=float(a[2]), yRadius=float(a[3])))
+        o, z, x = rd.placement(a[1])
+        return ("BrepCurve3dEllipseAPI", dict(center=o, axis=z, refDirection=x, xRadius=float(a[2]), yRadius=float(a[3])))
     if t in ("B_SPLINE_CURVE_WITH_KNOTS", "__COMPLEX__"):
         return ("BrepCurve3dNurbAPI", bspline_curve(rd, ref))
     return ("BrepCurve3dNurbAPI", bspline_curve(rd, ref))
@@ -412,21 +472,25 @@ def bspline_curve(rd, ref):
     if rd.typ(ref) == "__COMPLEX__":
         subs = dict(rd.args(ref))
         base, wk = subs["B_SPLINE_CURVE"], subs["B_SPLINE_CURVE_WITH_KNOTS"]
-        deg = int(base[0]); cps = [rd.point(p) for p in base[1]]
-        mults = [int(x) for x in wk[0]]; knots = [float(x) for x in wk[1]]
+        deg = int(base[0])
+        cps = [rd.point(p) for p in base[1]]
+        mults = [int(x) for x in wk[0]]
+        knots = [float(x) for x in wk[1]]
         rat = subs.get("RATIONAL_B_SPLINE_CURVE")
         if rat: weights = [float(w) for w in rat[0]]
     else:
         a = rd.args(ref)
-        deg = int(a[1]); cps = [rd.point(p) for p in a[2]]
-        mults = [int(x) for x in a[6]]; knots = [float(x) for x in a[7]]
+        deg = int(a[1])
+        cps = [rd.point(p) for p in a[2]]
+        mults = [int(x) for x in a[6]]
+        knots = [float(x) for x in a[7]]
     if weights is None: weights = [1.0]*len(cps)
     K = expand_knots(knots, mults)
     return dict(nurb=True, order=deg+1, vertexCount=len(cps), knots=K, controlVertices=cps, weights=weights)
 
 # ================================================================ edge:range
 def _bump(a, b):
-    return (a, b) if b > a + 1e-12 else (a, a + 2*math.pi)
+    return (a, b) if b > a + COINCIDENT_TOL else (a, a + _TWO_PI)
 
 def _primary_period(a0, a1):
     """Shift an angular (start, end) pair by whole periods so the end lands in
@@ -445,13 +509,17 @@ def _primary_period(a0, a1):
 def _ellipse_edge_range(cg, ps, pe):
     """Eccentric-angle range for an ELLIPSE edge (OCCT Geom_Ellipse param, what the
     validator inverts). Returns (t0,t1) with t1>t0."""
-    c = cg["center"]; xh = cg["refDirection"]; ax = cg["axis"]; yh = vcross(ax, xh)
-    rx = cg["xRadius"]; ry = cg["yRadius"]
+    c = cg["center"]
+    xh = cg["refDirection"]
+    ax = cg["axis"]
+    yh = vcross(ax, xh)
+    rx = cg["xRadius"]
+    ry = cg["yRadius"]
     def ecc(p):
         d = vsub(p, c)
         return math.atan2(vdot(d, yh) / ry, vdot(d, xh) / rx)
     a0, a1 = ecc(ps), ecc(pe)
-    if a1 <= a0 + 1e-12:
+    if a1 <= a0 + COINCIDENT_TOL:
         a1 += 2 * math.pi
     return _primary_period(a0, a1)
 
@@ -463,7 +531,8 @@ def edge_range(ctok, cg, ps, pe):
     if ctok == "BrepCurve3dEllipseAPI":
         return _ellipse_edge_range(cg, ps, pe)
     if ctok == "BrepCurve3dCircleAPI":
-        c, ax, u = cg["center"], cg["axis"], cg["refDirection"]; v = vcross(ax, u)
+        c, ax, u = cg["center"], cg["axis"], cg["refDirection"]
+        v = vcross(ax, u)
         ang = lambda p: math.atan2(vdot(vsub(p, c), v), vdot(vsub(p, c), u))
         a0, a1 = ang(ps), ang(pe)
         if a1 <= a0: a1 += 2*math.pi
@@ -474,7 +543,8 @@ def edge_range(ctok, cg, ps, pe):
 
 # ================================================================ NURBS edge hull-trim
 def _deboor_rational(order, knots, cps, weights, t):
-    p = order - 1; n = len(cps)
+    p = order - 1
+    n = len(cps)
     lo, hi = knots[p], knots[n]
     if t < lo: t = lo
     if t > hi: t = hi
@@ -484,7 +554,9 @@ def _deboor_rational(order, knots, cps, weights, t):
         while k < n - 1 and knots[k + 1] <= t: k += 1
     d = []
     for j in range(p + 1):
-        i = k - p + j; w = weights[i]; cp = cps[i]
+        i = k - p + j
+        w = weights[i]
+        cp = cps[i]
         d.append([cp[0]*w, cp[1]*w, cp[2]*w, w])
     dprev = None
     for r in range(1, p + 1):
@@ -495,7 +567,8 @@ def _deboor_rational(order, knots, cps, weights, t):
             alpha = 0.0 if denom == 0.0 else (t - knots[i]) / denom
             a = 1.0 - alpha
             d[j] = [a * d[j - 1][m] + alpha * d[j][m] for m in range(4)]
-    Cw = d[p]; w0 = Cw[3] or 1.0
+    Cw = d[p]
+    w0 = Cw[3] or 1.0
     C = (Cw[0]/w0, Cw[1]/w0, Cw[2]/w0)
     span = knots[k + 1] - knots[k - p + 1] if p > 0 else 0.0
     if p > 0 and span != 0.0 and dprev is not None:
@@ -507,16 +580,22 @@ def _deboor_rational(order, knots, cps, weights, t):
     return C, Cd
 
 def _invert_nurbs(cg, target, seed=None):
-    order = cg["order"]; knots = cg["knots"]; cps = cg["controlVertices"]; wts = cg["weights"]
+    order = cg["order"]
+    knots = cg["knots"]
+    cps = cg["controlVertices"]
+    wts = cg["weights"]
     p = order - 1
     lo, hi = knots[p], knots[len(cps)]
     if not (hi > lo): return (lo, float("inf"))
     def C(t): return _deboor_rational(order, knots, cps, wts, t)
     def d2(t):
-        pt, _ = C(t); return sum((pt[m] - target[m]) ** 2 for m in range(3))
-    N = 128; samples = []
+        pt, _ = C(t)
+        return sum((pt[m] - target[m]) ** 2 for m in range(3))
+    N = 128
+    samples = []
     for i in range(N + 1):
-        t = lo + (hi - lo) * i / N; samples.append((d2(t), t))
+        t = lo + (hi - lo) * i / N
+        samples.append((d2(t), t))
     samples.sort()
     seeds = [s[1] for s in samples[:5]]
     if seed is not None: seeds.insert(0, seed)
@@ -527,34 +606,49 @@ def _invert_nurbs(cg, target, seed=None):
             pt, der = C(t)
             r = [pt[m] - target[m] for m in range(3)]
             f = sum(r[m] * der[m] for m in range(3))
-            h = (hi - lo) * 1e-6 or 1e-9
+            h = (hi - lo) * SNAP_TOL or DEGENERATE_TOL
             _, der2 = C(min(hi, t + h))
             cpp = [(der2[m] - der[m]) / h for m in range(3)]
             fp = sum(der[m]*der[m] for m in range(3)) + sum(r[m]*cpp[m] for m in range(3))
             if abs(fp) < 1e-18: break
-            dt = f / fp; t -= dt
+            dt = f / fp
+            t -= dt
             if t < lo: t = lo
             if t > hi: t = hi
             if abs(dt) < 1e-13: break
         pt, _ = C(t)
         resid = math.sqrt(sum((pt[m] - target[m]) ** 2 for m in range(3)))
-        if resid < best_r: best_r = resid; best_t = t
-    step = (hi - lo) / N; ct = samples[0][1]
+        if resid < best_r:
+            best_r = resid
+            best_t = t
+    step = (hi - lo) / N
+    ct = samples[0][1]
     a, c = max(lo, ct - step), min(hi, ct + step)
     gr = 0.6180339887498949
-    x1 = c - gr*(c - a); x2 = a + gr*(c - a); f1, f2 = d2(x1), d2(x2)
+    x1 = c - gr*(c - a)
+    x2 = a + gr*(c - a)
+    f1, f2 = d2(x1), d2(x2)
     for _ in range(60):
         if f1 < f2:
-            c, x2, f2 = x2, x1, f1; x1 = c - gr*(c - a); f1 = d2(x1)
+            c, x2, f2 = x2, x1, f1
+            x1 = c - gr*(c - a)
+            f1 = d2(x1)
         else:
-            a, x1, f1 = x1, x2, f2; x2 = a + gr*(c - a); f2 = d2(x2)
+            a, x1, f1 = x1, x2, f2
+            x2 = a + gr*(c - a)
+            f2 = d2(x2)
         if c - a < 1e-14: break
-    tg = 0.5*(a + c); rg = math.sqrt(d2(tg))
-    if rg < best_r: best_r = rg; best_t = tg
+    tg = 0.5*(a + c)
+    rg = math.sqrt(d2(tg))
+    if rg < best_r:
+        best_r = rg
+        best_t = tg
     return (best_t, best_r)
 
 def _insert_knot(order, knots, hcps, u, r):
-    p = order - 1; n = len(hcps) - 1; m = n + p + 1
+    p = order - 1
+    n = len(hcps) - 1
+    m = n + p + 1
     if u >= knots[n + 1]: k = n
     else:
         k = p
@@ -574,12 +668,14 @@ def _insert_knot(order, knots, hcps, u, r):
             denom = knots[L + i + p - j + 1] - knots[L + i]
             alpha = 0.0 if denom == 0.0 else (u - knots[L + i]) / denom
             R[i] = [alpha*R[i + 1][c] + (1.0 - alpha)*R[i][c] for c in range(4)]
-        nq[L] = R[0][:]; nq[k + r - j - s] = R[p - j - s][:]
+        nq[L] = R[0][:]
+        nq[k + r - j - s] = R[p - j - s][:]
     for i in range(L + 1, k - s): nq[i] = R[i - L][:]
     return nk, nq
 
 def _trim_nurbs_curve(cg, t0, t1):
-    order = cg["order"]; p = order - 1
+    order = cg["order"]
+    p = order - 1
     knots = list(cg["knots"])
     hcps = [[cg["controlVertices"][i][0]*cg["weights"][i],
              cg["controlVertices"][i][1]*cg["weights"][i],
@@ -588,25 +684,30 @@ def _trim_nurbs_curve(cg, t0, t1):
     lo, hi = min(t0, t1), max(t0, t1)
     if not (hi > lo): return None
     for u in (lo, hi):
-        s = sum(1 for kv in knots if kv == u); need = p - s
+        s = sum(1 for kv in knots if kv == u)
+        need = p - s
         if need > 0: knots, hcps = _insert_knot(order, knots, hcps, u, need)
     i0 = sum(1 for kv in knots if kv < lo) - 1
     i1 = sum(1 for kv in knots if kv <= hi) - order
     if i0 < 0: i0 = 0
     if i1 >= len(hcps): i1 = len(hcps) - 1
     if i1 < i0: return None
-    sub_h = hcps[i0:i1 + 1]; nsub = len(sub_h)
+    sub_h = hcps[i0:i1 + 1]
+    nsub = len(sub_h)
     interior = [kv for kv in knots if lo < kv < hi]
     subk = [lo]*order + interior + [hi]*order
     if len(subk) != nsub + order: return None
-    cps = []; wts = []
+    cps = []
+    wts = []
     for h in sub_h:
         w = h[3] or 1.0
-        cps.append((h[0]/w, h[1]/w, h[2]/w)); wts.append(w)
+        cps.append((h[0]/w, h[1]/w, h[2]/w))
+        wts.append(w)
     return dict(nurb=True, order=order, vertexCount=nsub, knots=subk, controlVertices=cps, weights=wts)
 
 def _reverse_nurbs(cg):
-    kn = cg["knots"]; lo, hi = kn[0], kn[-1]
+    kn = cg["knots"]
+    lo, hi = kn[0], kn[-1]
     rk = [lo + hi - k for k in reversed(kn)]
     return dict(nurb=True, order=cg["order"], vertexCount=cg["vertexCount"],
                 knots=rk, controlVertices=list(reversed(cg["controlVertices"])),
@@ -615,7 +716,9 @@ def _reverse_nurbs(cg):
 def process_nurbs_edge(cg, ps, pe, cfg):
     """Invert authored endpoint vertices and trim the control hull to that sub-span
     so the emitted curve's hull ends coincide with the vertices. Returns (geom,range)."""
-    order = cg["order"]; knots = cg["knots"]; cps = cg["controlVertices"]
+    order = cg["order"]
+    knots = cg["knots"]
+    cps = cg["controlVertices"]
     p = order - 1
     dlo, dhi = knots[p], knots[len(cps)]
     tol = cfg.nurb_snap_tol
@@ -623,9 +726,10 @@ def process_nurbs_edge(cg, ps, pe, cfg):
         return cg, (dlo, dhi)
     if math.dist(ps, pe) < tol:
         return cg, (dlo, dhi)
-    t0, r0 = _invert_nurbs(cg, ps); t1, r1 = _invert_nurbs(cg, pe)
+    t0, r0 = _invert_nurbs(cg, ps)
+    t1, r1 = _invert_nurbs(cg, pe)
     INV_ACCEPT = cfg.inv_accept
-    if r0 <= INV_ACCEPT and r1 <= INV_ACCEPT and abs(t1 - t0) > 1e-9:
+    if r0 <= INV_ACCEPT and r1 <= INV_ACCEPT and abs(t1 - t0) > DEGENERATE_TOL:
         trimmed = _trim_nurbs_curve(cg, t0, t1)
         if trimmed is not None:
             h0, hN = trimmed["controlVertices"][0], trimmed["controlVertices"][-1]
@@ -636,7 +740,8 @@ def process_nurbs_edge(cg, ps, pe, cfg):
                 spread = max(math.dist(cv[c], cv[0]) for c in range(1, len(cv))) if len(cv) > 1 else 0.0
                 if spread <= 2.0 * cfg.edge_degen_tol:
                     return cg, (dlo, dhi)
-                cv[0] = tuple(ps); cv[-1] = tuple(pe)
+                cv[0] = tuple(ps)
+                cv[-1] = tuple(pe)
                 tk = trimmed["knots"]
                 return trimmed, (tk[order - 1], tk[trimmed["vertexCount"]])
     return cg, (dlo, dhi)
@@ -644,24 +749,32 @@ def process_nurbs_edge(cg, ps, pe, cfg):
 # ================================================================ face:range (H2)
 def _uframe(sg, key_o="origin"):
     o = sg.get(key_o) or sg.get("center") or sg.get("origin")
-    z = vnorm(sg["axis"]); x = vnorm(sg["refDirection"]); y = vcross(z, x)
+    z = vnorm(sg["axis"])
+    x = vnorm(sg["refDirection"])
+    y = vcross(z, x)
     return o, x, y, z
 
 def _wrap_span(angles):
     a = sorted(x % _TWO_PI for x in angles)
     if len(a) == 1: return a[0], a[0]
-    best_gap = -1.0; gi = 0
+    best_gap = -1.0
+    gi = 0
     for i in range(len(a)):
         nxt = a[(i + 1) % len(a)] + (_TWO_PI if i == len(a) - 1 else 0.0)
         gap = nxt - a[i]
-        if gap > best_gap: best_gap = gap; gi = i
-    lo = a[(gi + 1) % len(a)]; hi = a[gi] + (_TWO_PI if gi != len(a) - 1 else 0.0)
+        if gap > best_gap:
+            best_gap = gap
+            gi = i
+    lo = a[(gi + 1) % len(a)]
+    hi = a[gi] + (_TWO_PI if gi != len(a) - 1 else 0.0)
     if hi < lo: hi += _TWO_PI
     return lo, hi
 
-def _pad(lo, hi, natural, frac=0.02, absmin=1e-4):
-    span = hi - lo; p = max(absmin, frac * span)
-    lo -= p; hi += p
+def _pad(lo, hi, natural, frac=PAD_FRAC, absmin=PAD_MIN):
+    span = hi - lo
+    p = max(absmin, frac * span)
+    lo -= p
+    hi += p
     if natural is not None:
         nlo, nhi = natural
         if lo < nlo: lo = nlo
@@ -680,12 +793,15 @@ def _pad_angular(lo, hi):
     BA.631 and BA.765 reported. Clamp when the unpadded window is inside the
     period; a window that genuinely straddles the seam is left alone."""
     natural = ((0.0, _TWO_PI)
-               if (lo >= -1e-9 and hi <= _TWO_PI + 1e-9) else None)
-    lo, hi = _pad(lo, hi, natural); span = hi - lo
-    if span >= _TWO_PI - 1e-4: return 0.0, _TWO_PI
+               if (lo >= -DEGENERATE_TOL and hi <= _TWO_PI + DEGENERATE_TOL)
+               else None)
+    lo, hi = _pad(lo, hi, natural)
+    span = hi - lo
+    if span >= _TWO_PI - PAD_MIN:
+        return 0.0, _TWO_PI
     return lo, hi
 
-_SEAM_EPS = 1e-6
+_SEAM_EPS = PERIOD_TOL
 def _full_period(lo, hi):
     """True when a periodic-direction boundary-vertex span means 'full period'.
 
@@ -693,24 +809,28 @@ def _full_period(lo, hi):
     boundary whose vertices ALL sit at one angle is a seam-only boundary (the
     face is bounded by closed circles whose single start=end vertex lies on
     the seam), i.e. the face wraps the whole period -- e.g. bearing pins,
-    bores, hose corrugation rings. Authoring the collapsed +-1e-4 sliver
-    instead made the renderer's parametric fallback rebuild an invisible
-    wedge (KUKA missing pins/hoses, 2026-07-09). A genuine thin wedge always
-    has two distinct vertex angles (the thinnest real KUKA fillet spans
-    0.009 rad >> _SEAM_EPS), so the collapse test cannot misfire on it."""
+    bores, hose corrugation rings. Authoring the collapsed sliver instead
+    leaves the renderer's parametric fallback rebuilding an invisible wedge, so
+    the pin or bore vanishes. A genuine thin wedge always has two distinct
+    vertex angles -- the narrowest fillets production CAD produces span around
+    0.009 rad, orders above _SEAM_EPS -- so the collapse test cannot mistake
+    one for a seam."""
     span = hi - lo
-    return span >= _TWO_PI - 1e-6 or span < _SEAM_EPS
+    return span >= _TWO_PI - PERIOD_TOL or span < _SEAM_EPS
 
 def _base_face_range(stok, sg, fverts):
     """The flat (natural-period) face:range from step_to_usdsolid_fixed."""
     if stok == "BrepSurfacePlaneAPI" and fverts:
-        o, u = sg["origin"], sg["refDirection"]; v = vcross(sg["axis"], sg["refDirection"])
-        us = [vdot(vsub(p, o), u) for p in fverts]; vs = [vdot(vsub(p, o), v) for p in fverts]
+        o, u = sg["origin"], sg["refDirection"]
+        v = vcross(sg["axis"], sg["refDirection"])
+        us = [vdot(vsub(p, o), u) for p in fverts]
+        vs = [vdot(vsub(p, o), v) for p in fverts]
         return (_bump(min(us), max(us)), _bump(min(vs), max(vs)))
     if sg.get("nurb"):
         return ((sg["uKnots"][0], sg["uKnots"][-1]), (sg["vKnots"][0], sg["vKnots"][-1]))
     if stok in ("BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI") and fverts:
-        o, ax = sg["origin"], sg["axis"]; hs = [vdot(vsub(p, o), ax) for p in fverts]
+        o, ax = sg["origin"], sg["axis"]
+        hs = [vdot(vsub(p, o), ax) for p in fverts]
         return ((0.0, 2*math.pi), _bump(min(hs), max(hs)))
     if stok == "BrepSurfaceSphereAPI":
         return ((0.0, 2*math.pi), (-math.pi/2, math.pi/2))
@@ -719,136 +839,198 @@ def _base_face_range(stok, sg, fverts):
     return ((0.0, 1.0), (0.0, 1.0))
 
 def _invert_profile_coarse(prof, target, nscan=48):
-    order = prof["order"]; knots = prof["knots"]; cps = prof["controlVertices"]; wts = prof["weights"]
-    p = order - 1; lo, hi = knots[p], knots[len(cps)]
+    order = prof["order"]
+    knots = prof["knots"]
+    cps = prof["controlVertices"]
+    wts = prof["weights"]
+    p = order - 1
+    lo, hi = knots[p], knots[len(cps)]
     if not (hi > lo): return lo
-    best = 1e30; bt = lo
+    best = 1e30
+    bt = lo
     for i in range(nscan + 1):
         t = lo + (hi - lo) * i / nscan
         pt, _ = _deboor_rational(order, knots, cps, wts, t)
         dd = (pt[0]-target[0])**2 + (pt[1]-target[1])**2 + (pt[2]-target[2])**2
-        if dd < best: best = dd; bt = t
+        if dd < best:
+            best = dd
+            bt = t
     return bt
 
 def _swept_face_range(sg, fverts, loop_pts=None):
     if not fverts or len(fverts) < 2: return None
-    uo, vo = sg["uOrder"], sg["vOrder"]; nU, nV = sg["uVertexCount"], sg["vVertexCount"]
+    uo, vo = sg["uOrder"], sg["vOrder"]
+    nU, nV = sg["uVertexCount"], sg["vVertexCount"]
     uK, vK = sg["uKnots"], sg["vKnots"]
-    udom = (uK[uo-1], uK[nU]); vdom = (vK[vo-1], vK[nV])
-    du = udom[1]-udom[0]; dv = vdom[1]-vdom[0]
+    udom = (uK[uo-1], uK[nU])
+    vdom = (vK[vo-1], vK[nV])
+    du = udom[1]-udom[0]
+    dv = vdom[1]-vdom[0]
     if not (du > 0 and dv > 0): return None
-    prof = sg["_prof"]; kind = sg["_swept"]; us = []; vs = []
+    prof = sg["_prof"]
+    kind = sg["_swept"]
+    us = []
+    vs = []
     if kind == "ext":
-        d = sg["_dir"]; dmag2 = sum(c*c for c in d)
+        d = sg["_dir"]
+        dmag2 = sum(c*c for c in d)
         if dmag2 <= 0: return None
         o = sg["_porigin"]
         for p in fverts:
-            disp = vsub(p, o); fv = vdot(disp, d) / dmag2; vs.append(fv)
+            disp = vsub(p, o)
+            fv = vdot(disp, d) / dmag2
+            vs.append(fv)
             foot = tuple(p[k] - fv*d[k] for k in range(3))
             us.append(_invert_profile_coarse(prof, foot))
     else:
-        axp = sg["_axp"]; axd = sg["_axd"]; a0, a1 = sg["_uarc"]
+        axp = sg["_axp"]
+        axd = sg["_axd"]
+        a0, a1 = sg["_uarc"]
         def rot(vec, angle):
-            c, s = math.cos(angle), math.sin(angle); cx = vcross(axd, vec)
+            c, s = math.cos(angle), math.sin(angle)
+            cx = vcross(axd, vec)
             return tuple(c*vec[k] + s*cx[k] for k in range(3))
         mag = lambda w: math.sqrt(vdot(w, w))
-        p0 = prof["controlVertices"][0]; t0 = vdot(vsub(p0, axp), axd)
+        p0 = prof["controlVertices"][0]
+        t0 = vdot(vsub(p0, axp), axd)
         rad0 = vsub(p0, tuple(axp[k]+t0*axd[k] for k in range(3)))
-        if mag(rad0) < 1e-9:
+        if mag(rad0) < DEGENERATE_TOL:
             for pp in prof["controlVertices"]:
                 tt = vdot(vsub(pp, axp), axd)
                 rr = vsub(pp, tuple(axp[k]+tt*axd[k] for k in range(3)))
-                if mag(rr) > 1e-9: rad0 = rr; break
-        xref = vnorm(rad0); yref = vcross(axd, xref)
+                if mag(rr) > DEGENERATE_TOL:
+                    rad0 = rr
+                    break
+        xref = vnorm(rad0)
+        yref = vcross(axd, xref)
         for p in fverts:
             foot_t = vdot(vsub(p, axp), axd)
             radial = vsub(p, tuple(axp[k]+foot_t*axd[k] for k in range(3)))
-            ang = math.atan2(vdot(radial, yref), vdot(radial, xref)); us.append(ang)
+            ang = math.atan2(vdot(radial, yref), vdot(radial, xref))
+            us.append(ang)
             back = tuple(axp[k] + foot_t*axd[k] + rot(radial, -ang)[k] for k in range(3))
             vs.append(_invert_profile_coarse(prof, back))
     if kind == "rev":
-        ulo, uhi = _wrap_span(us); a0, a1 = sg["_uarc"]
+        ulo, uhi = _wrap_span(us)
+        a0, a1 = sg["_uarc"]
         def uangf(p):
             foot_t = vdot(vsub(p, axp), axd)
             radial = vsub(p, tuple(axp[k] + foot_t*axd[k] for k in range(3)))
             return math.atan2(vdot(radial, yref), vdot(radial, xref))
         # the lowered surface has a HARD u domain (its knot vector): a footprint
         # that wraps past a domain end means the face's UV image is two disjoint
-        # strips at the domain seam -- clipping (v7) silently dropped one strip
-        # (KUKA body_4 f47), so promote to the full domain instead.
-        seam_cross = (uhi > udom[1] + 1e-9) or (ulo < udom[0] - 1e-9)
+        # strips at the domain seam, and clipping to one of them silently drops
+        # the other, so promote to the full domain instead.
+        seam_cross = (uhi > udom[1] + DEGENERATE_TOL) or (ulo < udom[0] - DEGENERATE_TOL)
         full = (seam_cross or _wraps_period(loop_pts, uangf)
-                or (uhi - ulo >= (a1 - a0) - 1e-6) or _full_period(ulo, uhi))
+                or (uhi - ulo >= (a1 - a0) - PERIOD_TOL) or _full_period(ulo, uhi))
         if full: ulo, uhi = udom
         else:
-            pu = du * 0.02 + 1e-4
-            ulo = max(udom[0], ulo - pu); uhi = min(udom[1], uhi + pu)
-        pv = max(dv * 0.02, dv / 48.0) + 1e-4
+            pu = du * PAD_FRAC + PAD_MIN
+            ulo = max(udom[0], ulo - pu)
+            uhi = min(udom[1], uhi + pu)
+        pv = max(dv * PAD_FRAC, dv / 48.0) + PAD_MIN
     else:
-        pu = max(du * 0.02, du / 48.0) + 1e-4
-        ulo = max(udom[0], min(us) - pu); uhi = min(udom[1], max(us) + pu)
-        pv = dv * 0.02 + 1e-4
-    vlo = max(vdom[0], min(vs) - pv); vhi = min(vdom[1], max(vs) + pv)
+        pu = max(du * PAD_FRAC, du / 48.0) + PAD_MIN
+        ulo = max(udom[0], min(us) - pu)
+        uhi = min(udom[1], max(us) + pu)
+        pv = dv * PAD_FRAC + PAD_MIN
+    vlo = max(vdom[0], min(vs) - pv)
+    vhi = min(vdom[1], max(vs) + pv)
     if not (uhi > ulo and vhi > vlo): return None
     if (uhi - ulo) >= 0.98*du and (vhi - vlo) >= 0.98*dv: return None
     return ((ulo, uhi), (vlo, vhi))
 
 def _eval_nurb_surface(sg, u, v):
-    uo, vo = sg["uOrder"], sg["vOrder"]; nU, nV = sg["uVertexCount"], sg["vVertexCount"]
-    uK, vK = sg["uKnots"], sg["vKnots"]; cps = sg["controlVertices"]; wts = sg["weights"]
+    uo, vo = sg["uOrder"], sg["vOrder"]
+    nU, nV = sg["uVertexCount"], sg["vVertexCount"]
+    uK, vK = sg["uKnots"], sg["vKnots"]
+    cps = sg["controlVertices"]
+    wts = sg["weights"]
     def basis(kn, order, n, t):
-        p = order - 1; lo, hi = kn[p], kn[n]
+        p = order - 1
+        lo, hi = kn[p], kn[n]
         if t < lo: t = lo
         if t > hi: t = hi
         if t >= kn[n]: span = n - 1
         else:
             span = p
             while span < n - 1 and kn[span + 1] <= t: span += 1
-        N = [0.0]*(p + 1); N[0] = 1.0
-        left = [0.0]*(p + 1); right = [0.0]*(p + 1)
+        N = [0.0]*(p + 1)
+        N[0] = 1.0
+        left = [0.0]*(p + 1)
+        right = [0.0]*(p + 1)
         for j in range(1, p + 1):
-            left[j] = t - kn[span + 1 - j]; right[j] = kn[span + j] - t; saved = 0.0
+            left[j] = t - kn[span + 1 - j]
+            right[j] = kn[span + j] - t
+            saved = 0.0
             for r in range(j):
                 denom = right[r + 1] + left[j - r]
                 temp = N[r] / denom if denom != 0 else 0.0
-                N[r] = saved + right[r + 1] * temp; saved = left[j - r] * temp
+                N[r] = saved + right[r + 1] * temp
+                saved = left[j - r] * temp
             N[j] = saved
         return span, N
-    us, Nu = basis(uK, uo, nU, u); vs, Nv = basis(vK, vo, nV, v)
-    pu = uo - 1; pv = vo - 1; x = y = z = w = 0.0
+    us, Nu = basis(uK, uo, nU, u)
+    vs, Nv = basis(vK, vo, nV, v)
+    pu = uo - 1
+    pv = vo - 1
+    x = y = z = w = 0.0
     for i in range(pu + 1):
         ui = us - pu + i
         for j in range(pv + 1):
-            vj = vs - pv + j; idx = ui * nV + vj
-            b = Nu[i] * Nv[j] * wts[idx]; cp = cps[idx]
-            x += b*cp[0]; y += b*cp[1]; z += b*cp[2]; w += b
+            vj = vs - pv + j
+            idx = ui * nV + vj
+            b = Nu[i] * Nv[j] * wts[idx]
+            cp = cps[idx]
+            x += b*cp[0]
+            y += b*cp[1]
+            z += b*cp[2]
+            w += b
     if w == 0: w = 1.0
     return (x/w, y/w, z/w)
 
 def _nurb_face_range(sg, fverts, coarse=10):
-    uo, vo = sg["uOrder"], sg["vOrder"]; nU, nV = sg["uVertexCount"], sg["vVertexCount"]
+    uo, vo = sg["uOrder"], sg["vOrder"]
+    nU, nV = sg["uVertexCount"], sg["vVertexCount"]
     uK, vK = sg["uKnots"], sg["vKnots"]
-    ulo, uhi = uK[uo - 1], uK[nU]; vlo, vhi = vK[vo - 1], vK[nV]
+    ulo, uhi = uK[uo - 1], uK[nU]
+    vlo, vhi = vK[vo - 1], vK[nV]
     if not (uhi > ulo and vhi > vlo): return None
-    nu = max(coarse, uo + 1); nv = max(coarse, vo + 1); grid = []
+    nu = max(coarse, uo + 1)
+    nv = max(coarse, vo + 1)
+    grid = []
     for iu in range(nu + 1):
-        gu = ulo + (uhi - ulo) * iu / nu; row = []
+        gu = ulo + (uhi - ulo) * iu / nu
+        row = []
         for iv in range(nv + 1):
             gv = vlo + (vhi - vlo) * iv / nv
             row.append((gu, gv, _eval_nurb_surface(sg, gu, gv)))
         grid.append(row)
-    us = []; vs = []
+    us = []
+    vs = []
     for p in fverts:
-        best = 1e30; bu = ulo; bv = vlo
+        best = 1e30
+        bu = ulo
+        bv = vlo
         for row in grid:
             for (gu, gv, gp) in row:
                 dd = (gp[0]-p[0])**2 + (gp[1]-p[1])**2 + (gp[2]-p[2])**2
-                if dd < best: best = dd; bu = gu; bv = gv
-        us.append(bu); vs.append(bv)
+                if dd < best:
+                    best = dd
+                    bu = gu
+                    bv = gv
+        us.append(bu)
+        vs.append(bv)
     if not us: return None
-    du = (uhi - ulo); dv = (vhi - vlo); pu = du / nu; pv = dv / nv
-    rulo = max(ulo, min(us) - pu); ruhi = min(uhi, max(us) + pu)
-    rvlo = max(vlo, min(vs) - pv); rvhi = min(vhi, max(vs) + pv)
+    du = (uhi - ulo)
+    dv = (vhi - vlo)
+    pu = du / nu
+    pv = dv / nv
+    rulo = max(ulo, min(us) - pu)
+    ruhi = min(uhi, max(us) + pu)
+    rvlo = max(vlo, min(vs) - pv)
+    rvhi = min(vhi, max(vs) + pv)
     if not (ruhi > rulo and rvhi > rvlo): return None
     if (ruhi - rulo) >= 0.98 * du and (rvhi - rvlo) >= 0.98 * dv: return None
     return ((rulo, ruhi), (rvlo, rvhi))
@@ -864,8 +1046,10 @@ def _loop_windings(loop_pts, ang):
     out = []
     for pts in loop_pts or []:
         if len(pts) < 3:
-            out.append(0.0); continue
-        W = 0.0; prev = None
+            out.append(0.0)
+            continue
+        W = 0.0
+        prev = None
         for p in pts:
             a = ang(p)
             if prev is not None:
@@ -890,8 +1074,9 @@ def _sphere_pole_claim(windings, sense):
     claims the +axis pole when the face normal equals the surface normal
     (same_sense=T), the -axis pole otherwise. A band's two rim loops wind
     oppositely and cancel. Returns +1 (+axis pole), -1 (-axis pole), 0 (none or
-    conflicting). Calibrated on KUKA body_2 2628/2643 (the two halves of a
-    wavy-split sphere claim opposite poles and tile it)."""
+    conflicting). The case this has to get right is a sphere divided by a wavy
+    seam into two faces: they claim opposite poles and tile the sphere between
+    them."""
     claims = set()
     for W in windings:
         if W > math.pi:
@@ -917,10 +1102,6 @@ def rebase_periodic_u(stok, sg, rng):
     carries its own surface record, so this affects nothing else. Only a face
     whose window genuinely exceeds a full period would need splitting, and such
     a face is already the full-period case.
-
-    This reaches U only. A torus's V origin is fixed by its axis and the plane
-    of the major circle, with no free rotation, so a tube arc crossing V = 0
-    cannot be rebased this way and is left as authored.
 
     Returns the (possibly rotated) surface dict and the rebased range."""
     if stok not in ("BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI",
@@ -954,22 +1135,31 @@ def face_range(stok, sg, fverts, loop_pts=None, sense=True, nverts=0):
     if stok == "BrepSurfacePlaneAPI":
         return _base_face_range(stok, sg, fverts)
     if stok in ("BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI"):
-        o, x, y, z = _uframe(sg); us = []; vs = []
+        o, x, y, z = _uframe(sg)
+        us = []
+        vs = []
         uang = lambda p: math.atan2(vdot(vsub(p, o), y), vdot(vsub(p, o), x))
         for p in fverts:
-            us.append(uang(p)); vs.append(vdot(vsub(p, o), z))
+            us.append(uang(p))
+            vs.append(vdot(vsub(p, o), z))
         ulo, uhi = _wrap_span(us)
         if _wraps_period(loop_pts, uang) or _full_period(ulo, uhi): ulo, uhi = 0.0, _TWO_PI
         else: ulo, uhi = _pad_angular(ulo, uhi)
         vlo, vhi = _pad(min(vs), max(vs), None)
         return ((ulo, uhi), (vlo, vhi))
     if stok == "BrepSurfaceSphereAPI":
-        c = sg["center"]; z = vnorm(sg["axis"]); x = vnorm(sg["refDirection"]); y = vcross(z, x)
-        us = []; vs = []
+        c = sg["center"]
+        z = vnorm(sg["axis"])
+        x = vnorm(sg["refDirection"])
+        y = vcross(z, x)
+        us = []
+        vs = []
         for p in fverts:
             d = vsub(p, c)
             lat = math.asin(max(-1.0, min(1.0, vdot(vnorm(d), z))))
-            lon = math.atan2(vdot(d, y), vdot(d, x)); us.append(lon); vs.append(lat)
+            lon = math.atan2(vdot(d, y), vdot(d, x))
+            us.append(lon)
+            vs.append(lat)
         lonf = lambda p: math.atan2(vdot(vsub(p, c), y), vdot(vsub(p, c), x))
         Ws = _loop_windings(loop_pts, lonf)
         pole = _sphere_pole_claim(Ws, sense)
@@ -982,18 +1172,26 @@ def face_range(stok, sg, fverts, loop_pts=None, sense=True, nverts=0):
         elif pole < 0: vlo = -_HALF_PI
         return ((ulo, uhi), (vlo, vhi))
     if stok == "BrepSurfaceTorusAPI":
-        o = sg["origin"]; z = vnorm(sg["axis"]); x = vnorm(sg["refDirection"]); y = vcross(z, x)
-        Rmaj = sg["majorRadius"]; us = []; vs = []
+        o = sg["origin"]
+        z = vnorm(sg["axis"])
+        x = vnorm(sg["refDirection"])
+        y = vcross(z, x)
+        Rmaj = sg["majorRadius"]
+        us = []
+        vs = []
         uang = lambda p: math.atan2(vdot(vsub(p, o), y), vdot(vsub(p, o), x))
         def vang(p):
-            u = uang(p); cu, su = math.cos(u), math.sin(u)
+            u = uang(p)
+            cu, su = math.cos(u), math.sin(u)
             rad_dir = (cu*x[0] + su*y[0], cu*x[1] + su*y[1], cu*x[2] + su*y[2])
             tube_c = (o[0] + Rmaj*rad_dir[0], o[1] + Rmaj*rad_dir[1], o[2] + Rmaj*rad_dir[2])
             dt = vsub(p, tube_c)
             return math.atan2(vdot(dt, z), vdot(dt, rad_dir))
         for p in fverts:
-            us.append(uang(p)); vs.append(vang(p))
-        ulo, uhi = _wrap_span(us); vlo, vhi = _wrap_span(vs)
+            us.append(uang(p))
+            vs.append(vang(p))
+        ulo, uhi = _wrap_span(us)
+        vlo, vhi = _wrap_span(vs)
         full_u = _wraps_period(loop_pts, uang) or _full_period(ulo, uhi)
         full_v = _wraps_period(loop_pts, vang) or _full_period(vlo, vhi)
         if full_u: ulo, uhi = 0.0, _TWO_PI
@@ -1023,17 +1221,23 @@ def _edge_interior_samples(edge, verts, n_nurb=9):
     _pad_angular's own >=2*pi-1e-4 full-period promotion fires); NURBS curves are
     capped at n_nurb de Boor evaluations. Curve types with no cheap evaluator
     contribute nothing (their endpoints are already in the vertex set)."""
-    ctok = edge["ctok"]; cg = edge["geom"]; t0, t1 = edge["rng"]
+    ctok = edge["ctok"]
+    cg = edge["geom"]
+    t0, t1 = edge["rng"]
     if not (math.isfinite(t0) and math.isfinite(t1) and t1 > t0):
         return []
     if ctok == "BrepCurve3dLineAPI":
         # interior lerp between the authored endpoint vertices (equivalent to the
         # arc-length parametrization and immune to _bump's degenerate-closed-line
         # 2*pi range fallback)
-        s, e = edge["v"]; ps, pe = verts[s], verts[e]
+        s, e = edge["v"]
+        ps, pe = verts[s], verts[e]
         return [tuple(ps[k] + (pe[k]-ps[k]) * i / 10.0 for k in range(3)) for i in range(1, 10)]
     if ctok in ("BrepCurve3dCircleAPI", "BrepCurve3dEllipseAPI"):
-        c = cg["center"]; z = vnorm(cg["axis"]); x = vnorm(cg["refDirection"]); y = vcross(z, x)
+        c = cg["center"]
+        z = vnorm(cg["axis"])
+        x = vnorm(cg["refDirection"])
+        y = vcross(z, x)
         span = t1 - t0
         # 0.06 rad step: the inscribed-polygon sagitta (r*step^2/8, the amount a
         # plane/height window can under-cover an arc bulge between samples) stays
@@ -1047,14 +1251,15 @@ def _edge_interior_samples(edge, verts, n_nurb=9):
         # rng is the eccentric angle: P(t) = c + rx*cos(t)*x + ry*sin(t)*y
         return [tuple(c[k] + rx*math.cos(t)*x[k] + ry*math.sin(t)*y[k] for k in range(3)) for t in ts]
     if cg.get("nurb"):
-        kn = cg["knots"]; cps = cg["controlVertices"]
+        kn = cg["knots"]
+        cps = cg["controlVertices"]
         lo, hi = kn[cg["order"] - 1], kn[len(cps)]
         a, b = max(t0, lo), min(t1, hi)
         if not (b > a):
             return []
-        # scale with hull complexity: a closed 34-pole wavy boundary (KUKA body_2
-        # sphere 2628) winds the whole sphere -- 9 uniform samples leave 1.6 rad
-        # longitude gaps, under-covering the boundary itself. Bounded at 48.
+        # Scale with hull complexity. A closed 34-pole wavy boundary winding a
+        # whole sphere leaves 1.6 rad longitude gaps at 9 uniform samples, which
+        # under-covers the boundary itself. Bounded at 48.
         n = max(n_nurb, min(48, len(cps)))
         pts = []
         for i in range(1, n + 1):
@@ -1075,8 +1280,8 @@ def _cap_samples(pts, cap=400):
 def _cap_face_samples(pts, nverts, cap=400):
     """Cap for the NURBS paths, ALWAYS retaining the boundary vertices (the head
     of the sample list). Uniform subsampling over the whole list can drop the
-    very vertex that pins a UV extreme (KUKA body_2 f566/f839: the v=1.0 corner
-    vertex fell out of the cap and the window shrank to 0.9)."""
+    very vertex that pins a UV extreme: a corner vertex at v = 1.0 falling out
+    of the cap shrinks the authored window to 0.9."""
     if len(pts) <= cap:
         return pts
     nv = min(max(nverts, 0), cap // 2)
@@ -1110,7 +1315,8 @@ def extract_brep(rd, cfg, solid_refs=None):
     def vidx(ref):
         vid = ref[1]
         if vid not in vmap:
-            vmap[vid] = len(verts); verts.append(rd.point(rd.args(ref)[1]))
+            vmap[vid] = len(verts)
+            verts.append(rd.point(rd.args(ref)[1]))
         return vmap[vid]
 
     def eidx(ec):
@@ -1155,12 +1361,17 @@ def extract_brep(rd, cfg, solid_refs=None):
             vi = vidx(rd.args(loop_ref)[1])
             return n, eis, vi
         for oe in rd.args(loop_ref)[1]:
-            a = rd.args(oe); ei = eidx(a[3]); same = (a[4] == ("enum", "T"))
-            edgeuses.append(dict(edge=ei, orient="same" if same else "opposite")); n += 1; eis.append(ei)
+            a = rd.args(oe)
+            ei = eidx(a[3])
+            same = (a[4] == ("enum", "T"))
+            edgeuses.append(dict(edge=ei, orient="same" if same else "opposite"))
+            n += 1
+            eis.append(ei)
         return n, eis, vi
 
     for solid in solid_refs:
-        sa = rd.args(("ref", solid)); shell_refs = []
+        sa = rd.args(("ref", solid))
+        shell_refs = []
         shell_types = ("CLOSED_SHELL", "OPEN_SHELL", "ORIENTED_CLOSED_SHELL")
         for x in sa[1:]:
             if isinstance(x, tuple) and x[0] == "ref" and rd.typ(x) in shell_types:
@@ -1173,7 +1384,10 @@ def extract_brep(rd, cfg, solid_refs=None):
                 fa = rd.args(fref)          # ADVANCED_FACE(name,(bounds),surface,same_sense)
                 sense = not (len(fa) > 3 and fa[3] == ("enum", "F"))
                 bounds = sorted(fa[1], key=lambda b: 0 if rd.typ(b)=="FACE_OUTER_BOUND" else 1)
-                lc = 0; fv = set(); floop_edges = []; loop_specs = []
+                lc = 0
+                fv = set()
+                floop_edges = []
+                loop_specs = []
                 for b in bounds:
                     # Loop winding comes from the edge same_sense flags, the edgeuse
                     # orientations, and the face same_sense above. The separate
@@ -1183,7 +1397,8 @@ def extract_brep(rd, cfg, solid_refs=None):
                     # logic (not a mode) if that case ever turns up.
                     ba = rd.args(b)
                     n, eis, vi = walk_loop(ba[1])
-                    loop_specs.append((n, vi)); lc += 1
+                    loop_specs.append((n, vi))
+                    lc += 1
                     for ei in eis: fv.update(edges[ei]["v"])
                     floop_edges.append((eis, [eu["orient"] for eu in edgeuses[-n:]] if n else []))
                     if vi: fv.add(vi)
@@ -1195,7 +1410,8 @@ def extract_brep(rd, cfg, solid_refs=None):
                 # seam vertex, arcs straddling the u-seam, full rim circles). floop_pts
                 # keeps the samples CHAINED in loop order so the sphere branch can
                 # detect pole containment by longitude winding.
-                fsamples = list(fverts); floop_pts = []
+                fsamples = list(fverts)
+                floop_pts = []
                 for eis, orients in floop_edges:
                     lp = []
                     for ei, orient in zip(eis, orients):
@@ -1212,7 +1428,8 @@ def extract_brep(rd, cfg, solid_refs=None):
                                  sense=sense, nverts=len(fverts))
                 sg, rng = rebase_periodic_u(stok, sg, rng)
                 for n, vi in loop_specs:
-                    loops.append(n); loop_vidx.append(vi)
+                    loops.append(n)
+                    loop_vidx.append(vi)
                 fi = len(faces)
                 faces.append(dict(loopCount=lc, stok=stok, geom=sg, sense=sense,
                                   rng=rng))
@@ -1237,19 +1454,24 @@ def pack_regions(b):
     fuFaceIndex, fuOrient = [], []
     for solid_faces in b["brep_faces"]:
         N = len(solid_faces)
-        regionCount.append(2); regionType += ["voidRegion", "solidRegion"]
-        regionShellCount += [1, 1]; shellFaceuseCount += [N, N]
+        regionCount.append(2)
+        regionType += ["voidRegion", "solidRegion"]
+        regionShellCount += [1, 1]
+        shellFaceuseCount += [N, N]
         for fi in solid_faces:
-            fuFaceIndex.append(fi); fuOrient.append("same" if b["faces"][fi]["sense"] else "opposite")
+            fuFaceIndex.append(fi)
+            fuOrient.append("same" if b["faces"][fi]["sense"] else "opposite")
         for fi in solid_faces:
-            fuFaceIndex.append(fi); fuOrient.append("opposite" if b["faces"][fi]["sense"] else "same")
+            fuFaceIndex.append(fi)
+            fuOrient.append("opposite" if b["faces"][fi]["sense"] else "same")
     return dict(regionCount=regionCount, regionType=regionType,
                 regionShellCount=regionShellCount, shellFaceuseCount=shellFaceuseCount,
                 fuFaceIndex=fuFaceIndex, fuOrient=fuOrient)
 
 # ================================================================ self-check
 def self_check(b):
-    errs = []; nv, ne, neu = len(b["verts"]), len(b["edges"]), len(b["edgeuses"])
+    errs = []
+    nv, ne, neu = len(b["verts"]), len(b["edges"]), len(b["edgeuses"])
     for ei, e in enumerate(b["edges"]):
         if not all(0 <= x < nv for x in e["v"]): errs.append(f"edge {ei} vertex OOB")
     for i, eu in enumerate(b["edgeuses"]):
@@ -1297,9 +1519,13 @@ def author_brep(stage, path, b, cfg, face_colors=None):
     ba = UsdSolid.BrepArray.Define(stage, path)
     prim = ba.GetPrim()
     reg = pack_regions(b)
-    faces = b["faces"]; edges = b["edges"]; verts = b["verts"]
-    nshell = len(reg["shellFaceuseCount"]); nfaces = len(faces)
-    nverts = len(verts); nloops = len(b["loops"])
+    faces = b["faces"]
+    edges = b["edges"]
+    verts = b["verts"]
+    nshell = len(reg["shellFaceuseCount"])
+    nfaces = len(faces)
+    nverts = len(verts)
+    nloops = len(b["loops"])
 
     # ---- topology (on the BrepArray) ----
     ba.CreateBrepIntersectTol3dAttr(_dbl([cfg.intersect_tol]))
@@ -1434,7 +1660,7 @@ def author_brep(stage, path, b, cfg, face_colors=None):
 # ================================================================ per-file setup
 def derive_tolerance(rd, ents):
     """The brep:intersectTol3d for a file: the producer's declared endpoint
-    agreement (UNCERTAINTY_MEASURE) divided by 20 and floored at 5e-4 mm. When the
+    agreement (UNCERTAINTY_MEASURE) divided by 20 and floored at MIN_INTERSECT_TOL. When the
     file declares no uncertainty, fall back to 1e-5 x the model bounding-box
     diagonal, then to 1e-3. Returns (tol, uncertainty, source_string)."""
     unc, usrc = detect_length_uncertainty(rd, ents)
@@ -1445,10 +1671,12 @@ def derive_tolerance(rd, ents):
             mn = [min(p[k] for p in pts) for k in range(3)]
             mx = [max(p[k] for p in pts) for k in range(3)]
             diag = math.sqrt(sum((mx[k] - mn[k]) ** 2 for k in range(3)))
-            unc = 1e-5 * diag; usrc = f"fallback 1e-5*bboxDiag({diag:.0f})"
+            unc = 1e-5 * diag
+            usrc = f"fallback 1e-5*bboxDiag({diag:.0f})"
         else:
-            unc = 1e-3; usrc = "fallback default"
-    return max(5e-4, unc / 20.0), unc, usrc
+            unc = 1e-3
+            usrc = "fallback default"
+    return max(MIN_INTERSECT_TOL, unc / 20.0), unc, usrc
 
 # ================================================================ assembly graph
 def _a2p_matrix(rd, ref):
@@ -1477,7 +1705,8 @@ def _idt_matrix(rd, idt_ref):
               and rd.typ(x) == "AXIS2_PLACEMENT_3D"]
     if len(frames) < 2:
         return _IDENTITY
-    F = _a2p_matrix(rd, frames[0]); T = _a2p_matrix(rd, frames[1])
+    F = _a2p_matrix(rd, frames[0])
+    T = _a2p_matrix(rd, frames[1])
     fx, fy, fz, fo = F
     inv_rot = ((fx[0], fx[1], fx[2]), (fy[0], fy[1], fy[2]), (fz[0], fz[1], fz[2]))
     inv_o = tuple(-(inv_rot[0][k]*fo[0] + inv_rot[1][k]*fo[1] + inv_rot[2][k]*fo[2])
@@ -1499,7 +1728,7 @@ def assembly_placements(rd):
     (shape_representation_ref, name, matrix) with matrices composed down the
     assembly tree.
 
-    The chain a SolidWorks AP214 export writes is
+    The chain an AP214 export writes is
 
         CONTEXT_DEPENDENT_SHAPE_REPRESENTATION( #rr, #pds )
         #rr  =( REPRESENTATION_RELATIONSHIP( '', '', #child_sr, #parent_sr )
@@ -1626,7 +1855,8 @@ def resolve_colors(rd, ents, solid_refs):
     sidx = {s: k for k, s in enumerate(solid_refs)}
     face_to_solid = {}
     for s in solid_refs:
-        sa = ents[s][1]; shells = []
+        sa = ents[s][1]
+        shells = []
         for x in sa[1:]:
             if isinstance(x, tuple) and x[0] == "ref":
                 shells.append(x[1])
@@ -1662,15 +1892,19 @@ def resolve_colors(rd, ents, solid_refs):
                 c = dig_colour(x, depth + 1)
                 if c: return c
         return None
-    body_level = {}; tally = {}; face_col = {}
+    body_level = {}
+    tally = {}
+    face_col = {}
     for i, (t, a) in ents.items():
         if t not in ("STYLED_ITEM", "OVER_RIDING_STYLED_ITEM"): continue
         item = a[2] if len(a) > 2 else None
         if not (isinstance(item, tuple) and item[0] == "ref"): continue
-        tgt = item[1]; col = dig_colour(a[1])
+        tgt = item[1]
+        col = dig_colour(a[1])
         if col is None: continue
         if tgt in sidx:
-            si = sidx[tgt]; is_ov = (t == "OVER_RIDING_STYLED_ITEM")
+            si = sidx[tgt]
+            is_ov = (t == "OVER_RIDING_STYLED_ITEM")
             prev = body_level.get(si)
             if prev is None or (is_ov and not prev[0]):
                 body_level[si] = (is_ov, col)
@@ -1692,7 +1926,8 @@ def resolve_colors(rd, ents, solid_refs):
 def face_refs_for_solid(rd, solid):
     """ADVANCED_FACE refs of one solid in extract_brep's exact face order, so a
     per-face color list lines up with the authored faces."""
-    sa = rd.args(("ref", solid)); shell_refs = []
+    sa = rd.args(("ref", solid))
+    shell_refs = []
     for x in sa[1:]:
         if isinstance(x, tuple) and x[0] == "ref" and rd.typ(x) in ("CLOSED_SHELL", "OPEN_SHELL", "ORIENTED_CLOSED_SHELL"):
             shell_refs.append(x)
@@ -1764,7 +1999,7 @@ def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
         raise SystemExit(f"{inp}: no MANIFOLD_SOLID_BREP / BREP_WITH_VOIDS solids found")
     colors, face_col = resolve_colors(rd, ents, solids)
     if verbose:
-        unit = "degrees" if abs(angle_scale - math.pi / 180) < 1e-6 else "radians"
+        unit = "degrees" if abs(angle_scale - math.pi / 180) < PERIOD_TOL else "radians"
         print(f"[{inp}] {len(ents)} entities, {len(solids)} solid(s); "
               f"plane-angle unit = {unit}; intersectTol3d = {tol:g} mm ({usrc})")
 
@@ -1794,7 +2029,8 @@ def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
         b = extract_brep(rd, cfg, [s])
         name = solid_name(rd, s, i)
         if name in used:
-            used[name] += 1; name = f"{name}_{used[name]}"
+            used[name] += 1
+            name = f"{name}_{used[name]}"
         else:
             used[name] = 0
         xf = UsdGeom.Xform.Define(stage, f"/World/{name}")
