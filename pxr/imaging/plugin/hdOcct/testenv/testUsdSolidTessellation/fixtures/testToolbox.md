@@ -33,15 +33,8 @@ Why it matters as a fixture:
 
 ## Validator state
 
-Eleven findings, all on one part:
-
-- `BA.631` x9 (Error) — faces whose U window genuinely crosses `u = 2*pi`.
-  `BA.765` requires a partial-period domain to stay inside the primary period,
-  so these want splitting at the seam, as `testFullPeriodTorusSeamSplit` and
-  `testFullPeriodSphereBandSeamSplit` demonstrate against their unsplit twins.
-  Open.
-- `BA.761` x2 (Warn) — the full-period seam-edgeuse heuristic. Advisory; see
-  above.
+Two findings, both `BA.761` (Warn), the full-period seam-edgeuse heuristic
+discussed above. No errors.
 
 All eleven prims tessellate through OCCT.
 
