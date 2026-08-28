@@ -34,6 +34,9 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 #define HD_VISIBILITY_SCHEMA_TOKENS \
     (visibility) \
+    (guideVisibility) \
+    (proxyVisibility) \
+    (renderVisibility) \
 
 TF_DECLARE_PUBLIC_TOKENS(HdVisibilitySchemaTokens, HD_API,
     HD_VISIBILITY_SCHEMA_TOKENS);
@@ -70,7 +73,25 @@ public:
     /// @{
 
     HD_API
-    HdBoolDataSourceHandle GetVisibility() const; 
+    HdBoolDataSourceHandle GetVisibility() const;
+
+    /// Purpose visibility for "guide" geometry. If absent, inherits from
+    /// parent. If false, guide-purpose prims are invisible. If true,
+    /// overrides an ancestor's false opinion.
+    HD_API
+    HdBoolDataSourceHandle GetGuideVisibility() const;
+
+    /// Purpose visibility for "proxy" geometry. If absent, inherits from
+    /// parent. If false, proxy-purpose prims are invisible. If true,
+    /// overrides an ancestor's false opinion.
+    HD_API
+    HdBoolDataSourceHandle GetProxyVisibility() const;
+
+    /// Purpose visibility for "render" geometry. If absent, inherits from
+    /// parent. If false, render-purpose prims are invisible. If true,
+    /// overrides an ancestor's false opinion.
+    HD_API
+    HdBoolDataSourceHandle GetRenderVisibility() const; 
 
     /// @}
 
@@ -102,7 +123,10 @@ public:
     HD_API
     static HdContainerDataSourceHandle
     BuildRetained(
-        const HdBoolDataSourceHandle &visibility
+        const HdBoolDataSourceHandle &visibility,
+        const HdBoolDataSourceHandle &guideVisibility,
+        const HdBoolDataSourceHandle &proxyVisibility,
+        const HdBoolDataSourceHandle &renderVisibility
     );
 
     /// \class HdVisibilitySchema::Builder
@@ -117,6 +141,15 @@ public:
         HD_API
         Builder &SetVisibility(
             const HdBoolDataSourceHandle &visibility);
+        HD_API
+        Builder &SetGuideVisibility(
+            const HdBoolDataSourceHandle &guideVisibility);
+        HD_API
+        Builder &SetProxyVisibility(
+            const HdBoolDataSourceHandle &proxyVisibility);
+        HD_API
+        Builder &SetRenderVisibility(
+            const HdBoolDataSourceHandle &renderVisibility);
 
         /// Returns a container data source containing the members set thus far.
         HD_API
@@ -124,6 +157,9 @@ public:
 
     private:
         HdBoolDataSourceHandle _visibility;
+        HdBoolDataSourceHandle _guideVisibility;
+        HdBoolDataSourceHandle _proxyVisibility;
+        HdBoolDataSourceHandle _renderVisibility;
 
     };
 

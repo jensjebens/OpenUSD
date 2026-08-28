@@ -25,36 +25,48 @@ PXR_NAMESPACE_OPEN_SCOPE
 /// \class UsdImagingDataSourceVisibility
 ///
 /// Data source representing prim visibility for a USD imageable.
+/// Includes both base visibility and purpose-specific visibility
+/// from UsdGeomVisibilityAPI.
 class UsdImagingDataSourceVisibility : public HdContainerDataSource
 {
 public:
     HD_DECLARE_DATASOURCE(UsdImagingDataSourceVisibility);
 
     /// Returns the names contained in this data source.
-    ///
-    /// This class only returns 'visibility'.
     TfTokenVector GetNames() override;
 
     /// Returns the data source for the given \p 'name'.
-    ///
-    /// Only 'visibility' returns anything for this class.
     HdDataSourceBaseHandle Get(const TfToken &name) override;
 
 private:
     /// Use to construct a new UsdImagingDataSourceVisibility.
     ///
-    /// \p visibilityQuery is the USD attribute query holding visibility data.
+    /// \p visibilityQuery is the USD attribute query for base visibility.
+    /// \p guideVisQuery, proxyVisQuery, renderVisQuery are optional
+    ///    purpose-specific visibility queries from UsdGeomVisibilityAPI.
     /// \p sceneIndexPath is the path of this object in the scene index.
     /// \p stageGlobals is the context object for the USD stage.
     ///
     /// Note: client code calls this via static New().
     UsdImagingDataSourceVisibility(
             const UsdAttributeQuery &visibilityQuery,
+            const UsdAttributeQuery &guideVisQuery,
+            const UsdAttributeQuery &proxyVisQuery,
+            const UsdAttributeQuery &renderVisQuery,
             const SdfPath &sceneIndexPath,
             const UsdImagingDataSourceStageGlobals &stageGlobals);
 
 private:
+    /// Map a USD purpose visibility token to a Hydra boolean data source.
+    /// "invisible" -> false, "visible" -> true, "inherited" -> nullptr.
+    static HdDataSourceBaseHandle _PurposeVisToDataSource(
+        const UsdAttributeQuery &query,
+        const UsdImagingDataSourceStageGlobals &stageGlobals);
+
     UsdAttributeQuery _visibilityQuery;
+    UsdAttributeQuery _guideVisQuery;
+    UsdAttributeQuery _proxyVisQuery;
+    UsdAttributeQuery _renderVisQuery;
     const UsdImagingDataSourceStageGlobals &_stageGlobals;
 };
 

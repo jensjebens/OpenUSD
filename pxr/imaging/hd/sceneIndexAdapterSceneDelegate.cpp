@@ -543,8 +543,30 @@ static bool
 _IsVisible(const HdContainerDataSourceHandle& primSource)
 {
     if (const auto visSchema = HdVisibilitySchema::GetFromParent(primSource)) {
+        // Check base visibility first.
         if (const HdBoolDataSourceHandle visDs = visSchema.GetVisibility()) {
-            return visDs->GetTypedValue(0.0f);
+            if (!visDs->GetTypedValue(0.0f)) {
+                return false;
+            }
+        }
+
+        // Check purpose-specific visibility.
+        if (const auto purposeSchema =
+                HdPurposeSchema::GetFromParent(primSource)) {
+            if (const auto purposeDs = purposeSchema.GetPurpose()) {
+                const TfToken purpose = purposeDs->GetTypedValue(0.0f);
+                HdBoolDataSourceHandle purposeVisDs;
+                if (purpose == HdRenderTagTokens->proxy) {
+                    purposeVisDs = visSchema.GetProxyVisibility();
+                } else if (purpose == HdRenderTagTokens->render) {
+                    purposeVisDs = visSchema.GetRenderVisibility();
+                } else if (purpose == HdRenderTagTokens->guide) {
+                    purposeVisDs = visSchema.GetGuideVisibility();
+                }
+                if (purposeVisDs && !purposeVisDs->GetTypedValue(0.0f)) {
+                    return false;
+                }
+            }
         }
     }
     return true;
@@ -772,11 +794,33 @@ HdSceneIndexAdapterSceneDelegate::GetVisible(SdfPath const &id)
         return true; // default visible
     }
 
+    // Check base visibility.
     HdBoolDataSourceHandle visDs = visibilitySchema.GetVisibility();
-    if (!visDs) {
-        return true;
+    if (visDs && !visDs->GetTypedValue(0)) {
+        return false;
     }
-    return visDs->GetTypedValue(0);
+
+    // Check purpose-specific visibility.
+    HdPurposeSchema purposeSchema =
+        HdPurposeSchema::GetFromParent(prim.dataSource);
+    if (purposeSchema.IsDefined()) {
+        if (HdTokenDataSourceHandle purposeDs = purposeSchema.GetPurpose()) {
+            const TfToken purpose = purposeDs->GetTypedValue(0);
+            HdBoolDataSourceHandle purposeVisDs;
+            if (purpose == HdRenderTagTokens->proxy) {
+                purposeVisDs = visibilitySchema.GetProxyVisibility();
+            } else if (purpose == HdRenderTagTokens->render) {
+                purposeVisDs = visibilitySchema.GetRenderVisibility();
+            } else if (purpose == HdRenderTagTokens->guide) {
+                purposeVisDs = visibilitySchema.GetGuideVisibility();
+            }
+            if (purposeVisDs && !purposeVisDs->GetTypedValue(0)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 TfToken

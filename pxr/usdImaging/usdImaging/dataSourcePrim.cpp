@@ -27,6 +27,7 @@
 #include "pxr/usd/usd/modelAPI.h"
 #include "pxr/usd/usdGeom/primvarsAPI.h"
 #include "pxr/usd/usdGeom/modelAPI.h"
+#include "pxr/usd/usdGeom/visibilityAPI.h"
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/xformCommonAPI.h"
 
@@ -34,51 +35,76 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 UsdImagingDataSourceVisibility::UsdImagingDataSourceVisibility(
         const UsdAttributeQuery &visibilityQuery,
+        const UsdAttributeQuery &guideVisQuery,
+        const UsdAttributeQuery &proxyVisQuery,
+        const UsdAttributeQuery &renderVisQuery,
         const SdfPath &sceneIndexPath,
         const UsdImagingDataSourceStageGlobals &stageGlobals)
     : _visibilityQuery(visibilityQuery)
+    , _guideVisQuery(guideVisQuery)
+    , _proxyVisQuery(proxyVisQuery)
+    , _renderVisQuery(renderVisQuery)
     , _stageGlobals(stageGlobals)
 {
     if (_visibilityQuery.ValueMightBeTimeVarying()) {
         _stageGlobals.FlagAsTimeVarying(
             sceneIndexPath, HdVisibilitySchema::GetDefaultLocator());
     }
+    // Note: purpose visibility attrs are uniform (non-animatable) per USD
+    // spec, so we don't need to flag them as time-varying.
 }
 
 TfTokenVector
 UsdImagingDataSourceVisibility::GetNames()
 {
-    return {
+    TfTokenVector names = {
         HdVisibilitySchemaTokens->visibility,
     };
+    if (_guideVisQuery.HasAuthoredValue()) {
+        names.push_back(HdVisibilitySchemaTokens->guideVisibility);
+    }
+    if (_proxyVisQuery.HasAuthoredValue()) {
+        names.push_back(HdVisibilitySchemaTokens->proxyVisibility);
+    }
+    if (_renderVisQuery.HasAuthoredValue()) {
+        names.push_back(HdVisibilitySchemaTokens->renderVisibility);
+    }
+    return names;
+}
+
+/* static */
+HdDataSourceBaseHandle
+UsdImagingDataSourceVisibility::_PurposeVisToDataSource(
+    const UsdAttributeQuery &query,
+    const UsdImagingDataSourceStageGlobals &stageGlobals)
+{
+    // Purpose visibility is tri-state:
+    //   "invisible" -> false
+    //   "visible"   -> true  (can override ancestor "invisible")
+    //   "inherited" -> nullptr (let flattening resolve)
+    if (!query.HasAuthoredValue()) {
+        return nullptr;
+    }
+    TfToken val;
+    query.Get(&val, stageGlobals.GetTime());
+    if (val == UsdGeomTokens->invisible) {
+        static HdDataSourceBaseHandle const boolFalseDs =
+            HdRetainedTypedSampledDataSource<bool>::New(false);
+        return boolFalseDs;
+    }
+    if (val == UsdGeomTokens->visible) {
+        static HdDataSourceBaseHandle const boolTrueDs =
+            HdRetainedTypedSampledDataSource<bool>::New(true);
+        return boolTrueDs;
+    }
+    // "inherited" or fallback — no local opinion
+    return nullptr;
 }
 
 HdDataSourceBaseHandle
 UsdImagingDataSourceVisibility::Get(const TfToken &name)
 {
-    // Note, we need to do a bit of a dance here.
-    //
-    // Hydra has tri-state visibility (visible, invisible, inherited), which
-    // is indicated by presence of the boolean visibility attribute (vis/invis),
-    // or absence of the visibility attribute (inherited). For inherited
-    // visibility, the flattening scene index will compute a resolved boolean
-    // value.
-    //
-    // USD has bi-state visibility (invisible, inherited). Absence of a value
-    // indicates inherited.
-    //
-    // If the USD attribute isn't authored, the hydra attribute isn't present,
-    // and the value is "inherited".  If the USD attribute is "invisible", we
-    // can return "invisible" (boolean false) here, and everything's cool.
-    // However, if the USD attribute is authored as "inherited" here, we need
-    // to map that to hydra not having a value.
-    //
-    // We do this by mapping "invisible" to constant "false", and
-    // "inherited" to nullptr.
-    //
-    // Note that this mapping doesn't allow for visibility to vary across
-    // a shutter window; that would require a hydra schema change, but it's
-    // probably not a useful feature.
+    // Base visibility: "invisible" -> false, "inherited" -> nullptr.
     if (name == HdVisibilitySchemaTokens->visibility) {
         TfToken vis;
         _visibilityQuery.Get(&vis, _stageGlobals.GetTime());
@@ -87,6 +113,18 @@ UsdImagingDataSourceVisibility::Get(const TfToken &name)
                 HdRetainedTypedSampledDataSource<bool>::New(false);
             return boolFalseDs;
         }
+        return nullptr;
+    }
+
+    // Purpose-specific visibility from VisibilityAPI.
+    if (name == HdVisibilitySchemaTokens->guideVisibility) {
+        return _PurposeVisToDataSource(_guideVisQuery, _stageGlobals);
+    }
+    if (name == HdVisibilitySchemaTokens->proxyVisibility) {
+        return _PurposeVisToDataSource(_proxyVisQuery, _stageGlobals);
+    }
+    if (name == HdVisibilitySchemaTokens->renderVisibility) {
+        return _PurposeVisToDataSource(_renderVisQuery, _stageGlobals);
     }
 
     return nullptr;
@@ -776,9 +814,35 @@ UsdImagingDataSourcePrim::Get(const TfToken &name)
         }
 
         UsdAttributeQuery visibilityQuery(imageable.GetVisibilityAttr());
-        if (visibilityQuery.HasAuthoredValue()) {
+
+        // Check for purpose-specific visibility from VisibilityAPI.
+        UsdAttributeQuery guideVisQuery;
+        UsdAttributeQuery proxyVisQuery;
+        UsdAttributeQuery renderVisQuery;
+
+        UsdGeomVisibilityAPI visAPI(_GetUsdPrim());
+        if (visAPI) {
+            guideVisQuery =
+                UsdAttributeQuery(visAPI.GetGuideVisibilityAttr());
+            proxyVisQuery =
+                UsdAttributeQuery(visAPI.GetProxyVisibilityAttr());
+            renderVisQuery =
+                UsdAttributeQuery(visAPI.GetRenderVisibilityAttr());
+        }
+
+        bool hasAnyOpinion =
+            visibilityQuery.HasAuthoredValue()
+            || guideVisQuery.HasAuthoredValue()
+            || proxyVisQuery.HasAuthoredValue()
+            || renderVisQuery.HasAuthoredValue();
+
+        if (hasAnyOpinion) {
             return UsdImagingDataSourceVisibility::New(
-                    visibilityQuery, _sceneIndexPath, _GetStageGlobals());
+                    visibilityQuery,
+                    guideVisQuery,
+                    proxyVisQuery,
+                    renderVisQuery,
+                    _sceneIndexPath, _GetStageGlobals());
         } else {
             return nullptr;
         }
@@ -870,7 +934,10 @@ UsdImagingDataSourcePrim::Invalidate(
     HdDataSourceLocatorSet locators;
 
     for (const TfToken &propertyName : properties) {
-        if (propertyName == UsdGeomTokens->visibility) {
+        if (propertyName == UsdGeomTokens->visibility
+            || propertyName == UsdGeomTokens->guideVisibility
+            || propertyName == UsdGeomTokens->proxyVisibility
+            || propertyName == UsdGeomTokens->renderVisibility) {
             locators.insert(HdVisibilitySchema::GetDefaultLocator());
         }
 
