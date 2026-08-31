@@ -830,10 +830,15 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
                    ->inconsistentFaceuseArraySizes,
                &errors);
 
-    // Face (BA.120 / BA.150): faceuses come in pairs, so there are
-    // numFaceuses / 2 faces. face:range has two (UVmin, UVmax) entries per
-    // face.
-    const size_t numFaces = numFaceuses / 2;
+    // Face (BA.120 / BA.150): faceuses come in pairs, so there are half as many
+    // faces. face:range has two (UVmin, UVmax) entries per face.
+    //
+    // The count comes from the authored faceuse:faceIndex, not from
+    // sum(shell:faceuseCount), because that is where brep_validator.py takes it
+    // from. A shell declaring no faceuses beside a populated faceuse:faceIndex
+    // gives a derived count of zero, and every face array then reads as
+    // oversized against a file Python measures against the array itself.
+    const size_t numFaces = faceuseFaceIndex.size() / 2;
     const VtArray<unsigned int> faceLoopCount
         = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
     const VtArray<TfToken> faceSurfaceType
@@ -1653,6 +1658,29 @@ _ComputeOffsets(const UsdSolidBrepArray &brep)
     for (size_t b = 0; b < n; ++b) {
         o.edgeuse[b + 1]
             = o.edgeuse[b] + sumRange(loopEdgeuseCount, o.loop[b], o.loop[b + 1]);
+    }
+    // Single-Brep shortcut for the edgeuse partition, matching
+    // brep_validator.py, which sizes it as sum(loop:edgeuseCount) over the
+    // whole authored array rather than over the derived loop range.
+    //
+    // Only this stratum. Python takes the shortcut per stratum, not uniformly:
+    // the face partition BA.115 validates against stays derived, and widening
+    // that one too puts every faceuse index back in range on a prim whose
+    // brep:regionCount is zero -- the case Python reports.
+    //
+    // The two agree on well-formed data. Where the counts disagree with each
+    // other they do not: a face:loopCount of zero shrinks the derived loop
+    // range, which shrinks the edgeuse range under it, and BA.200 then reports
+    // radial indices as outside a range Python never narrowed.
+    if (n == 1) {
+        const auto total = [](const VtArray<unsigned int> &a) {
+            size_t s = 0;
+            for (unsigned int v : a) {
+                s += v;
+            }
+            return s;
+        };
+        o.edgeuse[1] = total(loopEdgeuseCount);
     }
     o.ok = true;
     return o;
@@ -2870,9 +2898,15 @@ _BrepArrayCompleteness(const UsdPrim &usdPrim,
 // filleted solid) are exempt from the shared-edge count: they are full-length
 // legal edges, NOT rule-381 degenerate edges. Zero-length (degenerate) edges
 // are never exempted anywhere -- proposal-381 (_BrepArrayDegenerateEdges)
-// flags them
-// as errors, measured against brep:intersectTol3d per proposal rule 381.
-// (BA.590/BA.591 are new checks; reconcile numbering with brep_validator.py.)
+// flags them as errors, measured against brep:intersectTol3d per proposal
+// rule 381.
+//
+// These two checks have no counterpart in brep_validator.py and no allocated
+// requirement number. They carried BA.590 and BA.591, which are
+// brep-nurbs-order-positive and brep-nurbs-vertex-count-ge-order -- both
+// implemented correctly elsewhere in this file, so the same tag named two
+// unrelated checks and a reader could not tell which had fired. They report
+// as [solid-shell-closure] until a number is allocated.
 UsdValidationErrorVector
 _BrepArraySolidClosure(const UsdPrim &usdPrim,
                        const UsdValidationTimeRange & /*timeRange*/)
@@ -2989,7 +3023,8 @@ _BrepArraySolidClosure(const UsdPrim &usdPrim,
                      UsdSolidValidationErrorNameTokens->solidShellOpenEdge,
                      usdPrim,
                      TfStringPrintf(
-                         "[BA.590] BrepArray <%s>: edge %u on a solidRegion "
+                         "[solid-shell-closure] BrepArray <%s>: edge %u on a "
+                         "solidRegion "
                          "shell of Brep %zu is referenced by %zu edgeuse(s) "
                          "(expected >= 2); a solid shell must be closed (no "
                          "single-use boundary edges). This is an open surface "
@@ -3020,7 +3055,8 @@ _BrepArraySolidClosure(const UsdPrim &usdPrim,
                          ->solidShellBrokenRadialRing,
                      usdPrim,
                      TfStringPrintf(
-                         "[BA.591] BrepArray <%s>: the radial ring of edge %u "
+                         "[solid-shell-closure] BrepArray <%s>: the radial "
+                         "ring of edge %u "
                          "on a solidRegion shell of Brep %zu does not link its "
                          "%zu edgeuses into a single cycle (an identity/self "
                          "ring leaves the shared faces unconnected).",
