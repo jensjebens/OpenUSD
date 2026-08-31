@@ -87,6 +87,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     /* BrepArrayRanges */                                                      \
     ((invalidFaceLoopCount, "InvalidFaceLoopCount"))                           \
     ((degenerateFaceURange, "DegenerateFaceURange"))                           \
+    ((invalidFaceRangeStructure, "InvalidFaceRangeStructure"))                 \
     ((degenerateFaceVRange, "DegenerateFaceVRange"))                           \
     ((invalidEdgeRangeOrder, "InvalidEdgeRangeOrder"))                         \
     ((invalidWireEdgeRangeOrder, "InvalidWireEdgeRangeOrder"))                 \

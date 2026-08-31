@@ -1090,6 +1090,36 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
         }
     }
 
+    // BA.145: every face:range component must be a finite number. NaN defeats
+    // every ordering test downstream -- each comparison against it is false --
+    // so the degeneracy and domain rules below pass a face whose window is not
+    // a number at all.
+    {
+        const VtArray<GfVec2d> fr = _Read<GfVec2d>(brep.GetFaceRangeAttr());
+        for (size_t i = 0; i < fr.size(); ++i) {
+            const double u = fr[i][0], v = fr[i][1];
+            if (std::isnan(u) || std::isnan(v)) {
+                errors.emplace_back(
+                    UsdSolidValidationErrorNameTokens->invalidFaceRangeStructure,
+                    UsdValidationErrorType::Error, _PrimSites(usdPrim),
+                    TfStringPrintf(
+                        "[BA.145] BrepArray <%s>: face:range at index %zu "
+                        "contains NaN (%g, %g); face:range must hold finite "
+                        "numeric UV pairs.",
+                        usdPrim.GetPath().GetText(), i, u, v));
+            } else if (std::isinf(u) || std::isinf(v)) {
+                errors.emplace_back(
+                    UsdSolidValidationErrorNameTokens->invalidFaceRangeStructure,
+                    UsdValidationErrorType::Error, _PrimSites(usdPrim),
+                    TfStringPrintf(
+                        "[BA.145] BrepArray <%s>: face:range at index %zu "
+                        "contains an infinite value (%g, %g); face:range must "
+                        "hold finite numeric UV pairs.",
+                        usdPrim.GetPath().GetText(), i, u, v));
+            }
+        }
+    }
+
     // BA.155 / BA.160: face:range is stored as (UVmin, UVmax) pairs; the U and
     // V intervals must each be non-degenerate (max > min).
     const VtArray<GfVec2d> faceRange = _Read<GfVec2d>(brep.GetFaceRangeAttr());
@@ -2318,33 +2348,52 @@ _BrepArraySchemaUsage(const UsdPrim &usdPrim,
         = _Read<TfToken>(brep.GetFaceSurfaceTypeAttr());
     const VtArray<TfToken> vertexPointType
         = _Read<TfToken>(brep.GetVertexPointTypeAttr());
+    const VtArray<TfToken> edgeCurveType
+        = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
+    const VtArray<TfToken> wireEdgeCurveType
+        = _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr());
 
+    enum class _Driver { Face, Vertex, Edge, WireEdge };
     struct Item {
         const char *schemaToken;  // GetAppliedSchemas() membership token
         const char *driverValue;  // value to count in the driver token array
         const char *presenceAttr; // attribute whose authorship proves data
         const char *ba;
         const char *label;
-        bool isVertexDriver;      // drive off vertex:pointType, else face:surfaceType
+        _Driver driver;
     };
     static const std::vector<Item> items = {
         { "BrepPointAPI:vertexPoint", "BrepPointAPI",
-          "brep:vertexPoint:point:position", "BA.305", "vertexPoint", true },
+          "brep:vertexPoint:point:position", "BA.305", "vertexPoint",
+          _Driver::Vertex },
         { "BrepSurfaceSphereAPI", "BrepSurfaceSphereAPI",
-          "brep:surface:sphere:center", "BA.485", "sphere", false },
+          "brep:surface:sphere:center", "BA.485", "sphere", _Driver::Face },
         { "BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI",
-          "brep:surface:plane:origin", "BA.495", "plane", false },
+          "brep:surface:plane:origin", "BA.495", "plane", _Driver::Face },
         { "BrepSurfaceCylinderAPI", "BrepSurfaceCylinderAPI",
-          "brep:surface:cylinder:origin", "BA.505", "cylinder", false },
+          "brep:surface:cylinder:origin", "BA.505", "cylinder", _Driver::Face },
         { "BrepSurfaceConeAPI", "BrepSurfaceConeAPI", "brep:surface:cone:origin",
-          "BA.516", "cone", false },
+          "BA.516", "cone", _Driver::Face },
         { "BrepSurfaceTorusAPI", "BrepSurfaceTorusAPI",
-          "brep:surface:torus:origin", "BA.526", "torus", false },
+          "brep:surface:torus:origin", "BA.526", "torus", _Driver::Face },
+        // The curve families. brep_validator.py counts these in
+        // edge:curveType and wireEdge:curveType; without them a prim that
+        // declares a NURBS wire edge and applies no
+        // BrepCurve3dNurbAPI:wireEdge3dNurb satisfied BA.583 vacuously.
+        { "BrepCurve3dNurbAPI:edge3dNurb", "BrepCurve3dNurbAPI",
+          "brep:edge3dNurb:curve3d:nurb:controlVertices", "BA.583",
+          "edge3dNurb", _Driver::Edge },
+        { "BrepCurve3dNurbAPI:wireEdge3dNurb", "BrepCurve3dNurbAPI",
+          "brep:wireEdge3dNurb:curve3d:nurb:controlVertices", "BA.583",
+          "wireEdge3dNurb", _Driver::WireEdge },
     };
     UsdValidationErrorVector errors;
     for (const Item &it : items) {
         const VtArray<TfToken> &driver
-            = it.isVertexDriver ? vertexPointType : faceSurfaceType;
+            = it.driver == _Driver::Vertex     ? vertexPointType
+            : it.driver == _Driver::Edge       ? edgeCurveType
+            : it.driver == _Driver::WireEdge   ? wireEdgeCurveType
+                                               : faceSurfaceType;
         const size_t count = _CountToken(driver, TfToken(it.driverValue));
         const bool hasData = _IsAuthored(usdPrim, it.presenceAttr);
         const bool applied
@@ -2380,8 +2429,13 @@ _BrepArraySchemaUsage(const UsdPrim &usdPrim,
                                 "occurrence(s), but required applied geometry "
                                 "API '%s' is absent from apiSchemas.",
                                 usdPrim.GetPath().GetText(),
-                                it.isVertexDriver ? "vertex:pointType"
-                                                  : "face:surfaceType",
+                                it.driver == _Driver::Vertex
+                                    ? "vertex:pointType"
+                                    : it.driver == _Driver::Edge
+                                        ? "edge:curveType"
+                                        : it.driver == _Driver::WireEdge
+                                            ? "wireEdge:curveType"
+                                            : "face:surfaceType",
                                 count, it.driverValue, it.schemaToken));
         }
     }
@@ -2543,6 +2597,26 @@ _BrepArrayReferences(const UsdPrim &usdPrim,
         = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
     const VtArray<unsigned int> loopVertexIndex
         = _Read<unsigned int>(brep.GetLoopVertexIndexAttr());
+
+    // A loop array shorter than the derived loop count is itself the finding.
+    // Iterating the shorter of the two silently skips the loops with no data,
+    // which is exactly where the missing entries are; brep_validator.py reports
+    // the shortfall instead.
+    {
+        const size_t expectedLoops = off.loop[n];
+        const size_t available
+            = std::min(loopEdgeuseCount.size(), loopVertexIndex.size());
+        if (available < expectedLoops) {
+            _Err(&errors,
+                 UsdSolidValidationErrorNameTokens->loopVertexIndexOutOfRange,
+                 usdPrim,
+                 TfStringPrintf(
+                     "[BA.175] BrepArray <%s>: loop:edgeuseCount / "
+                     "loop:vertexIndex missing data (expected loops up to %zu, "
+                     "but only %zu entries are available).",
+                     usdPrim.GetPath().GetText(), expectedLoops, available));
+        }
+    }
     for (size_t lp = 0;
          lp < loopEdgeuseCount.size() && lp < loopVertexIndex.size(); ++lp) {
         if (loopEdgeuseCount[lp] == 0u && loopVertexIndex[lp] >= vSize) {
@@ -2577,6 +2651,21 @@ _BrepArrayReferences(const UsdPrim &usdPrim,
     // BA.265: both components of each wireEdge:vertexIndices pair must be valid.
     const VtArray<GfVec2i> wireVtx
         = _Read<GfVec2i>(brep.GetWireEdgeVertexIndicesAttr());
+
+    // An array the shell counts say should exist, but which reads back empty --
+    // unauthored, or authored at a length the int2[] type cannot hold -- is the
+    // finding. Reading it as empty and iterating nothing reports a file with no
+    // wire-edge indexing at all as clean.
+    if (wireVtx.empty() && off.wireEdge[n] > 0) {
+        _Err(&errors,
+             UsdSolidValidationErrorNameTokens->wireEdgeVertexIndexOutOfRange,
+             usdPrim,
+             TfStringPrintf(
+                 "[BA.265] BrepArray <%s>: wireEdge:vertexIndices is missing or "
+                 "not authored for %zu wire edge(s), so the indexing cannot be "
+                 "validated.",
+                 usdPrim.GetPath().GetText(), off.wireEdge[n]));
+    }
     for (size_t w = 0; w < wireVtx.size(); ++w) {
         for (int k = 0; k < 2; ++k) {
             const long long c = wireVtx[w][k];
