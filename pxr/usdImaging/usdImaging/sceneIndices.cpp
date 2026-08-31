@@ -26,6 +26,7 @@
 
 #include "pxr/imaging/hd/materialSchema.h"
 #include "pxr/imaging/hd/noticeBatchingSceneIndex.h"
+#include "pxr/imaging/hdsi/purposeVisibilitySceneIndex.h"
 #include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/purposeSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
@@ -282,6 +283,10 @@ UsdImagingCreateSceneIndices(
             UsdImagingNiPrototypePropagatingSceneIndex::New(
                 sceneIndex, instanceDataSourceNames, callback);
     }
+
+    // After the prototype-propagating scene indices, which is where flattening
+    // happens, so purpose and purposeVisibility have both been inherited.
+    sceneIndex = HdsiPurposeVisibilitySceneIndex::New(sceneIndex);
 
     sceneIndex = result.postInstancingNoticeBatchingSceneIndex =
         HdNoticeBatchingSceneIndex::New(sceneIndex);

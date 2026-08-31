@@ -10,6 +10,7 @@
 #include "pxr/imaging/hd/flattenedOverlayDataSourceProvider.h"
 #include "pxr/imaging/hd/flattenedPrimvarsDataSourceProvider.h"
 #include "pxr/imaging/hd/flattenedPurposeDataSourceProvider.h"
+#include "pxr/imaging/hd/flattenedPurposeVisibilityDataSourceProvider.h"
 #include "pxr/imaging/hd/flattenedVisibilityDataSourceProvider.h"
 #include "pxr/imaging/hd/flattenedXformDataSourceProvider.h"
 #include "pxr/imaging/hd/coordSysBindingSchema.h"
@@ -17,6 +18,7 @@
 #include "pxr/imaging/hd/primvarSchema.h"
 #include "pxr/imaging/hd/primvarsSchema.h"
 #include "pxr/imaging/hd/purposeSchema.h"
+#include "pxr/imaging/hd/purposeVisibilitySchema.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
 
@@ -35,6 +37,8 @@ HdFlattenedDataSourceProviders()
             Make<HdFlattenedPrimvarsDataSourceProvider>(),
             HdPurposeSchema::GetSchemaToken(),
             Make<HdFlattenedPurposeDataSourceProvider>(),
+            HdPurposeVisibilitySchema::GetSchemaToken(),
+            Make<HdFlattenedPurposeVisibilityDataSourceProvider>(),
             HdVisibilitySchema::GetSchemaToken(),
             Make<HdFlattenedVisibilityDataSourceProvider>(),
             HdXformSchema::GetSchemaToken(),

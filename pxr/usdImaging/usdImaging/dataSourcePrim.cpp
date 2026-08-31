@@ -18,7 +18,9 @@
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/extentSchema.h"
 #include "pxr/imaging/hd/purposeSchema.h"
+#include "pxr/imaging/hd/purposeVisibilitySchema.h"
 #include "pxr/imaging/hd/primOriginSchema.h"
+#include "pxr/usd/usdGeom/visibilityAPI.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
 #include "pxr/imaging/hd/primvarsSchema.h"
@@ -31,6 +33,49 @@
 #include "pxr/usd/usdGeom/xformCommonAPI.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+namespace {
+
+// The UsdGeomVisibilityAPI attributes authored on this prim, if any. Only
+// authored opinions are emitted: an absent member is what lets
+// HdFlattenedPurposeVisibilityDataSourceProvider carry an ancestor's value
+// down, and an authored "inherited" is a real opinion that stops it.
+HdContainerDataSourceHandle
+_LocalPurposeVisibility(const UsdPrim &prim)
+{
+    const UsdGeomVisibilityAPI api(prim);
+    if (!api) {
+        return nullptr;
+    }
+
+    HdPurposeVisibilitySchema::Builder builder;
+    bool any = false;
+    auto add = [&](const UsdAttribute &attr, int which) {
+        if (!attr || !attr.HasAuthoredValue()) {
+            return;
+        }
+        TfToken value;
+        if (!attr.Get(&value)) {
+            return;
+        }
+        const HdTokenDataSourceHandle ds =
+            HdRetainedTypedSampledDataSource<TfToken>::New(value);
+        switch (which) {
+            case 0: builder.SetGuideVisibility(ds); break;
+            case 1: builder.SetProxyVisibility(ds); break;
+            case 2: builder.SetRenderVisibility(ds); break;
+        }
+        any = true;
+    };
+
+    add(api.GetGuideVisibilityAttr(), 0);
+    add(api.GetProxyVisibilityAttr(), 1);
+    add(api.GetRenderVisibilityAttr(), 2);
+
+    return any ? builder.Build() : nullptr;
+}
+
+}
 
 UsdImagingDataSourceVisibility::UsdImagingDataSourceVisibility(
         const UsdAttributeQuery &visibilityQuery,
@@ -709,6 +754,9 @@ UsdImagingDataSourcePrim::GetNames()
     
     if (usdPrim.IsA<UsdGeomImageable>()) {
         vec.push_back(HdVisibilitySchema::GetSchemaToken());
+        if (_LocalPurposeVisibility(usdPrim)) {
+            vec.push_back(HdPurposeVisibilitySchema::GetSchemaToken());
+        }
         UsdGeomImageable imageable(usdPrim);
         if (_HasNonDefaultPurpose(imageable)) {
             vec.push_back(HdPurposeSchema::GetSchemaToken());
@@ -782,6 +830,8 @@ UsdImagingDataSourcePrim::Get(const TfToken &name)
         } else {
             return nullptr;
         }
+    } else if (name == HdPurposeVisibilitySchema::GetSchemaToken()) {
+        return _LocalPurposeVisibility(_GetUsdPrim());
     } else if (name == HdPurposeSchema::GetSchemaToken()) {
         UsdGeomImageable imageable(_GetUsdPrim());
         if (_HasNonDefaultPurpose(imageable)) {
@@ -876,6 +926,12 @@ UsdImagingDataSourcePrim::Invalidate(
 
         if (propertyName == UsdGeomTokens->purpose) {
             locators.insert(HdPurposeSchema::GetDefaultLocator());
+        }
+
+        if (propertyName == UsdGeomTokens->guideVisibility ||
+            propertyName == UsdGeomTokens->proxyVisibility ||
+            propertyName == UsdGeomTokens->renderVisibility) {
+            locators.insert(HdPurposeVisibilitySchema::GetDefaultLocator());
         }
 
         if (UsdGeomXformable::IsTransformationAffectedByAttrNamed(
