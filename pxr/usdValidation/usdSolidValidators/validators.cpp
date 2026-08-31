@@ -38,6 +38,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -907,16 +908,22 @@ _BrepArrayTopology(const UsdPrim &usdPrim,
                    ->inconsistentEdgeuseArraySizes,
                &errors);
 
-    // Edge (BA.210): the number of edges is defined by edge:curveType. The
-    // remaining edge arrays must match, and edge:range has two entries per
-    // edge.
+    // Edge (BA.210): the remaining edge arrays must match the edge count, and
+    // edge:range has two entries per edge.
+    //
+    // brep_validator.py takes the edge count from edge:vertexIndices, not from
+    // edge:curveType. The two agree on well-formed data; where they do not, the
+    // count Python validates against is the one this has to use, or BA.230
+    // measures edge:range against a different number of edges and stays silent
+    // on a file Python reports.
     const VtArray<TfToken> edgeCurveType
         = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
-    const size_t numEdges = edgeCurveType.size();
+    const size_t numEdges
+        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()).size();
     _CheckSize(usdPrim, "BA.210", "edge:vertexIndices",
                _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()).size(),
-               numEdges,
-               TfStringPrintf("number of edges = %zu", numEdges),
+               edgeCurveType.size(),
+               TfStringPrintf("number of edges = %zu", edgeCurveType.size()),
                UsdSolidValidationErrorNameTokens->inconsistentEdgeArraySizes,
                &errors);
     _CheckSize(usdPrim, "BA.230", "edge:range",
@@ -2420,6 +2427,29 @@ _BrepArraySchemaUsage(const UsdPrim &usdPrim,
 // -------------------------------------------------------------------------- //
 // BrepArrayReferences                                                        //
 // -------------------------------------------------------------------------- //
+// The block of an authored index array belonging to Brep b.
+//
+// brep_validator.py takes a shortcut for a single-Brep prim: it ignores the
+// count-derived partition and treats the whole authored array as that Brep's
+// block. On well-formed data the two agree. On data whose counts disagree with
+// its arrays they do not, and the count-derived partition can come out empty --
+// a prim authoring brep:regionCount = [0] alongside a populated
+// faceuse:faceIndex has no faceuse partition at all, so a partition-driven loop
+// checks nothing while Python checks every entry.
+//
+// Returns [lo, hi) into the authored array.
+std::pair<size_t, size_t>
+_IndexBlock(const std::vector<size_t> &partition, size_t b, size_t numBreps,
+            size_t authoredSize)
+{
+    if (numBreps == 1) {
+        return { 0, authoredSize };
+    }
+    const size_t lo = std::min(partition[b], authoredSize);
+    const size_t hi = std::min(partition[b + 1], authoredSize);
+    return { lo, std::max(lo, hi) };
+}
+
 UsdValidationErrorVector
 _BrepArrayReferences(const UsdPrim &usdPrim,
                      const UsdValidationTimeRange & /*timeRange*/)
@@ -2439,8 +2469,8 @@ _BrepArrayReferences(const UsdPrim &usdPrim,
     const VtArray<unsigned int> faceIndex
         = _Read<unsigned int>(brep.GetFaceuseFaceIndexAttr());
     for (size_t b = 0; b < n; ++b) {
-        for (size_t fu = off.faceuse[b];
-             fu < off.faceuse[b + 1] && fu < faceIndex.size(); ++fu) {
+        const auto blk = _IndexBlock(off.faceuse, b, n, faceIndex.size());
+        for (size_t fu = blk.first; fu < blk.second; ++fu) {
             if (faceIndex[fu] < off.face[b] || faceIndex[fu] >= off.face[b + 1]) {
                 _Err(&errors,
                      UsdSolidValidationErrorNameTokens->faceuseFaceIndexOutOfRange,
@@ -2460,7 +2490,10 @@ _BrepArrayReferences(const UsdPrim &usdPrim,
     // single Brep this is exactly that Brep's range.
     const VtArray<unsigned int> edgeIndex
         = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
-    const size_t numEdges = _Read<TfToken>(brep.GetEdgeCurveTypeAttr()).size();
+    // Same edge count as BA.210/BA.230 above: edge:vertexIndices, which is what
+    // brep_validator.py bounds edgeuse:edgeIndex against.
+    const size_t numEdges
+        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()).size();
     for (size_t eu = 0; eu < edgeIndex.size(); ++eu) {
         if (edgeIndex[eu] >= numEdges) {
             _Err(&errors,
@@ -2477,6 +2510,10 @@ _BrepArrayReferences(const UsdPrim &usdPrim,
     const VtArray<unsigned int> nextRadial
         = _Read<unsigned int>(brep.GetEdgeuseNextRadialEUIndexAttr());
     const size_t totalEu = nextRadial.size();
+    // No single-Brep shortcut here: brep_validator.py bounds this one by the
+    // count-derived edgeuse partition, so taking the whole authored array would
+    // report a radial index as out of range on exactly the malformed prims
+    // where Python reports nothing.
     for (size_t b = 0; b < n; ++b) {
         for (size_t eu = off.edgeuse[b];
              eu < off.edgeuse[b + 1] && eu < nextRadial.size(); ++eu) {
