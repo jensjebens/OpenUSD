@@ -306,11 +306,17 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
     // BA.000 / BA.020: array sizes must be consistent with the number of
     // Breps. brep:regionCount and brep:intersectTol3d have one entry per Brep;
     // brep:extent has two (min, max corner) entries per Brep.
-    // BA.000 covers the one-entry-per-Brep attributes; BA.020 covers
-    // brep:extent's two-corners-per-Brep structure. They are separate
-    // requirements, so they report separately.
+    // BA.000 covers array sizes against the Brep count, for the per-Brep
+    // attributes and for brep:extent alike -- brep_validator.py reports both
+    // under BA.000, the second from its own brep:extent branch. BA.020 covers
+    // brep:extent's structure and reports the same size mismatch again.
+    //
+    // An attribute that is not authored at all is BA.005's to report, not
+    // this rule's: the Python size check runs with require_authored=False and
+    // skips it, so an unauthored brep:intersectTol3d must not read as a size
+    // of zero here.
     const size_t numBreps = regionCount.size();
-    if (tol.size() != numBreps) {
+    if (tolAttr.HasAuthoredValue() && tol.size() != numBreps) {
         errors.emplace_back(
             UsdSolidValidationErrorNameTokens->inconsistentBrepArraySizes,
             UsdValidationErrorType::Error, _PrimSites(usdPrim),
@@ -318,6 +324,17 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
                 "[BA.000] BrepArray <%s>: for %zu Brep(s) (brep:regionCount "
                 "size), expected brep:intersectTol3d size %zu but got %zu.",
                 usdPrim.GetPath().GetText(), numBreps, numBreps, tol.size()));
+    }
+    if (extentAttr.HasAuthoredValue() && !regionCount.empty()
+        && extent.size() != 2 * numBreps) {
+        errors.emplace_back(
+            UsdSolidValidationErrorNameTokens->inconsistentBrepArraySizes,
+            UsdValidationErrorType::Error, _PrimSites(usdPrim),
+            TfStringPrintf(
+                "[BA.000] BrepArray <%s>: brep:extent size (%zu) does not "
+                "match expected size (%zu) for %zu Breps.",
+                usdPrim.GetPath().GetText(), extent.size(), 2 * numBreps,
+                numBreps));
     }
     if (extent.size() != 2 * numBreps) {
         errors.emplace_back(
