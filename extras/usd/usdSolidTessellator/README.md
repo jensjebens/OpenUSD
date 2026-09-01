@@ -1,7 +1,7 @@
 # usdSolidTessellator
 
-`usdsolidtessellate`, a command-line tool that reads a `BrepArray` prim from a
-USD stage, tessellates it with OpenCASCADE Technology (OCCT), and writes the
+`usdsolidtessellate`, a command-line tool that reads `BrepArray` prims from a
+USD stage, tessellates them with OpenCASCADE Technology (OCCT), and writes the
 result as `UsdGeomMesh` prims.
 
 The same tessellation is available inside Hydra without any conversion step: the
@@ -135,8 +135,9 @@ usdsolidtessellate <input.usd> <output.usd> [primPath] \
 - `--angular-deflection` — maximum angle in radians between adjacent facet
   normals. Default 0.5; 0.1 smooths curved silhouettes at close zoom.
 
-`primPath` defaults to the stage's default prim. Fixtures nest `BrepArray` prims
-at varying depths, so pass the path explicitly when converting them.
+Omit `primPath` to tessellate every `BrepArray` on the stage, which is what an
+assembly export needs -- one per placed part. Pass a path to convert a single
+prim.
 
 ## Known limitations
 
