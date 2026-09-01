@@ -6,7 +6,7 @@
     Expected volume: 1000\r
     Expected face count: 6
 
-Generated from Composed Stage of root layer /home/jjebens/usd_build/OpenUSD/pxr/imaging/plugin/hdOcct/testenv/testUsdSolidTessellation/fixtures/testCube.usda
+Generated from Composed Stage of root layer fixtures/testCube.usda
 """
     metersPerUnit = 0.01
     upAxis = "Y"

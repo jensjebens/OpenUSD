@@ -3,7 +3,7 @@
     defaultPrim = "World"
     doc = """Cylinder radius=3 height=10 axis=Z (OCCT-generated NURBS solid, shared topology).
 
-Generated from Composed Stage of root layer /home/jjebens/usd_build/OpenUSD/pxr/imaging/plugin/hdOcct/testenv/testUsdSolidTessellation/fixtures/testCylinder.usda
+Generated from Composed Stage of root layer fixtures/testCylinder.usda
 """
     metersPerUnit = 1
     upAxis = "Z"

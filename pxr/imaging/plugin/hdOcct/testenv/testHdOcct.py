@@ -11,8 +11,10 @@ import unittest
 from pathlib import Path
 
 # Ensure USD Python modules are available
-USD_INSTALL = os.environ.get("USD_INSTALL_DIR",
-    "/home/horde/projects/usd-tessellation/usd-install")
+# The OpenUSD install to test against. No default that could be right for
+# someone else's checkout, so this has to be set.
+USD_INSTALL = os.environ.get("USD_INSTALL_DIR", "")
+REPO_ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, os.path.join(USD_INSTALL, "lib", "python"))
 
 from pxr import Usd, UsdGeom, Vt, Gf, Sdf
@@ -22,9 +24,8 @@ class TestCliTool(unittest.TestCase):
     """Tests for the usdsolidtessellate command-line tool."""
 
     TOOL = os.environ.get("USDSOLIDTESSELLATE",
-        "/home/horde/projects/usd-tessellation/build-hdocct/usdsolidtessellate")
-    TURBINE = os.environ.get("TEST_ASSET_TURBINE",
-        "/home/horde/.hermes/profiles/builds/home/TurbineFan.usd")
+        os.path.join(USD_INSTALL, "bin", "usdsolidtessellate"))
+    TURBINE = os.environ.get("TEST_ASSET_TURBINE", "")
 
     @classmethod
     def setUpClass(cls):
@@ -38,7 +39,7 @@ class TestCliTool(unittest.TestCase):
         env = os.environ.copy()
         env["LD_LIBRARY_PATH"] = (
             f"{USD_INSTALL}/lib:"
-            f"/home/horde/projects/usd-tessellation/build-hdocct:"
+            f"{os.path.join(USD_INSTALL, 'plugin', 'usd')}:"
             + env.get("LD_LIBRARY_PATH", "")
         )
         result = subprocess.run(
@@ -177,11 +178,9 @@ class TestCliTool(unittest.TestCase):
 class TestHydraRendering(unittest.TestCase):
     """Tests for the hdOcct Hydra rendering path via usdrecord."""
 
-    TURBINE = os.environ.get("TEST_ASSET_TURBINE",
-        "/home/horde/.hermes/profiles/builds/home/TurbineFan.usd")
+    TURBINE = os.environ.get("TEST_ASSET_TURBINE", "")
     USDRECORD = os.path.join(
-        "/home/horde/projects/usd-tessellation/OpenUSD",
-        "pxr/usdImaging/bin/usdrecord/usdrecord.py")
+        str(REPO_ROOT), "pxr/usdImaging/bin/usdrecord/usdrecord.py")
 
     @classmethod
     def setUpClass(cls):
@@ -199,7 +198,7 @@ class TestHydraRendering(unittest.TestCase):
         env.update({
             "LD_LIBRARY_PATH": (
                 f"{USD_INSTALL}/lib:"
-                f"/home/horde/projects/usd-tessellation/build-hdocct:"
+                f"{os.path.join(USD_INSTALL, 'plugin', 'usd')}:"
                 + env.get("LD_LIBRARY_PATH", "")
             ),
             "PYTHONPATH": f"{USD_INSTALL}/lib/python",
@@ -273,7 +272,7 @@ class TestSchemaRegistration(unittest.TestCase):
     def test_brep_array_type_recognized(self):
         """USD runtime recognizes BrepArray as a valid prim type."""
         stage = Usd.Stage.Open(
-            "/home/horde/.hermes/profiles/builds/home/TurbineFan.usd")
+            "")
         prim = stage.GetPrimAtPath("/World/Brep0")
         self.assertTrue(prim.IsValid())
         self.assertEqual(prim.GetTypeName(), "BrepArray")
@@ -281,7 +280,7 @@ class TestSchemaRegistration(unittest.TestCase):
     def test_brep_array_is_gprim(self):
         """BrepArray inherits from UsdGeomGprim (has extent, visibility)."""
         stage = Usd.Stage.Open(
-            "/home/horde/.hermes/profiles/builds/home/TurbineFan.usd")
+            "")
         prim = stage.GetPrimAtPath("/World/Brep0")
         # Should be imageable (Gprim inherits Imageable)
         imageable = UsdGeom.Imageable(prim)
