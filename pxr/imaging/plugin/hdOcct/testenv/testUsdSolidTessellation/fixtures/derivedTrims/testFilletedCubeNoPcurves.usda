@@ -3,7 +3,7 @@
     defaultPrim = "World"
     doc = """Box 10^3 with r=1 fillets on all edges (OCCT-generated, shared topology, degenerate-edge-free corners).
 
-Generated from Composed Stage of root layer /home/jjebens/usd_build/OpenUSD/pxr/imaging/plugin/hdOcct/testenv/testUsdSolidTessellation/fixtures/testFilletedCube.usda
+Generated from Composed Stage of root layer fixtures/testFilletedCube.usda
 """
     metersPerUnit = 0.01
     upAxis = "Y"

@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    doc = """Generated from Composed Stage of root layer /home/jjebens/usd_build/OpenUSD/pxr/imaging/plugin/hdOcct/testenv/testUsdSolidTessellation/fixtures/testDepressedPlane.usda
+    doc = """Generated from Composed Stage of root layer fixtures/testDepressedPlane.usda
 """
 )
 

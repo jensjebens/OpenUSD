@@ -467,7 +467,7 @@ UsdSolidTessellationResult _ExtractMesh(
 /// Only successful results contribute geometry. Partial failure is now
 /// reported rather than hidden: merged.success is true only when EVERY input
 /// result succeeded, and each failed result's error is accumulated into
-/// merged.errorMessage with its Brep index (debt register row 9 -- previously
+/// merged.errorMessage with its Brep index (previously
 /// success was hardcoded true and per-Brep errors were dropped). The
 /// hasNormals/hasUVs flags are derived from the first SUCCESSFUL result, not
 /// results[0]: if Brep 0 failed, results[0] is empty and reading its flags

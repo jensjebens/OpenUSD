@@ -18,7 +18,19 @@ endif()
 # Determine OCCT paths
 if (OpenCASCADE_FOUND AND DEFINED OpenCASCADE_INCLUDE_DIR)
     set(_OCCT_INCLUDE_DIR ${OpenCASCADE_INCLUDE_DIR})
-    set(_OCCT_LIBRARIES ${OpenCASCADE_LIBRARIES})
+
+    # Link only the modules used, as hdOcct does. See the comment there:
+    # OpenCASCADE_LIBRARIES spans every built module including Draw, which
+    # distributions package separately, so linking it breaks against a stock
+    # install.
+    if (DEFINED OpenCASCADE_ModelingAlgorithms_LIBRARIES)
+        set(_OCCT_LIBRARIES
+            ${OpenCASCADE_FoundationClasses_LIBRARIES}
+            ${OpenCASCADE_ModelingData_LIBRARIES}
+            ${OpenCASCADE_ModelingAlgorithms_LIBRARIES})
+    else()
+        set(_OCCT_LIBRARIES ${OpenCASCADE_LIBRARIES})
+    endif()
 else()
     set(_OCCT_INCLUDE_DIR ${OCCT_INCLUDE_DIR})
     set(_OCCT_LIBRARIES ${OCCT_LIBRARIES})

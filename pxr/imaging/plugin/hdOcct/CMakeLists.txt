@@ -31,7 +31,26 @@ endif()
 # Determine OCCT include and library paths
 if (OpenCASCADE_FOUND AND DEFINED OpenCASCADE_INCLUDE_DIR)
     set(_OCCT_INCLUDE_DIR ${OpenCASCADE_INCLUDE_DIR})
-    set(_OCCT_LIBRARIES ${OpenCASCADE_LIBRARIES})
+
+    # Link only the OCCT modules this plugin uses: FoundationClasses
+    # (TKernel, TKMath), ModelingData (TKG2d, TKG3d, TKGeomBase, TKBRep) and
+    # ModelingAlgorithms (TKTopAlgo, TKMesh, TKShHealing and friends).
+    #
+    # OpenCASCADE_LIBRARIES is the union of every module OCCT was built with,
+    # including Visualization, ApplicationFramework and Draw. Distribution
+    # packages commonly split those into separate -dev packages, so linking the
+    # union makes the plugin fail to link against a stock install with errors
+    # like "cannot find -lTKDraw". Draw is OCCT's Tcl test harness and has no
+    # business being a dependency of a Hydra plugin.
+    if (DEFINED OpenCASCADE_ModelingAlgorithms_LIBRARIES)
+        set(_OCCT_LIBRARIES
+            ${OpenCASCADE_FoundationClasses_LIBRARIES}
+            ${OpenCASCADE_ModelingData_LIBRARIES}
+            ${OpenCASCADE_ModelingAlgorithms_LIBRARIES})
+    else()
+        # Older OCCT configs do not publish the per-module lists.
+        set(_OCCT_LIBRARIES ${OpenCASCADE_LIBRARIES})
+    endif()
 else()
     # Fallback: use the variables set by Packages.cmake
     set(_OCCT_INCLUDE_DIR ${OCCT_INCLUDE_DIR})

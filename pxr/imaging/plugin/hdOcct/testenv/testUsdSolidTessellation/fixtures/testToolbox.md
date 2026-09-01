@@ -1,63 +1,46 @@
 # testToolbox.usda — real-CAD assembly fixture
 
 A production SolidWorks toolbox (AP214 STEP assembly export) converted to
-UsdSolid `BrepArray` prims: **11 placed part instances of 6 unique parts**
-(base shell, lid shell, 2× lock, 2× lock pin, 3× lid pin, handle) under
-per-occurrence `Xform`s whose transforms come from the STEP assembly graph
-(`NEXT_ASSEMBLY_USAGE_OCCURRENCE` → `ITEM_DEFINED_TRANSFORMATION` chains,
-sub-assembly composition included). 581 analytic faces total (337 planes,
-204 cylinders, 21 tori, 10 spheres, 9 NURBS) bounded by 1058 lines, 407
-circles, 70 NURBS curves.
+UsdSolid `BrepArray` prims by `extras/usd/stepToUsdSolid`. Ten assembly
+placements of six unique parts — base shell (two solids), lid shell, handle,
+2x lock, 2x lock pin, 3x lid pin — under per-placement `Xform`s whose
+transforms are composed down the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` chains,
+sub-assembly nesting included. Eleven `BrepArray` prims in all.
+
+Geometry stays in each part's own coordinate system, where the STEP authored
+it; only the placement moves. The three identical lid pins are three placements
+of one part's surfaces, not three copies.
+
+Placed totals: 631 faces (359 planes, 232 cylinders, 21 tori, 10 spheres, 9
+NURBS) bounded by 1104 lines, 463 circles and 70 NURBS curves. Across the six
+unique parts that is the STEP file's 581 `ADVANCED_FACE`s exactly.
 
 Why it matters as a fixture:
 
-- The source STEP contains **zero pcurves** (`PCURVE`/`SURFACE_CURVE` entity
-  count: 0) — typical of production CAD exports. Every trim here exercises the
-  derive-from-3D-edges path that proposal #109's optional `curveUv` implies
-  ("the edge curve defines the model truth").
+- The source STEP contains **zero pcurves** (`PCURVE` / `SURFACE_CURVE` count:
+  0) — typical of production CAD. Every trim exercises the derive-from-3D-edges
+  path that proposal #109's optional `curveUv` implies.
+- It contains **no seam edges** either: of its 235 faces on periodic surfaces,
+  none repeats an `EDGE_CURVE` within a loop, and no `EDGE_CURVE` is used more
+  than twice anywhere. This is the evidence that a full-period periodic face
+  does not need a seam edgeuse, which is what `BA.761` treats as a heuristic
+  signal rather than a requirement.
 - Real-world tolerances (axes like `(-1, 2.5e-32, 2.1e-16)`, radius
-  `2.4999…956`) — the data that motivated the shared-vertex wire assembly and
+  `2.4999...956`) — the data that motivated the shared-vertex wire assembly and
   hole-orientation fixes in `brepBuilder.cpp`.
-- Per-part `primvars:displayColor` mapped from the STEP `STYLED_ITEM` styling;
-  per-prim `extent`/`brep:extent` for viewport framing.
+- Per-part `primvars:displayColor` from the STEP `STYLED_ITEM` styling;
+  per-prim `extent` / `brep:extent` for viewport framing.
 
-Validator-clean (all 11 prims): the converter now authors the completion
-families the native `usdSolidValidators` and the SMLib USD reader require, so
-the whole file passes the UsdSolidBrep validator suite with zero flags.
-Completions applied converter-side (in the fixed base converter's `emit()`):
+## Validator state
 
-- `brep:intersectTol3d = [1e-06]` per Brep. Without it the validators fell back
-  to a 1e-9 tolerance (too tight for real-CAD vertices, which meet only to
-  ~1e-6), firing `EdgeCurveVertexMismatch`; and `InconsistentBrepArraySizes`
-  because its size (0) didn't match `brep:regionCount`.
-- `face:trimType = ["general", …]`, `loop:vertexIndex = [0, …]`,
-  `vertex:pointType = ["BrepPointAPI", …]`, empty `wireEdge:*` arrays — the
-  required families whose absence drove `AttributeNotAuthored`,
-  `MissingBrepAttributes`, and the `Inconsistent{Face,Loop}ArraySizes` size
-  mismatches. `vertex:pointType` also sizes the valid vertex-index range the
-  References validator checks `edge:vertexIndices` against, so its absence had
-  made every edge index "out of range" (`EdgeVertexIndexOutOfRange`).
-- Full-precision (`repr`) pi/2pi in `edge:range` and `face:range`. The old `%g`
-  formatting truncated 2π→`6.28319` (> 2π+1e-6) and π/2→`1.5708` (> π/2+1e-6),
-  which tripped the analytic domain-span checks `SurfaceDomainSpanExceeded` and
-  `SphereVDomainOutOfBounds`.
-- `vector3d` role on analytic axis/direction attributes (axis, refDirection,
-  line:direction); positions (center/origin/controlVertices) stay `point3d`.
+Two findings, both `BA.761` (Warn), the full-period seam-edgeuse heuristic
+discussed above. No errors.
 
-None of the flags were converter indexing bugs — the per-Brep slice/emit
-indices were already correct; every flag was a downstream consequence of a
-missing family, the missing tolerance, or the truncated domain limits.
+All eleven prims tessellate through OCCT.
 
-Known residuals (tracked, not asserted by tests): 6 full-period torus/sphere
-faces render via the parametric fallback; per-face tessellation cracks remain
-unless the env-gated `HDOCCT_SEW=1` sewing path is enabled (which also
-guarantees outward orientation per solid). The two most complex parts (handle,
-lock body) keep ~2% geometric boundary edges from per-edge-minted vertices with
-no sew — pre-existing and unrelated to these completions (the completions
-lowered it from 3–4.5% and removed the non-manifold artifacts).
+## Regenerating
 
-Provenance: converted by the reference STEP reader
-(`step_to_usdsolid.py`, PR #58 references) extended with assembly-graph
-resolution; the 1.7 MB source STEP is not committed (available on request).
-Not wired into the test suite yet — showcase/regression corpus only; may be
-removed if unwanted upstream.
+    python extras/usd/stepToUsdSolid/stepToUsdSolid.py toolbox.step \
+        testToolbox.usda --up-axis Y
+
+The 1.7 MB source STEP is not committed (available on request).
