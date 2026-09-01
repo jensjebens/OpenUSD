@@ -1,6 +1,6 @@
 # Locate usd-brep, NVIDIA's NURBS B-rep solid modelling kernel.
 #
-# The kernel is being renamed from SMLib to usd-brep (OMPE-105005). This module
+# The kernel is being renamed from SMLib to usd-brep. This module
 # is named for the destination; the artefacts it looks for still carry the
 # SMLib names until that rename lands in the source tree.
 #

@@ -92,11 +92,11 @@ HdUsdBrepTessellator::Tessellate(
             continue;
         }
 
-        // Analytic surfaces that have been through a USD round trip can leave
-        // the kernel in a state where SmApiTessellate crashes. SmApiTurnToNurbs
-        // converts them in place and is a no-op on surfaces that are already
-        // NURBS, so it is unconditional here rather than conditional on the
-        // face's surface type.
+        // Unconditional, and it needs to stay that way. An analytic surface
+        // rebuilt from the schema is not guaranteed to meet SmApiTessellate's
+        // preconditions, and SmApiTurnToNurbs is a no-op on a surface that is
+        // already NURBS -- so do not make this conditional on the face's
+        // surface type.
         SmApiTurnToNurbs(brep);
 
         SmPolyBrep *polyBrep = nullptr;

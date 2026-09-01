@@ -47,14 +47,11 @@ struct HDUSDBREP_API HdUsdBrepTessellationParams {
 
     /// Run the kernel's healer while converting from the schema.
     ///
-    /// Off by default. usd-brep heals every USD-sourced Brep whether or not it
-    /// needs it, because the provenance string the decision rests on is never
-    /// populated (OMPE-106060). On this schema's fixtures that usually
-    /// destroys geometry rather than repairing it -- a depressed plane reads
-    /// 623 points unhealed against 14 healed, and a healed Brep stops
-    /// responding to chordHeightTolerance altogether. It does genuinely repair
-    /// some inputs, so it stays available; it is not a sensible default for
-    /// data a producer has already validated.
+    /// Off by default. Healing re-derives topology, which a producer that has
+    /// already validated its output does not need, and it changes what comes
+    /// back: a healed Brep no longer responds to chordHeightTolerance, so the
+    /// caller loses control of the tessellation. Turn it on for data of
+    /// unknown provenance, where repairing the topology is worth that.
     bool healerEnabled = false;
 };
 

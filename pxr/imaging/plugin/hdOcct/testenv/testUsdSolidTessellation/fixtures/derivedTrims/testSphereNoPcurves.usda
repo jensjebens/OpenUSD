@@ -3,7 +3,7 @@
     defaultPrim = "World"
     doc = """Sphere radius=5 centered at origin (OCCT-generated analytic solid; degenerate-edge-free, pole=converging vertex per proposal rule 381).
 
-Generated from Composed Stage of root layer /home/jjebens/usd_build/OpenUSD/pxr/imaging/plugin/hdOcct/testenv/testUsdSolidTessellation/fixtures/testSphere.usda
+Generated from Composed Stage of root layer fixtures/testSphere.usda
 """
     metersPerUnit = 1
     upAxis = "Z"

@@ -6,7 +6,7 @@
 
 #include "brepBuilder.h"
 
-// BRepTools::UVBounds — used by the ring-artifact guard (debt register row 2.2)
+// BRepTools::UVBounds — used by the ring-artifact guard
 // to read a trimmed face's actual parametric span.
 #include <BRepTools.hxx>
 
@@ -307,7 +307,7 @@ Handle(Geom2d_BSplineCurve) _MakeBSplineCurve2d(
 /// Half of pi. Used as the frame-rotation angle applied to a Geom_Ellipse whose
 /// authored xRadius < yRadius (OCCT requires major >= minor) and, with a sign
 /// flip, as the matching remap of that ellipse's authored edge:range parameter
-/// (see the two ellipse dispatch sites; debt register rows 5 and 32).
+/// (see the two ellipse dispatch sites).
 constexpr double _halfPi = 1.5707963267948966;
 
 /// Period-normalize an authored parameter interval onto a periodic 3D curve's
@@ -322,7 +322,7 @@ constexpr double _halfPi = 1.5707963267948966;
 /// (often complementary) arc. Shifting the whole interval by an integer number of
 /// periods so r0 lands in [first, first+period) preserves the authored arc length
 /// and orientation (r1-r0 is unchanged) and lets the exact-param build succeed
-/// (debt register row 6). Returns true and writes the shifted [r0,r1] when the
+///. Returns true and writes the shifted [r0,r1] when the
 /// curve is periodic; false (leaving r0/r1 untouched) otherwise.
 bool _PeriodNormalizeRange(const Handle(Geom_Curve)& curve,
                            double& r0, double& r1)
@@ -347,7 +347,7 @@ bool _PeriodNormalizeRange(const Handle(Geom_Curve)& curve,
 /// route every raw authored face:range v through it before feeding OCCT. Guards
 /// a near-90-degree semiAngle (|cos| tiny) by leaving v unconverted -- the
 /// degenerate cone is handled/rejected elsewhere, and dividing by ~0 would
-/// explode the window (see debt register row 1).
+/// explode the window.
 double _ConeAxialToSlantV(const Handle(Geom_Surface)& surface, double v)
 {
     Handle(Geom_ConicalSurface) cone =
@@ -368,7 +368,7 @@ double _ConeAxialToSlantV(const Handle(Geom_Surface)& surface, double v)
 ///
 /// v0/v1 are authored (cone-AXIAL for a conical surface); convert them to the
 /// surface's own parameter space before sampling so the sampled isoparms match
-/// the surface OCCT will build (debt register row 1 -- previously sampled raw v).
+/// the surface OCCT will build (previously sampled raw v).
 bool _FaceRangeTouchesPole(
     const Handle(Geom_Surface)& surface,
     double u0, double u1, double v0, double v1, double tol)
@@ -427,7 +427,7 @@ TopoDS_Face _MakeParametricPoleFace(
     double u0, double u1, double v0, double v1, double tol)
 {
     // Authored cone v is AXIAL; OCCT's conical surface v is SLANT. Convert via
-    // the shared helper (no-op for non-cones) -- see debt register row 1.
+    // the shared helper (no-op for non-cones)
     v0 = _ConeAxialToSlantV(surface, v0);
     v1 = _ConeAxialToSlantV(surface, v1);
     if (u1 <= u0 || v1 <= v0) return TopoDS_Face();
@@ -468,7 +468,7 @@ UsdSolidBrepBuilder::_ReadBrepData(const UsdPrim& prim, _BrepData* data) const
 
     // Brep-level. brep:intersectTol3d authors one tolerance per Brep in the
     // array; keep the whole array and resolve per-Brep in _BuildSingleBrep
-    // (debt register row 17), rather than collapsing to entry [0] for all Breps.
+    //, rather than collapsing to entry [0] for all Breps.
     _GetAttr("brep:intersectTol3d", data->intersectTol3d);
     _GetAttr("brep:regionCount", data->regionCount);
 
@@ -628,7 +628,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
     // a last-entry clamp: a producer may author one shared tolerance for a
     // multi-Brep array (array shorter than the Brep count) or one per Brep. An
     // empty array falls back to the 1e-6 lenient-reader default (brepBuilder.h)
-    // (debt register row 17).
+    //.
     const double intersectTol3d =
         data.intersectTol3d.empty()
             ? 1e-6
@@ -696,7 +696,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                       gp_Dir(rd[0], rd[1], rd[2]));
     };
 
-    // Observability for the surface dispatch (debt register rows 12 + 18).
+    // Observability for the surface dispatch.
     //   _warnedSurfType   -- unknown face:surfaceType tokens already warned for
     //                        this Brep (warn once per unrecognized token).
     //   _warnedUnderpack  -- known families whose per-type surface array ran out
@@ -787,7 +787,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         } else if (stype.GetString() == "BrepSurfaceNurbAPI") {
             // NURBS is now an EXPLICIT token match (was the catch-all default).
             // An unrecognized token no longer silently consumes a NURBS slot and
-            // desyncs every later NURBS face (debt register row 12).
+            // desyncs every later NURBS face.
             if (nurbFace < data.surfaceUVertexCount.size()) {
                 int uCnt = data.surfaceUVertexCount[nurbFace];
                 int vCnt = data.surfaceVVertexCount[nurbFace];
@@ -814,7 +814,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
             // cursor) and leave the surface null, so the per-family packing stays
             // aligned for later faces. The null face is skipped by the trim
             // builders below (which already `continue` on a null surface). Warn
-            // once per unrecognized token per Brep (debt register row 12).
+            // once per unrecognized token per Brep.
             if (_warnedSurfType.insert(stype.GetString()).second) {
                 TF_WARN("hdOcct: Brep %zu face #%zu: unknown face:surfaceType "
                         "'%s'; face skipped (no surface built) and no surface "
@@ -991,7 +991,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         };
         #define HIST(st, fs) do { if (_histOn) _hist[(st)][(fs)]++; } while(0)
         // Roll the faces already skipped for a null (under-packed / unknown)
-        // surface into the histogram (debt register row 18). They never reach
+        // surface into the histogram. They never reach
         // _stOf below because a null surface `continue`s the trim loop, so tally
         // them here under ST_OTHER.
         if (_histOn && _nullSurfFaces > 0)
@@ -1013,7 +1013,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         std::vector<bool> edgeIsAnalytic(numEdgesTotal, false);
         // An xr<yr ellipse's frame is rotated +pi/2 (OCCT major>=minor), which
         // shifts its parameterization; the authored edge:range must then be
-        // remapped by -pi/2 where it is consumed below (debt register row 5).
+        // remapped by -pi/2 where it is consumed below.
         std::vector<bool> edgeEllipseSwapped(numEdgesTotal, false);
 
         // Shared boundary vertices, one TopoDS_Vertex per authored vertex index
@@ -1080,7 +1080,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                                           data.edgeEllipseRefDir[ellE]);
                         // OCCT requires major >= minor; rotate frame +pi/2 if
                         // not, and flag the edge so its authored edge:range is
-                        // remapped by -pi/2 at consumption (debt register row 5).
+                        // remapped by -pi/2 at consumption.
                         if (xr >= yr) {
                             edge3dCurves[ei] = new Geom_Ellipse(ax, xr, yr);
                         } else {
@@ -1431,8 +1431,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         (analyticSurf && poleSurface) ? Standard_True
                                                       : Standard_False;
                     fix.FixWireMode() = Standard_True;
-                    // Disable ShapeFix_Face::FixPeriodicDegenerated (debt
-                    // register row 2.1 / KUKA body_4 face 66). On a periodic
+                    // Disable ShapeFix_Face::FixPeriodicDegenerated. On a periodic
                     // analytic surface (cone/cylinder/sphere/torus) this OCCT
                     // sub-fixer, invoked by Perform(), deterministically
                     // SIGSEGVs on some malformed wire configurations (verified by
@@ -1444,8 +1443,9 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     // pole closure comes from FixAddNaturalBound (poles) and the
                     // authored wire, and the parametric face:range fallback below
                     // handles any face this heal then leaves invalid. Turning it
-                    // off removes the crash with no change to the clean corpus,
-                    // suite, or any other KUKA body (all verified unchanged).
+                    // off removes the crash with no change to the clean corpus
+                    // or the test suite, and none to any production assembly
+                    // measured (all verified unchanged).
                     fix.FixPeriodicDegeneratedMode() = Standard_False;
                     // Enable wire-orientation repair on MULTI-LOOP (holed) faces.
                     // On real STEP holed planes the inner (hole) wire is authored
@@ -1489,12 +1489,12 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     // limitation, documented as an xfail twin.
                     bool _ringReject = false;
                     if (BRepCheck_Analyzer(trimmedFace).IsValid()) {
-                        // Ring-artifact guard (debt register row 2.2 / KUKA
-                        // fillets). A trimmed analytic face on a PERIODIC surface
+                        // Ring-artifact guard, for fillets on real CAD. A
+                        // trimmed analytic face on a PERIODIC surface
                         // (cone u / cylinder u / sphere / torus u+v) can be
                         // accepted by the analyzer yet cover the FULL 2*pi period
                         // when the authored window is only a thin sliver -- e.g.
-                        // KUKA body_5 face 3116: a torus fillet with authored
+                        // a torus fillet with authored
                         // face:range u=[0.121,0.130] (uspan 0.009 rad) whose inner
                         // loop is a single full-circle edge [0,2*pi]; MakeFace then
                         // builds the whole torus revolution and the mesh renders a
@@ -1506,10 +1506,11 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         // parametric face:range fallback below rebuilds the tight
                         // authored window. Verified: silent on the whole clean
                         // corpus (toolbox has zero such faces -> committed-fixture
-                        // numbers unchanged), and on KUKA it removes the rings on
-                        // every affected body with none made worse (body_5
-                        // out-of-extent 509 -> 8, body_3 798 -> 0, body_2
-                        // 781 -> 2, all back-to-back deterministic).
+                        // numbers unchanged), and on a production robot assembly
+                        // it removes the rings on every affected body with none
+                        // made worse (worst body: out-of-extent faces 509 -> 8,
+                        // others 798 -> 0 and 781 -> 2, all deterministic
+                        // back-to-back).
                         if (analyticSurf &&
                             2*faceIdx+1 < data.faceRange.size()) {
                             Standard_Real fu0,fu1,fv0,fv1;
@@ -1536,7 +1537,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                                       "the wire wrapped the whole surface. "
                                       "Rejecting the over-covered trim; the "
                                       "parametric face:range fallback rebuilds the "
-                                      "authored window (debt register row 2.2). "
+                                      "authored window. "
                                       "Further occurrences counted in "
                                       "HDOCCT_TRIM_HIST ringGuard.",
                                       brepIndex, faceIdx,
@@ -1627,7 +1628,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                 // Authored cone v is AXIAL; OCCT's conical v is SLANT. Convert
                 // before feeding MakeFace and before the natural-bounds window
                 // classification below, else a cone patch is foreshortened by
-                // cos(semiAngle) (debt register row 1). No-op for non-cones.
+                // cos(semiAngle). No-op for non-cones.
                 const double pfv0 = _ConeAxialToSlantV(surface, uvLo[1]);
                 const double pfv1 = _ConeAxialToSlantV(surface, uvHi[1]);
                 if (uvHi[0] > uvLo[0] && pfv1 > pfv0) {
@@ -1701,7 +1702,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         // Authored cone v is AXIAL; OCCT's conical v is SLANT.
                         // Convert before both the sub-window test (vs the SLANT
                         // Bounds()) and MakeFace, else the cone patch is
-                        // foreshortened (debt register row 1). No-op for non-cones.
+                        // foreshortened. No-op for non-cones.
                         const double rfv0 = _ConeAxialToSlantV(surface, uvLo[1]);
                         const double rfv1 = _ConeAxialToSlantV(surface, uvHi[1]);
                         // A non-degenerate authored window strictly inside the
@@ -1923,7 +1924,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         // t - pi/2 in the rotated frame, so shift the authored
                         // edge:range to match, else MakeEdge(c3,p1,p2,r0,r1)
                         // selects the wrong (often complementary) arc on a
-                        // partial-arc ellipse (debt register row 5).
+                        // partial-arc ellipse.
                         ax.Rotate(ax.Axis(), _halfPi);
                         c3 = new Geom_Ellipse(ax, yr, xr);
                         if (haveRange) { r0 -= _halfPi; r1 -= _halfPi; }
@@ -2073,7 +2074,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
         // falls to the 3D-edge trim path. That gate is required (a mismatched
         // count means the positional mapping is unknowable), but the whole-set
         // discard was silent -- warn once, citing the counts, so a truncated or
-        // over-authored curveUv array (BA.375) is visible (debt register row 22).
+        // over-authored curveUv array (BA.375) is visible.
         const bool useTrim = (numTrim == data.edgeuseEdgeIndex.size()) &&
                              !data.trimCurveControlVertices.empty();
         if (!useTrim && numTrim != 0 &&
@@ -2084,7 +2085,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         "count (%zu); discarding the ENTIRE authored pcurve set "
                         "and trimming every face from its 3D edges instead "
                         "(positional packing requires an exact 1:1 match; see "
-                        "BA.375, debt register row 22).",
+                        "BA.375).",
                         brepIndex, numTrim, data.edgeuseEdgeIndex.size());
             }
         }
@@ -2186,7 +2187,7 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                         // wire, so the face would bound the wrong region. Fail
                         // the wire fast (mirrors the !hasTrimCurves sibling that
                         // breaks on a null edge3dCurves entry) rather than
-                        // silently adding a shorter loop (debt register row 2).
+                        // silently adding a shorter loop.
                         TF_WARN("hdOcct: Brep %zu face %zu: edgeuse %zu -> null/"
                                 "missing edge %u; failing the boundary wire.",
                                 brepIndex, faceIdx, euIdx, edgeIdx);
@@ -2281,14 +2282,14 @@ UsdSolidBrepBuilder::_BuildSingleBrep(
                     // Rescue failed and we keep the collapsed wire face: it
                     // triangulates to a sliver (<=2 tris) and leaves a visible
                     // hole at the pole/apex. Previously kept with zero signal
-                    // (debt register row 3).
+                    //.
                     TF_WARN("hdOcct: Brep %zu face %zu: singular (pole/apex) "
                             "face collapsed and parametric pole-closure failed; "
                             "keeping the degenerate wire face.",
                             brepIndex, faceIdx);
                 } else {
                     // Rescue failed and there was no wire face either: the
-                    // singular face is dropped entirely (debt register row 3).
+                    // singular face is dropped entirely.
                     TF_WARN("hdOcct: Brep %zu face %zu: singular (pole/apex) "
                             "face could not be built (wire and parametric "
                             "pole-closure both failed); dropping the face.",
