@@ -3,14 +3,16 @@
 ## Overview
 
 `stepToUsdSolid.py` converts a **STEP** file (ISO 10303-21/-42, the common CAD
-interchange format) into a **UsdSolid** B-rep stage. It reads the STEP part or
-assembly and writes one `Xform` + `BrepArray` prim per solid, authored through the
-`pxr.UsdSolid` schema API (Proposal #109).
+interchange format) into a **UsdSolid** B-rep stage, authored through the
+`pxr.UsdSolid` schema API. The schema is proposed at
+https://github.com/PixarAnimationStudios/OpenUSD-proposals/pull/109. How the STEP
+contents map onto prims is under Scope below.
 
 It is pure Python plus USD — no CAD kernel (no OpenCASCADE, no SMLib) is involved.
 That makes it a self-contained way to produce B-rep test data for the schema, the
 validator, and the tessellator: a STEP file becomes a `BrepArray` you can feed
-straight into `usdSolidTessellator` (this same PR) to render.
+straight into `usdsolidtessellate`, the reference tessellator under
+`extras/usd/usdSolidTessellator`, to render.
 
 ```
 python stepToUsdSolid.py part.step part.usdc
@@ -57,6 +59,10 @@ test assets, not a production STEP exporter.
 ## Round trip
 
 ```
-python stepToUsdSolid.py part.step part.usdc   # STEP -> UsdSolid B-rep
-usdsolidtessellate part.usdc part_mesh.usdc    # UsdSolid B-rep -> Mesh (usdSolidTessellator)
+python stepToUsdSolid.py part.step part.usdc            # STEP -> UsdSolid B-rep
+usdsolidtessellate part.usdc part_mesh.usdc /World/part # UsdSolid B-rep -> Mesh
 ```
+
+`usdsolidtessellate` prints its usage with the prim path in brackets, but it
+returns `code -2` when the argument is omitted, so pass the path of the
+`BrepArray` prim to tessellate.
