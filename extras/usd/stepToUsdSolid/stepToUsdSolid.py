@@ -788,10 +788,10 @@ def _pad_angular(lo, hi):
     The padding exists so a face is not trimmed exactly through its boundary
     vertices. A window that ends at the seam has nothing to gain from it there
     and everything to lose: 2% of the span past 2*pi turns a window that sits
-    inside the period into one that appears to straddle the seam. On the
-    Toolbox sample that accounted for 130 of the 139 out-of-period windows
-    BA.631 and BA.765 reported. Clamp when the unpadded window is inside the
-    period; a window that genuinely straddles the seam is left alone."""
+    inside the period into one that appears to straddle the seam. On a
+    production assembly export that accounted for 130 of the 139 out-of-period
+    windows BA.631 and BA.765 reported. Clamp when the unpadded window is inside
+    the period; a window that genuinely straddles the seam is left alone."""
     natural = ((0.0, _TWO_PI)
                if (lo >= -DEGENERATE_TOL and hi <= _TWO_PI + DEGENERATE_TOL)
                else None)
@@ -1952,9 +1952,9 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
     that part's solids as BrepArray children.
 
     Geometry stays in the part's own coordinate system, where the STEP authored
-    it; the placement is the only thing that moves. That keeps a part used
-    several times -- the toolbox has three identical lid pins -- to one set of
-    authored surfaces per part rather than one per placement."""
+    it; the placement is the only thing that moves. That keeps a part placed
+    several times -- a fastener repeated across an assembly -- to one set of
+    authored surfaces per part instead of one per placement."""
     sidx = {sref: k for k, sref in enumerate(solids)}
     used = {}
     for sr, nm, M in placed:
