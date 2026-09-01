@@ -3,7 +3,7 @@
     defaultPrim = "World"
     doc = """Cone: base radius 5 at z=0, apex (0,0,10) (OCCT-generated solid).
 
-Generated from Composed Stage of root layer /home/jjebens/usd_build/OpenUSD/pxr/imaging/plugin/hdOcct/testenv/testUsdSolidTessellation/fixtures/testCone.usda
+Generated from Composed Stage of root layer fixtures/testCone.usda
 """
     metersPerUnit = 1
     upAxis = "Z"
