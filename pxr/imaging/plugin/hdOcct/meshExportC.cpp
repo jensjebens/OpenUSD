@@ -1,6 +1,7 @@
 // C-callable mesh export for use via ctypes/Python and the CLI tool.
 #include "api.h"
 #include "tessellator.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/subset.h"
@@ -8,6 +9,7 @@
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/vt/array.h"
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -28,17 +30,38 @@ int ExportMeshImpl(const char* inputPath, const char* outputPath,
     auto inputStage = UsdStage::Open(inputPath);
     if (!inputStage) return -1;
 
-    UsdPrim brepPrim = inputStage->GetPrimAtPath(SdfPath(primPath));
-    if (!brepPrim) return -2;
+    // With no prim path, tessellate every BrepArray on the stage. A caller that
+    // has not named one means "convert this file", and a stage routinely holds
+    // more than one Brep -- an assembly export has one per placed part.
+    std::vector<UsdPrim> brepPrims;
+    if (primPath && primPath[0] != '\0') {
+        UsdPrim brepPrim = inputStage->GetPrimAtPath(SdfPath(primPath));
+        if (!brepPrim) return -2;
+        brepPrims.push_back(brepPrim);
+    } else {
+        static const TfToken brepArrayToken("BrepArray");
+        for (const UsdPrim& prim : inputStage->Traverse()) {
+            if (prim.GetTypeName() == brepArrayToken) {
+                brepPrims.push_back(prim);
+            }
+        }
+        if (brepPrims.empty()) return -2;
+    }
 
     UsdSolidTessellator tessellator;
 
-    auto results = tessellator.Tessellate(brepPrim, params);
+    std::vector<UsdSolidTessellationResult> results;
+    for (const UsdPrim& brepPrim : brepPrims) {
+        auto primResults = tessellator.Tessellate(brepPrim, params);
+        results.insert(results.end(),
+                       std::make_move_iterator(primResults.begin()),
+                       std::make_move_iterator(primResults.end()));
+    }
     fprintf(stdout,
-            "Tessellated %zu bodies (linearDeflection=%g angularDeflection=%g "
-            "relative=%d)\n",
-            results.size(), params.linearDeflection, params.angularDeflection,
-            params.relativeDeflection ? 1 : 0);
+            "Tessellated %zu bodies from %zu BrepArray prim(s) "
+            "(linearDeflection=%g angularDeflection=%g relative=%d)\n",
+            results.size(), brepPrims.size(), params.linearDeflection,
+            params.angularDeflection, params.relativeDeflection ? 1 : 0);
 
     auto outStage = UsdStage::CreateNew(outputPath);
     outStage->SetMetadata(UsdGeomTokens->upAxis, VtValue(TfToken("Y")));

@@ -24,6 +24,9 @@ static void usage(const char* argv0) {
     std::cerr
         << "Usage: " << argv0
         << " <input.usd> <output.usd> [primPath]\n"
+        << "\n"
+        << "  primPath              the BrepArray prim to tessellate. Omit it to\n"
+        << "                        tessellate every BrepArray on the stage.\n"
         << "          [--linear-deflection <f>] [--angular-deflection <rad>]\n"
         << "          [--relative-deflection]\n"
         << "\n"
@@ -41,7 +44,10 @@ static void usage(const char* argv0) {
 int main(int argc, char* argv[]) {
     std::string inputPath;
     std::string outputPath;
-    std::string primPath = "/World/Brep0";
+    // Empty means "every BrepArray on the stage". The previous default,
+    // /World/Brep0, is a path almost no stage has, so omitting the argument the
+    // usage line shows as optional failed with -2.
+    std::string primPath;
     // Sentinel < 0 means "flag not given"; fall through to the legacy fixed
     // defaults (the header's 0.1 / 0.5) so behaviour is unchanged without flags.
     double linearDeflection = -1.0;
