@@ -3,7 +3,7 @@
     defaultPrim = "World"
     doc = """20x20 plane sheet with r=3 circular hole (OCCT-generated, shared topology).
 
-Generated from Composed Stage of root layer /home/jjebens/usd_build/OpenUSD/pxr/imaging/plugin/hdOcct/testenv/testUsdSolidTessellation/fixtures/testPlaneWithHole.usda
+Generated from Composed Stage of root layer fixtures/testPlaneWithHole.usda
 """
     metersPerUnit = 0.01
     upAxis = "Y"

@@ -3,7 +3,7 @@
     defaultPrim = "World"
     doc = """Box 10^3 with r=3 through-hole along Z (OCCT-generated, shared topology).
 
-Generated from Composed Stage of root layer /home/jjebens/usd_build/OpenUSD/pxr/imaging/plugin/hdOcct/testenv/testUsdSolidTessellation/fixtures/testCubeWithHole.usda
+Generated from Composed Stage of root layer fixtures/testCubeWithHole.usda
 """
     metersPerUnit = 0.01
     upAxis = "Y"
