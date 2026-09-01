@@ -16,10 +16,30 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Poly_Polygon3D.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopLoc_Location.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
+#include <Standard_Failure.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <Geom_Surface.hxx>
+#include <Geom2d_Curve.hxx>
+#include <gp_Vec.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt2d.hxx>
+#include <map>
+#include <string>
+#include <tuple>
 #include <gp_Pnt.hxx>
 #include <gp_Dir.hxx>
 #include <BRepGProp.hxx>
@@ -229,6 +249,215 @@ UsdSolidTessellationResult _ExtractMesh(
         faceIndex++;
     }
 
+    // Discretize the B-rep's topological edges into polylines for the optional
+    // edge/line display, and classify each as SHARP (feature) or TANGENT
+    // (smooth, e.g. fillet<->face). The reconstructed shape uses a "fan"
+    // topology (edges are not shared between faces), so we recover adjacency
+    // geometrically: edges that coincide in 3D are the two sides of one
+    // physical edge, and the angle between their owning faces' outward normals
+    // tells sharp (angled) from tangent (parallel). De-dups the coincident
+    // pair to one polyline. (Educated-guess classification — a producer-authored
+    // edge-continuity flag would be the schema-level source of truth.)
+    {
+        // Discretize one edge into a polyline (Poly_Polygon3D if present, which
+        // is coincident with the meshed faces; else sample the 3D curve).
+        auto discretize = [&](const TopoDS_Edge& edge,
+                              std::vector<GfVec3d>& pts) {
+            TopLoc_Location eloc;
+            Handle(Poly_Polygon3D) poly = BRep_Tool::Polygon3D(edge, eloc);
+            if (!poly.IsNull()) {
+                const gp_Trsf& et = eloc.Transformation();
+                const TColgp_Array1OfPnt& nodes = poly->Nodes();
+                pts.reserve(nodes.Length());
+                for (int i = nodes.Lower(); i <= nodes.Upper(); ++i) {
+                    gp_Pnt p = nodes.Value(i).Transformed(et);
+                    pts.emplace_back(p.X(), p.Y(), p.Z());
+                }
+            } else {
+                try {
+                    BRepAdaptor_Curve curve(edge);
+                    GCPnts_QuasiUniformDeflection disc(curve, deflection);
+                    if (disc.IsDone()) {
+                        pts.reserve(disc.NbPoints());
+                        for (int i = 1; i <= disc.NbPoints(); ++i) {
+                            gp_Pnt p = disc.Value(i);
+                            pts.emplace_back(p.X(), p.Y(), p.Z());
+                        }
+                    }
+                } catch (const Standard_Failure&) {
+                }
+            }
+        };
+
+        // Outward surface normal of \p face at the midpoint of \p edge's pcurve.
+        auto faceNormalAtEdgeMid = [&](const TopoDS_Edge& edge,
+                                       const TopoDS_Face& face,
+                                       bool& ok) -> gp_Dir {
+            ok = false;
+            Standard_Real f2, l2;
+            Handle(Geom2d_Curve) pc =
+                BRep_Tool::CurveOnSurface(edge, face, f2, l2);
+            TopLoc_Location loc;
+            Handle(Geom_Surface) surf = BRep_Tool::Surface(face, loc);
+            if (pc.IsNull() || surf.IsNull()) return gp_Dir(0, 0, 1);
+            gp_Pnt2d uv = pc->Value(0.5 * (f2 + l2));
+            gp_Pnt p; gp_Vec du, dv;
+            surf->D1(uv.X(), uv.Y(), p, du, dv);
+            gp_Vec n = du.Crossed(dv);
+            if (n.Magnitude() < 1e-12) return gp_Dir(0, 0, 1);
+            n.Normalize();
+            if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+            if (!loc.IsIdentity()) n.Transform(loc.Transformation());
+            ok = true;
+            return gp_Dir(n);
+        };
+
+        // Discretize \p edge but push each vertex \p offset along the outward
+        // surface normal of \p face, so the emitted polyline floats just proud
+        // of the tessellated surface instead of z-fighting with / hiding behind
+        // it. Per-vertex (not constant) so curved edges (e.g. a hole rim) lift
+        // radially rather than translating. Falls back to the plain 3D
+        // discretization if the face has no pcurve / surface.
+        auto discretizeOffset = [&](const TopoDS_Edge& edge,
+                                    const TopoDS_Face& face,
+                                    double offset,
+                                    std::vector<GfVec3d>& pts) {
+            // Take the edge's vertices straight from the face's surface
+            // triangulation (PolygonOnTriangulation), so the edge polyline is
+            // sampled at exactly the same nodes the fillet surface mesh uses;
+            // then push each node a hair along its outward surface normal so the
+            // line sits just proud of the facets instead of z-fighting them.
+            try {
+                TopLoc_Location triLoc;
+                Handle(Poly_Triangulation) tri =
+                    BRep_Tool::Triangulation(face, triLoc);
+                if (tri.IsNull() || !tri->HasUVNodes()) {
+                    discretize(edge, pts);
+                    return;
+                }
+                Handle(Poly_PolygonOnTriangulation) poly =
+                    BRep_Tool::PolygonOnTriangulation(edge, tri, triLoc);
+                if (poly.IsNull()) { discretize(edge, pts); return; }
+                // World-space surface (location applied) -> D1 gives world
+                // derivatives, so the normal needs no further transform; the
+                // triangulation nodes are local and do need triLoc applied.
+                Handle(Geom_Surface) surf = BRep_Tool::Surface(face);
+                const gp_Trsf& tt = triLoc.Transformation();
+                const bool rev = (face.Orientation() == TopAbs_REVERSED);
+                const TColStd_Array1OfInteger& nodes = poly->Nodes();
+                pts.reserve(nodes.Length());
+                for (int i = nodes.Lower(); i <= nodes.Upper(); ++i) {
+                    const int n = nodes.Value(i);
+                    gp_Pnt p = tri->Node(n).Transformed(tt);
+                    gp_Vec nrm(0, 0, 0);
+                    if (!surf.IsNull()) {
+                        gp_Pnt2d uv = tri->UVNode(n);
+                        gp_Pnt sp; gp_Vec du, dv;
+                        surf->D1(uv.X(), uv.Y(), sp, du, dv);
+                        nrm = du.Crossed(dv);
+                    }
+                    if (nrm.Magnitude() > 1e-12) {
+                        nrm.Normalize();
+                        if (rev) nrm.Reverse();
+                        p.Translate(nrm.Multiplied(offset));
+                    }
+                    pts.emplace_back(p.X(), p.Y(), p.Z());
+                }
+            } catch (const Standard_Failure&) {
+                pts.clear();
+                discretize(edge, pts);
+            }
+        };
+
+        // edge -> its owning face (1:1 in the fan topology).
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaceMap;
+        TopExp::MapShapesAndAncestors(
+            shape, TopAbs_EDGE, TopAbs_FACE, edgeFaceMap);
+
+        struct EdgeRec {
+            std::vector<GfVec3d> pts;   // un-offset, used for coincidence keying
+            gp_Dir normal;
+            bool hasNormal = false;
+            TopoDS_Edge edge;
+            TopoDS_Face face;
+            bool hasFace = false;
+        };
+        std::vector<EdgeRec> recs;
+        std::map<std::string, std::vector<size_t>> groups;  // geom-key -> recs
+
+        auto keyOf = [](const std::vector<GfVec3d>& pts) {
+            auto q = [](double v) {
+                return (long long)std::llround(v * 1000.0);  // 1e-3 grid
+            };
+            const GfVec3d& a = pts.front();
+            const GfVec3d& b = pts.back();
+            const GfVec3d& m = pts[pts.size() / 2];
+            long long ax=q(a[0]),ay=q(a[1]),az=q(a[2]);
+            long long bx=q(b[0]),by=q(b[1]),bz=q(b[2]);
+            // sort endpoints so a reversed coincident edge maps to the same key
+            bool swap = std::tie(ax,ay,az) > std::tie(bx,by,bz);
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "%lld,%lld,%lld|%lld,%lld,%lld|%lld,%lld,%lld",
+                swap?bx:ax, swap?by:ay, swap?bz:az,
+                swap?ax:bx, swap?ay:by, swap?az:bz,
+                q(m[0]), q(m[1]), q(m[2]));
+            return std::string(buf);
+        };
+
+        TopTools_IndexedMapOfShape edgeMap;
+        TopExp::MapShapes(shape, TopAbs_EDGE, edgeMap);
+        for (int ei = 1; ei <= edgeMap.Extent(); ++ei) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edgeMap(ei));
+            if (BRep_Tool::Degenerated(edge)) continue;
+            EdgeRec rec;
+            discretize(edge, rec.pts);
+            if (rec.pts.size() < 2) continue;
+            rec.edge = edge;
+            if (edgeFaceMap.Contains(edge)) {
+                const TopTools_ListOfShape& faces = edgeFaceMap.FindFromKey(edge);
+                if (!faces.IsEmpty()) {
+                    rec.face = TopoDS::Face(faces.First());
+                    rec.hasFace = true;
+                    rec.normal = faceNormalAtEdgeMid(
+                        edge, rec.face, rec.hasNormal);
+                }
+            }
+            size_t idx = recs.size();
+            recs.push_back(std::move(rec));
+            groups[keyOf(recs[idx].pts)].push_back(idx);
+        }
+
+        // Tangent if the two owning faces meet at a near-zero dihedral.
+        const double tangentTol = 0.15;  // radians (~8.6 deg)
+        // Lift the emitted edges this far along the outward normal. The edge
+        // nodes are now coincident with the mesh facets, so only a small nudge
+        // (a fraction of the deflection) is needed to win the depth test.
+        const double edgeOffset = 0.3 * deflection;
+        for (const auto& kv : groups) {
+            const std::vector<size_t>& ids = kv.second;
+            const EdgeRec& a = recs[ids[0]];
+            bool tangent = false;
+            if (ids.size() >= 2) {
+                const EdgeRec& b = recs[ids[1]];
+                if (a.hasNormal && b.hasNormal) {
+                    tangent = (a.normal.Angle(b.normal) < tangentTol);
+                }
+            }
+            VtArray<int>& counts = tangent
+                ? result.tangentEdgeCurveVertexCounts
+                : result.edgeCurveVertexCounts;
+            VtArray<GfVec3d>& points = tangent
+                ? result.tangentEdgePoints : result.edgePoints;
+            std::vector<GfVec3d> outPts;
+            if (a.hasFace) {
+                discretizeOffset(a.edge, a.face, edgeOffset, outPts);
+            }
+            if (outPts.size() < 2) outPts = a.pts;  // fall back to un-offset
+            counts.push_back((int)outPts.size());
+            for (const auto& p : outPts) points.push_back(p);
+        }
+    }
+
     result.success = true;
     return result;
 }
@@ -313,6 +542,17 @@ UsdSolidTessellationResult _MergeResults(
             merged.faceBrepIndices.push_back(bi);
         for (const auto& fi : r.faceSolidFaceIndices)
             merged.faceSolidFaceIndices.push_back(fi);
+
+        // Edge polylines are a flat point array partitioned by per-curve
+        // counts; no index remap needed, just concatenate both arrays.
+        for (const auto& c : r.edgeCurveVertexCounts)
+            merged.edgeCurveVertexCounts.push_back(c);
+        for (const auto& p : r.edgePoints)
+            merged.edgePoints.push_back(p);
+        for (const auto& c : r.tangentEdgeCurveVertexCounts)
+            merged.tangentEdgeCurveVertexCounts.push_back(c);
+        for (const auto& p : r.tangentEdgePoints)
+            merged.tangentEdgePoints.push_back(p);
 
         vertOffset += (int)r.points.size();
     }

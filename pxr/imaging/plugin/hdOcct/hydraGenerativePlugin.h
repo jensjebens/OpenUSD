@@ -73,7 +73,16 @@ private:
         VtArray<GfVec3f> normals;
     };
 
+    // B-rep edge polylines emitted as a linear HdBasisCurves child prim,
+    // toggled via purpose=guide so it behaves like a wireframe overlay.
+    struct _EdgeData {
+        VtArray<GfVec3f> points;
+        VtArray<int> curveVertexCounts;
+    };
+
     std::vector<_MeshData> _meshes;
+    std::vector<_EdgeData> _edges;          // sharp / feature edges
+    std::vector<_EdgeData> _tangentEdges;   // smooth (fillet<->face) edges
     bool _cooked = false;
     std::mutex _mutex;  // OCCT is not thread-safe
 
