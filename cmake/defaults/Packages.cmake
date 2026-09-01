@@ -284,6 +284,11 @@ if (PXR_BUILD_IMAGING)
         find_package(Embree 4 REQUIRED CONFIG)
         add_library(Embree::embree ALIAS embree)
     endif()
+    # --usd-brep
+    if (PXR_BUILD_USDBREP_PLUGIN)
+        find_package(UsdBrep REQUIRED)
+    endif()
+
     # --OpenCASCADE (OCCT)
     if (PXR_BUILD_OCCT_PLUGIN)
         find_package(OpenCASCADE QUIET)
