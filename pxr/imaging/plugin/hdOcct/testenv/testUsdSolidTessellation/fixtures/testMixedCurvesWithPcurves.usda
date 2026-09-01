@@ -1,0 +1,88 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+)
+
+# testMixedCurvesWithPcurves -- one NURBS planar sheet whose single outer
+# trim loop mixes CURVE families, each with an AUTHORED pcurve (curveUv):
+#   e0 bottom  BrepCurve3dLineAPI    line
+#   e1 right   BrepCurve3dLineAPI    line
+#   e2 top     BrepCurve3dNurbAPI    nurb (linear; forces the NURBS edge family)
+#   e3 left    BrepCurve3dCircleAPI  semicircle arc, center (0,1.5) r=1.5
+# Region = rectangle [0,4]x[0,3] plus the left semicircular bulge. The NURBS
+# surface UV is authored isometric to XY, so each pcurve equals the edge XY.
+#
+# This exercises the hasTrimCurves (authored-pcurve) branch with ANALYTIC 3D
+# edges (line + circle) present ALONGSIDE a NURBS 3D edge -- a mixed edge-
+# family packing. In brepBuilder.cpp the pcurve-branch edges[] array is built
+# ONLY from the NURBS 3D-curve packing (edgeCurveVertexCount), so its indices
+# do not correspond to global edge indices once analytic edges are present,
+# and analytic edges have NO edges[] entry at all. All pcurves here are valid,
+# so the wire is built entirely from the pcurve path and the analytic-edge
+# fallback (which would read a null/misindexed edges[] slot and drop the edge)
+# is never taken -- the sheet renders correctly. The latent fallback gap is
+# documented as a code comment + finding, not forced with a degenerate pcurve
+# (validators must stay clean). Trimmed area = 12 (rect) + pi*1.5^2/2 (half
+# disk) = ~15.53.
+
+def Xform "World"
+{
+    def BrepArray "MixedCurves" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dCircleAPI:edge3dCircle", "BrepCurve3dLineAPI:edge3dLine", "BrepCurve3dNurbAPI:edge3dNurb", "BrepCurveUvNurbAPI", "BrepSurfaceNurbAPI"]
+    )
+    {
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0.0, 0.0, 1.0)]
+        uniform point3d[] brep:edge3dCircle:curve3d:circle:center = [(0.0, 1.5, 0.0)]
+        uniform double[] brep:edge3dCircle:curve3d:circle:radius = [1.5]
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1.0, 0.0, 0.0)]
+        uniform vector3d[] brep:edge3dLine:curve3d:line:direction = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        uniform point3d[] brep:edge3dLine:curve3d:line:origin = [(0.0, 0.0, 0.0), (4.0, 0.0, 0.0)]
+        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(4.0, 3.0, 0.0), (0.0, 3.0, 0.0)]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [0.0, 0.0, 1.0, 1.0]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1.0, 1.0]
+        uniform double2[] brep:curveUv:nurb:controlVertices = [(0.0, 0.0), (4.0, 0.0), (4.0, 0.0), (4.0, 3.0), (4.0, 3.0), (0.0, 3.0), (0.0, 3.0), (-1.5, 3.0), (-1.5, 1.5), (-1.5, 0.0), (0.0, 0.0)]
+        uniform double[] brep:curveUv:nurb:knots = [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1.0]
+        uniform uint[] brep:curveUv:nurb:order = [2, 2, 2, 3]
+        uniform uint[] brep:curveUv:nurb:vertexCount = [2, 2, 2, 5]
+        uniform double[] brep:curveUv:nurb:weights = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.7071067811865476, 1.0, 0.7071067811865476, 1.0]
+        uniform double3[] brep:extent = [(-1.5, 0.0, 0.0), (4.0, 3.0, 0.0)]
+        uniform double[] brep:intersectTol3d = [1e-06]
+        uniform uint[] brep:regionCount = [1]
+        uniform point3d[] brep:surface:nurb:controlVertices = [(-1.5, 0.0, 0.0), (-1.5, 3.0, 0.0), (4.0, 0.0, 0.0), (4.0, 3.0, 0.0)]
+        uniform uint[] brep:surface:nurb:uOrder = [2]
+        uniform double[] brep:surface:nurb:uKnots = [-1.5, -1.5, 4.0, 4.0]
+        uniform uint[] brep:surface:nurb:uVertexCount = [2]
+        uniform uint[] brep:surface:nurb:vOrder = [2]
+        uniform double[] brep:surface:nurb:vKnots = [0.0, 0.0, 3.0, 3.0]
+        uniform uint[] brep:surface:nurb:vVertexCount = [2]
+        uniform double[] brep:surface:nurb:weights = [1.0, 1.0, 1.0, 1.0]
+        uniform point3d[] brep:vertexPoint:point:position = [(0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (4.0, 3.0, 0.0), (0.0, 3.0, 0.0)]
+        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dNurbAPI", "BrepCurve3dCircleAPI"]
+        uniform double[] edge:range = [0.0, 4.0, 0.0, 3.0, 0.0, 1.0, 1.5707963267948966, 4.71238898038469]
+        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 1, 2, 3]
+        uniform token[] edgeuse:orientationType = ["same", "same", "same", "same"]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry"]
+        uniform uint[] face:loopCount = [1]
+        uniform double2[] face:range = [(-1.5, 0.0), (4.0, 3.0)]
+        uniform token[] face:surfaceType = ["BrepSurfaceNurbAPI"]
+        uniform token[] face:trimType = ["general"]
+        uniform uint[] faceuse:faceIndex = [0, 0]
+        uniform token[] faceuse:orientationType = ["same", "opposite"]
+        uniform uint[] loop:edgeuseCount = [4]
+        uniform uint[] loop:vertexIndex = [0]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["voidRegion"]
+        uniform uint[] shell:faceuseCount = [2]
+        uniform token[] shell:pointType = ["none"]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform double[] wireEdge:range = []
+        uniform int2[] wireEdge:vertexIndices = []
+    }
+}

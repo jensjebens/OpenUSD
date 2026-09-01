@@ -1,0 +1,74 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+)
+
+# testAnalyticPlaneWithHole -- an ANALYTIC plane face (BrepSurfacePlaneAPI)
+# trimmed by an outer square (4 analytic lines) and an inner full-circle hole
+# (one BrepCurve3dCircleAPI edge, u = 0..2pi), with NO pcurves. This is the
+# analytic-surface + analytic-full-circle-hole class that hit
+# BRepCheck_BadOrientationOfSubshape before the hole-orientation fix in
+# brepBuilder.cpp (commit ab344ef05): a full-period circular hole edge, derived
+# onto an analytic surface with no authored curveUv, was assembled with the
+# wrong subshape orientation and OCCT rejected the wire.
+#
+# The existing testPlaneWithHole covers a NURBS-surfaced hole WITH pcurves;
+# this fixture is the distinct analytic + pcurve-less case. Sheet form: a single
+# voidRegion whose one shell holds both faceuses of the one plane face (mirrors
+# testAnalyticPlane's region structure, plus a second loop).
+#
+# Winding: the outer square loop is CCW (material-on-left, edgeuses "same");
+# the inner hole loop is wound CW via edgeuse:orientationType = "opposite" on
+# the full-circle edge (the analytic circle runs CCW, reversed => CW inner loop,
+# the material-on-left convention SMLib/OCCT expect). There is no curveUv to
+# shoelace-check, so the winding is asserted by construction here.
+#
+# Geometry matches testPlaneWithHole (20x20 sheet centered at origin, r=3 hole),
+# so the trimmed area is 400 - pi*9, independent of the OCCT meshing density.
+
+def Xform "World"
+{
+    def BrepArray "AnPlaneHole" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dCircleAPI:edge3dCircle", "BrepCurve3dLineAPI:edge3dLine", "BrepSurfacePlaneAPI"]
+    )
+    {
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1)]
+        uniform point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0)]
+        uniform double[] brep:edge3dCircle:curve3d:circle:radius = [3]
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0)]
+        uniform vector3d[] brep:edge3dLine:curve3d:line:direction = [(1, 0, 0), (0, 1, 0), (-1, 0, 0), (0, -1, 0)]
+        uniform point3d[] brep:edge3dLine:curve3d:line:origin = [(-10, -10, 0), (10, -10, 0), (10, 10, 0), (-10, 10, 0)]
+        uniform double3[] brep:extent = [(-10, -10, 0), (10, 10, 0)]
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform uint[] brep:regionCount = [1]
+        uniform vector3d[] brep:surface:plane:axis = [(0, 0, 1)]
+        uniform point3d[] brep:surface:plane:origin = [(0, 0, 0)]
+        uniform vector3d[] brep:surface:plane:refDirection = [(1, 0, 0)]
+        uniform point3d[] brep:vertexPoint:point:position = [(-10, -10, 0), (10, -10, 0), (10, 10, 0), (-10, 10, 0), (3, 0, 0)]
+        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dCircleAPI"]
+        uniform double[] edge:range = [0, 20, 0, 20, 0, 20, 0, 20, 0, 6.2831853071795862]
+        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 4)]
+        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3, 4]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 1, 2, 3, 4]
+        uniform token[] edgeuse:orientationType = ["same", "same", "same", "same", "opposite"]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry", "topEntry"]
+        uniform uint[] face:loopCount = [2]
+        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI"]
+        uniform token[] face:trimType = ["general"]
+        uniform double2[] face:range = [(-10, -10), (10, 10)]
+        uniform uint[] faceuse:faceIndex = [0, 0]
+        uniform token[] faceuse:orientationType = ["same", "opposite"]
+        uniform uint[] loop:edgeuseCount = [4, 1]
+        uniform uint[] loop:vertexIndex = [0, 0]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["voidRegion"]
+        uniform uint[] shell:faceuseCount = [2]
+        uniform token[] shell:pointType = ["none"]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform int2[] wireEdge:vertexIndices = []
+        uniform double[] wireEdge:range = []
+    }
+}
