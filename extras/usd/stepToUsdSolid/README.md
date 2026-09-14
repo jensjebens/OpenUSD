@@ -8,11 +8,10 @@ interchange format) into a **UsdSolid** B-rep stage, authored through the
 https://github.com/PixarAnimationStudios/OpenUSD-proposals/pull/109. How the STEP
 contents map onto prims is under Scope below.
 
-It is pure Python plus USD — no CAD kernel (no OpenCASCADE, no SMLib) is involved.
-That makes it a self-contained way to produce B-rep test data for the schema, the
-validator, and the tessellator: a STEP file becomes a `BrepArray` you can feed
-straight into `usdsolidtessellate`, the reference tessellator under
-`extras/usd/usdSolidTessellator`, to render.
+It is pure Python plus USD — no CAD kernel is involved. That makes it a
+self-contained way to produce B-rep test data for the schema and its validators:
+a STEP file becomes a `BrepArray` that `usdSolidValidators` can check without any
+tessellator in the loop.
 
 ```
 python stepToUsdSolid.py part.step part.usdc
@@ -56,13 +55,16 @@ test assets, not a production STEP exporter.
   UsdSolid` resolves and `BrepArray` is a registered type.
 - No third-party Python packages: the STEP reader uses only the standard library.
 
-## Round trip
+## Checking the output
 
 ```
-python stepToUsdSolid.py part.step part.usdc            # STEP -> UsdSolid B-rep
-usdsolidtessellate part.usdc part_mesh.usdc /World/part # UsdSolid B-rep -> Mesh
+python stepToUsdSolid.py part.step part.usdc   # STEP -> UsdSolid B-rep
+usdchecker part.usdc                           # runs the usdSolid validators
 ```
 
-`usdsolidtessellate` prints its usage with the prim path in brackets, but it
-returns `code -2` when the argument is omitted, so pass the path of the
-`BrepArray` prim to tessellate.
+`testenv/testStepToUsdSolid.py` does this end to end on a box it generates
+itself, and asserts that `usdSolidValidators` reports nothing.
+
+A validator confirms the B-rep is well formed; it does not confirm the shape is
+correct. Verifying the geometry needs a tessellator, which lives outside this
+sample.
