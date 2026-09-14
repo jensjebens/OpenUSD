@@ -46,8 +46,26 @@ times has one set of authored surfaces rather than one per placement. A file wit
 assembly structure maps each solid to a top-level prim in world coordinates.
 
 This is a **reference / sample importer**, in the spirit of the Gaussian-splat
-`py3dgsPlyToUsd.py` sample: enough to exercise the schema end to end and to generate
-test assets, not a production STEP exporter.
+`py3dgsPlyToUsd.py` sample under `extras/imaging/examples/hdParticleField`: enough to
+exercise the schema end to end and to generate test assets, not a production STEP
+exporter.
+
+### What could come out
+
+Two of the features above are conveniences rather than demonstrations of the schema,
+and either can be dropped without touching the B-rep path:
+
+- **Colour** (`resolve_colors`, ~80 lines) reads `STYLED_ITEM` chains to author
+  `displayColor`. Colour is not part of a boundary representation; it is here so
+  converted assets are legible in a viewer.
+- **Assembly placement** (`assembly_placements` and its helpers, ~190 lines) composes
+  `NEXT_ASSEMBLY_USAGE_OCCURRENCE` transforms into `Xform` prims. Assembly structure is
+  a USD composition concern, not a `UsdSolid` one.
+
+Together they are roughly an eighth of the file. They are kept for now because they
+make the output usable on real CAD rather than on single parts, but a reviewer who
+wants this sample smaller should take these first, ahead of anything that reads
+geometry.
 
 ## Requirements
 
