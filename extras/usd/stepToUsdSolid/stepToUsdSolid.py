@@ -5,9 +5,9 @@ stepToUsdSolid -- convert a STEP (ISO 10303-21/-42) file to a UsdSolid B-rep sta
 
 A reference importer for the UsdSolid schema: it reads a STEP part or assembly and
 writes one Xform + BrepArray prim per solid, authored through the pxr UsdSolid
-schema API. It is pure Python plus USD -- no CAD kernel (no OpenCASCADE, no SMLib)
-in the loop -- so it doubles as a self-contained way to produce B-rep test data for
-the schema, the validator, and the tessellator.
+schema API. It is pure Python plus USD -- no CAD kernel is involved -- so it
+doubles as a self-contained way to produce B-rep test data for the schema and its
+validators.
 
     stepToUsdSolid input.stp output.usdc
 
@@ -1989,7 +1989,8 @@ def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
     """Convert one STEP file to a UsdSolid stage: one Xform + BrepArray prim per
     solid, under a /World Xform. Output format follows the extension (.usda text or
     .usdc binary crate)."""
-    ents = parse_step(open(inp, errors="replace").read())
+    with open(inp, errors="replace") as f:
+        ents = parse_step(f.read())
     rd = Reader(ents)
     angle_scale = detect_angle_scale(rd, ents)
     tol, unc, usrc = derive_tolerance(rd, ents)
