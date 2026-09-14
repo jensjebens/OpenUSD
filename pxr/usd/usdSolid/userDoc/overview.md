@@ -62,7 +62,7 @@ A loop's winding is carried by the attributes the schema already has — `edgeus
 
 Producers must author edgeuse order and `orientationType` so this holds. Consumers may rely on it and need not re-orient loops.
 
-**Why the schema states this.** NVIDIA's SMLib OCCT/PRC-to-USD converters (`OCCT_BREP_IMPORT`, `BREP_PRC_SM`) and OCCT itself assemble holes from explicit orientation flags — OCCT's `Forward` / `Reversed` map onto this `orientationType` — never from geometric winding, and they expect outer-CCW / inner-CW, the STEP convention. As a consumer, SMLib drops holed faces when inner loops are authored CCW. hdOcct is being updated to author and consume this same convention. Stating the winding as the deterministic consequence of `orientationType` lets any consumer assemble holes without re-orienting loops, and lets producers emit the outer loop first rather than detecting it geometrically (as OCCT `.brep` does, by largest UV-domain bounding-box area).
+**Why the schema states this.** Solid modelling kernels assemble holes from explicit orientation flags — OCCT's `Forward` / `Reversed` map onto this `orientationType` — never from geometric winding, and they expect outer-CCW / inner-CW, the STEP convention (ISO 10303-42 `FACE_OUTER_BOUND`). A consumer that assembles holes this way drops holed faces when inner loops are authored CCW. hdOcct is being updated to author and consume this same convention. Stating the winding as the deterministic consequence of `orientationType` lets any consumer assemble holes without re-orienting loops, and lets producers emit the outer loop first rather than detecting it geometrically (as OCCT `.brep` does, by largest UV-domain bounding-box area).
 
 ## Inheritance and related schemas
 

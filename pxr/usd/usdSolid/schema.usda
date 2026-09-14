@@ -120,13 +120,13 @@ class BrepArray  "BrepArray" (
                                                             Producers MUST author edgeuse order and orientationType so this holds. Consumers MAY rely
                                                             on it and need not re-orient loops to assemble holes.
 
-                                                            Why this is stated. NVIDIA's SMLib OCCT/PRC-to-USD converters (OCCT_BREP_IMPORT,
-                                                            BREP_PRC_SM) and OCCT itself key hole assembly off explicit orientation flags
-                                                            (OCCT Forward/Reversed map to this orientationType), never off geometric winding, and they
-                                                            expect outer-CCW / inner-CW ("material on the left"), consistent with the STEP norm. SMLib
-                                                            as a consumer drops holed faces when inner loops are authored CCW. Fixing the winding as
-                                                            the deterministic consequence of orientationType lets any consumer assemble holes without
-                                                            re-orienting loops or detecting the outer loop geometrically. """ )
+                                                            Why this is stated. Solid modelling kernels key hole assembly off explicit orientation
+                                                            flags (OCCT's Forward/Reversed map to this orientationType), never off geometric winding,
+                                                            and they expect outer-CCW / inner-CW ("material on the left"), consistent with the STEP
+                                                            norm (ISO 10303-42 FACE_OUTER_BOUND). A consumer that assembles holes this way drops holed
+                                                            faces when inner loops are authored CCW. Fixing the winding as the deterministic
+                                                            consequence of orientationType lets any consumer assemble holes without re-orienting
+                                                            loops or detecting the outer loop geometrically. """ )
     uniform uint[]    edgeuse:nextRadialEUIndex   ( doc = """ index of the nextRadialEdgeuse in a right-hand-rule traversal around the edgeuse's edge. size() = Number of one-sided edge_to_face connections.""")
     uniform token[]   edgeuse:thisRadialEntryType ( allowedTokens = ["topEntry", "bottomEntry"]
                                                     doc = """ - Each BrepArray edgeuse represents a {TopEdgeuse BotEdgeuse} mated pair connecting one side of an edge to the top and bottom sides of a face.
@@ -160,9 +160,9 @@ class BrepArray  "BrepArray" (
                                                               is the vertex at the curve's parametric START (Edge:Range(0)) and vertexIndices[1] is the vertex at its END
                                                               (Edge:Range(1)); the curve runs start -> end. Producers must swap the pair for edges whose topological orientation
                                                               is reversed relative to the curve, so that the authored endpoints always agree with the curve's evaluated start/end.
-                                                              (Rule 434.) Interop: the native validator (BA.240) and SMLib require the authored endpoints to match the 3d curve's
+                                                              (Rule 434.) Interop: the native validator (BA.240) requires the authored endpoints to match the 3d curve's
                                                               evaluated start/end within brep:intersectTol3d; ordering by topological edge orientation instead corrupts curved-edge
-                                                              reconstruction (an observed SMLib round-trip failure).
+                                                              reconstruction (an observed kernel round-trip failure).
                                                               When a Brep has edges, edge:vertexIndices are required because vertices can be shared with loopVertices and wireEdgeVertices.
                                                               (note: edge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
                                                               size() = number of Edges. """ )
@@ -339,9 +339,10 @@ class "BrepCurve3dLineAPI" (
     where t is the curve parameter and direction is a unit vector.
     The edge:range attribute provides the parameter bounds {tMin, tMax} for each line edge.
 
-    Both PRC (A3DCrvLineData) and SMLib (SmLine) define lines with a point and direction.
-    SMLib additionally stores a scale factor (curve speed); in this schema the speed is
-    always 1.0, meaning distance along the line equals the parameter change.
+    This matches PRC (A3DCrvLineData) and STEP AP242 (LINE, whose direction is a VECTOR),
+    which both define a line by a point and a direction. Kernels that carry a separate curve
+    speed (scale factor) should emit 1.0: in this schema the speed is always 1.0, meaning
+    distance along the line equals the parameter change.
     """
     customData = { token apiSchemaType = "multipleApply"
                    token propertyNamespacePrefix = "brep"
@@ -384,9 +385,9 @@ class "BrepCurve3dCircleAPI" (
     where t is the angular parameter in radians.
     The edge:range attribute provides the parameter bounds {tMin, tMax} in radians.
 
-    Both PRC (A3DCrvCircleData) and SMLib (SmCircle) define circles with an axis placement
-    and a radius. PRC uses radians; SMLib uses degrees internally but this schema
-    normalizes to radians.
+    This matches PRC (A3DCrvCircleData) and STEP AP242 (CIRCLE), which both define a circle
+    by an axis placement and a radius. PRC uses radians and so does this schema; kernels that
+    hold angles in degrees internally must convert on read and write.
     """
     customData = { token apiSchemaType = "multipleApply"
                    token propertyNamespacePrefix = "brep"
@@ -446,12 +447,12 @@ class "BrepCurve3dEllipseAPI" (
     where t is the angular parameter in radians.
     The edge:range attribute provides the parameter bounds {tMin, tMax} in radians.
 
-    Both PRC (A3DCrvEllipseData) and SMLib (SmEllipse) define ellipses with an axis placement
-    and two radii. PRC uses radians; SMLib uses degrees internally but this schema
-    normalizes to radians.
+    This matches PRC (A3DCrvEllipseData) and STEP AP242 (ELLIPSE), which both define an
+    ellipse by an axis placement and two radii. PRC uses radians and so does this schema;
+    kernels that hold angles in degrees internally must convert on read and write.
 
     Conflict note: PRC names the radii 'semiAxis1Length' and 'semiAxis2Length' without
-    requiring semiAxis1 >= semiAxis2. SMLib uses 'RadiusAtXAxis' and 'RadiusAtYAxis'.
+    requiring semiAxis1 >= semiAxis2.
     STEP AP242 names them 'semi_axis_1' (along refDirection) and 'semi_axis_2'.
     This schema uses 'xRadius' (along refDirection) and 'yRadius'
     without requiring xRadius >= yRadius, matching the STEP convention
@@ -520,7 +521,14 @@ class "BrepCurveUvNurbAPI" (
 {
     uniform double2[] brep:curveUv:nurb:controlVertices (
         doc = """ packed 2d control vertices for all edgeuse UV NurbCurves.
-        size() = SUM_ii(curveUvVertexCount[ii]). """
+        size() = SUM_ii(curveUvVertexCount[ii]).
+
+        Each (u, v) is a point in the parameter space of the surface the owning
+        faceuse's face is on, in that surface's own parameterization -- the same
+        one face:range is expressed in. Where a surface's parameterization
+        differs from the one a consumer uses internally, a pcurve needs the same
+        conversion face:range does; see BrepSurfaceConeAPI for the case where
+        this bites. """
         customData = {
             string apiName = "curveUvControlVertices"
         }
@@ -742,10 +750,10 @@ class "BrepSurfacePlaneAPI" (
     The surface normal equals the axis direction.
     The face:range attribute provides the UV trim domain bounds for each plane face.
 
-    This definition is compatible with both PRC (A3DSurfPlaneData) and SMLib (SmPlane)
-    which both use an axis placement (origin, X axis, Z axis) to define the plane.
-    Note: SMLib additionally stores a UV scale factor that scales the U and V directions
-    independently. In this schema, UV scale is always 1.0; any scaling is absorbed into
+    This definition is compatible with PRC (A3DSurfPlaneData) and STEP AP242 (PLANE), which
+    both use an axis placement (origin, X axis, Z axis) to define the plane.
+    Note: kernels that carry a UV scale factor scaling the U and V directions independently
+    should emit 1.0. In this schema, UV scale is always 1.0; any scaling is absorbed into
     the face:range domain bounds.
     """
     customData = { token apiSchemaType = "singleApply"
@@ -799,9 +807,9 @@ class "BrepSurfaceCylinderAPI" (
     The face:range attribute provides the UV trim domain bounds {uMin, vMin, uMax, vMax}
     in radians for u and linear units for v.
 
-    Both PRC and SMLib define the cylinder using an axis placement and radius.
-    PRC uses radians for the angular parameter; SMLib (SmCylinder) uses degrees internally
-    but this schema normalizes to radians.
+    This matches PRC and STEP AP242 (CYLINDRICAL_SURFACE), which both define the cylinder by
+    an axis placement and a radius. PRC uses radians for the angular parameter and so does
+    this schema; kernels that hold angles in degrees internally must convert on read and write.
     """
     customData = { token apiSchemaType = "singleApply"
                    token[] apiSchemaCanOnlyApplyTo = ["UsdSolidBrepArray"]
@@ -867,14 +875,20 @@ class "BrepSurfaceConeAPI" (
     tan(semiAngle), axial term + v * axis), matching the STEP/PRC convention. It
     DIFFERS from OpenCascade's Geom_ConicalSurface, whose V is the SLANT distance
     along the generatrix (radius grows as sin(semiAngle), axial as cos(semiAngle)).
-    A consumer that maps this surface onto OCCT must rescale V_occt = v / cos(semiAngle);
-    the same applies to face:range v. Authored brep:curveUv pcurves, by contrast, are
-    expressed in the consuming surface's native parameterization (i.e. OCCT slant for an
-    OCCT-based tessellator), not this axial v.
+    A consumer that maps this surface onto OCCT must rescale V_occt = v / cos(semiAngle).
 
-    Both PRC and SMLib define the cone with an axis placement, base radius, and semi-angle.
-    PRC uses radians for the angular parameter; SMLib (SmCone) uses degrees internally
-    but this schema normalizes to radians.
+    That rescale applies to EVERY v authored against this surface: face:range v and
+    the v of each brep:curveUv control vertex alike. A pcurve is a curve in this
+    surface's parameter space, so it is expressed in the same axial v as the face
+    range, not in whatever parameterization the consumer happens to use internally.
+    Converting one and not the other places the trim at v * cos(semiAngle): on a
+    cone of base radius 5 and height 10, trimming the surface to 0.894 of its
+    height and its area to 219.2 against a true 254.2.
+
+    This matches PRC and STEP AP242 (CONICAL_SURFACE), which both define the cone by an axis
+    placement, a base radius and a semi-angle. PRC uses radians for the angular parameter and
+    so does this schema; kernels that hold angles in degrees internally must convert on read
+    and write.
     """
     customData = { token apiSchemaType = "singleApply"
                    token[] apiSchemaCanOnlyApplyTo = ["UsdSolidBrepArray"]
@@ -944,9 +958,10 @@ class "BrepSurfaceTorusAPI" (
     The surface normal points outward.
     The face:range attribute provides the UV trim domain bounds in radians.
 
-    Both PRC and SMLib define the torus with an axis placement, major radius, and minor radius.
-    PRC uses radians for both angular parameters; SMLib (SmTorus) uses degrees internally
-    but this schema normalizes to radians.
+    This matches PRC and STEP AP242 (TOROIDAL_SURFACE), which both define the torus by an axis
+    placement, a major radius and a minor radius. PRC uses radians for both angular parameters
+    and so does this schema; kernels that hold angles in degrees internally must convert on
+    read and write.
     """
     customData = { token apiSchemaType = "singleApply"
                    token[] apiSchemaCanOnlyApplyTo = ["UsdSolidBrepArray"]

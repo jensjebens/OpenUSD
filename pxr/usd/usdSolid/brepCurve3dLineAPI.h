@@ -43,9 +43,10 @@ class SdfAssetPath;
 /// where t is the curve parameter and direction is a unit vector.
 /// The edge:range attribute provides the parameter bounds {tMin, tMax} for each line edge.
 /// 
-/// Both PRC (A3DCrvLineData) and SMLib (SmLine) define lines with a point and direction.
-/// SMLib additionally stores a scale factor (curve speed); in this schema the speed is
-/// always 1.0, meaning distance along the line equals the parameter change.
+/// This matches PRC (A3DCrvLineData) and STEP AP242 (LINE, whose direction is a VECTOR),
+/// which both define a line by a point and a direction. Kernels that carry a separate curve
+/// speed (scale factor) should emit 1.0: in this schema the speed is always 1.0, meaning
+/// distance along the line equals the parameter change.
 /// 
 ///
 class UsdSolidBrepCurve3dLineAPI : public UsdAPISchemaBase

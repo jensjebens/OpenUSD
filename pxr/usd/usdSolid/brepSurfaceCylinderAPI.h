@@ -47,9 +47,9 @@ class SdfAssetPath;
 /// The face:range attribute provides the UV trim domain bounds {uMin, vMin, uMax, vMax}
 /// in radians for u and linear units for v.
 /// 
-/// Both PRC and SMLib define the cylinder using an axis placement and radius.
-/// PRC uses radians for the angular parameter; SMLib (SmCylinder) uses degrees internally
-/// but this schema normalizes to radians.
+/// This matches PRC and STEP AP242 (CYLINDRICAL_SURFACE), which both define the cylinder by
+/// an axis placement and a radius. PRC uses radians for the angular parameter and so does
+/// this schema; kernels that hold angles in degrees internally must convert on read and write.
 /// 
 ///
 class UsdSolidBrepSurfaceCylinderAPI : public UsdAPISchemaBase

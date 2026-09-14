@@ -45,12 +45,12 @@ class SdfAssetPath;
 /// where t is the angular parameter in radians.
 /// The edge:range attribute provides the parameter bounds {tMin, tMax} in radians.
 /// 
-/// Both PRC (A3DCrvEllipseData) and SMLib (SmEllipse) define ellipses with an axis placement
-/// and two radii. PRC uses radians; SMLib uses degrees internally but this schema
-/// normalizes to radians.
+/// This matches PRC (A3DCrvEllipseData) and STEP AP242 (ELLIPSE), which both define an
+/// ellipse by an axis placement and two radii. PRC uses radians and so does this schema;
+/// kernels that hold angles in degrees internally must convert on read and write.
 /// 
 /// Conflict note: PRC names the radii 'semiAxis1Length' and 'semiAxis2Length' without
-/// requiring semiAxis1 >= semiAxis2. SMLib uses 'RadiusAtXAxis' and 'RadiusAtYAxis'.
+/// requiring semiAxis1 >= semiAxis2.
 /// STEP AP242 names them 'semi_axis_1' (along refDirection) and 'semi_axis_2'.
 /// This schema uses 'xRadius' (along refDirection) and 'yRadius'
 /// without requiring xRadius >= yRadius, matching the STEP convention
