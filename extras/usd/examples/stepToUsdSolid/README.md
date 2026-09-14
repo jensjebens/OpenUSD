@@ -5,8 +5,7 @@
 `stepToUsdSolid.py` converts a **STEP** file (ISO 10303-21/-42, the common CAD
 interchange format) into a **UsdSolid** B-rep stage, authored through the
 `pxr.UsdSolid` schema API. The schema is proposed at
-https://github.com/PixarAnimationStudios/OpenUSD-proposals/pull/109. How the STEP
-contents map onto prims is under Scope below.
+https://github.com/PixarAnimationStudios/OpenUSD-proposals/pull/109.
 
 It is pure Python plus USD — no CAD kernel is involved. That makes it a
 self-contained way to produce B-rep test data for the schema and its validators:
@@ -20,10 +19,10 @@ python stepToUsdSolid.py assembly.step assembly.usda --up-axis Z
 
 Output format follows the extension: `.usda` for text, `.usdc` for a binary crate.
 
-## What it handles
+## Supported STEP constructs
 
-The converter reads whatever the STEP file contains and does the right thing with
-it — there are no modes or presets to choose. It covers:
+The converter takes no modes or presets; it converts every construct below that
+the file contains:
 
 - **Analytic surfaces** — plane, cylinder, cone, sphere, torus — and **NURBS**
   surfaces, authored to the matching `BrepSurface*API`.
@@ -50,22 +49,21 @@ This is a **reference / sample importer**, in the spirit of the Gaussian-splat
 exercise the schema end to end and to generate test assets, not a production STEP
 exporter.
 
-### What could come out
+### Optional features
 
-Two of the features above are conveniences rather than demonstrations of the schema,
-and either can be dropped without touching the B-rep path:
+Two of the features above are conveniences. Either can be dropped without touching
+the B-rep path:
 
-- **Colour** (`resolve_colors`, ~80 lines) reads `STYLED_ITEM` chains to author
-  `displayColor`. Colour is not part of a boundary representation; it is here so
+- **Color** (`resolve_colors`, ~80 lines) reads `STYLED_ITEM` chains to author
+  `displayColor`. Color is not part of a boundary representation; it is here so
   converted assets are legible in a viewer.
 - **Assembly placement** (`assembly_placements` and its helpers, ~190 lines) composes
   `NEXT_ASSEMBLY_USAGE_OCCURRENCE` transforms into `Xform` prims. Assembly structure is
   a USD composition concern, not a `UsdSolid` one.
 
-Together they are roughly an eighth of the file. They are kept for now because they
-make the output usable on real CAD rather than on single parts, but a reviewer who
-wants this sample smaller should take these first, ahead of anything that reads
-geometry.
+Together they are about 270 lines. They are kept because they make the output usable
+on production CAD assemblies. A reviewer who wants this sample smaller should take
+these first, ahead of anything that reads geometry.
 
 ## Requirements
 
@@ -83,6 +81,5 @@ usdchecker part.usdc                           # runs the usdSolid validators
 `testenv/testStepToUsdSolid.py` does this end to end on a box it generates
 itself, and asserts that `usdSolidValidators` reports nothing.
 
-A validator confirms the B-rep is well formed; it does not confirm the shape is
-correct. Verifying the geometry needs a tessellator, which lives outside this
-sample.
+A validator establishes that the B-rep is well formed. Establishing that the shape
+is correct needs a tessellator, which this sample does not include.
