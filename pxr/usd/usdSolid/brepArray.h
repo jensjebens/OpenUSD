@@ -593,13 +593,13 @@ public:
     /// Producers MUST author edgeuse order and orientationType so this holds. Consumers MAY rely
     /// on it and need not re-orient loops to assemble holes.
     /// 
-    /// Why this is stated. NVIDIA's SMLib OCCT/PRC-to-USD converters (OCCT_BREP_IMPORT,
-    /// BREP_PRC_SM) and OCCT itself key hole assembly off explicit orientation flags
-    /// (OCCT Forward/Reversed map to this orientationType), never off geometric winding, and they
-    /// expect outer-CCW / inner-CW ("material on the left"), consistent with the STEP norm. SMLib
-    /// as a consumer drops holed faces when inner loops are authored CCW. Fixing the winding as
-    /// the deterministic consequence of orientationType lets any consumer assemble holes without
-    /// re-orienting loops or detecting the outer loop geometrically. 
+    /// Why this is stated. Solid modelling kernels key hole assembly off explicit orientation
+    /// flags (OCCT's Forward/Reversed map to this orientationType), never off geometric winding,
+    /// and they expect outer-CCW / inner-CW ("material on the left"), consistent with the STEP
+    /// norm (ISO 10303-42 FACE_OUTER_BOUND). A consumer that assembles holes this way drops holed
+    /// faces when inner loops are authored CCW. Fixing the winding as the deterministic
+    /// consequence of orientationType lets any consumer assemble holes without re-orienting
+    /// loops or detecting the outer loop geometrically. 
     ///
     /// | ||
     /// | -- | -- |
@@ -742,9 +742,9 @@ public:
     /// is the vertex at the curve's parametric START (Edge:Range(0)) and vertexIndices[1] is the vertex at its END
     /// (Edge:Range(1)); the curve runs start -> end. Producers must swap the pair for edges whose topological orientation
     /// is reversed relative to the curve, so that the authored endpoints always agree with the curve's evaluated start/end.
-    /// (Rule 434.) Interop: the native validator (BA.240) and SMLib require the authored endpoints to match the 3d curve's
+    /// (Rule 434.) Interop: the native validator (BA.240) requires the authored endpoints to match the 3d curve's
     /// evaluated start/end within brep:intersectTol3d; ordering by topological edge orientation instead corrupts curved-edge
-    /// reconstruction (an observed SMLib round-trip failure).
+    /// reconstruction (an observed kernel round-trip failure).
     /// When a Brep has edges, edge:vertexIndices are required because vertices can be shared with loopVertices and wireEdgeVertices.
     /// (note: edge:vertexIndices is defined as int2 because uint2 is not a USD value type; both components are conceptually uint and must be non-negative.)
     /// size() = number of Edges. 

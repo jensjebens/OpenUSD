@@ -53,14 +53,20 @@ class SdfAssetPath;
 /// tan(semiAngle), axial term + v * axis), matching the STEP/PRC convention. It
 /// DIFFERS from OpenCascade's Geom_ConicalSurface, whose V is the SLANT distance
 /// along the generatrix (radius grows as sin(semiAngle), axial as cos(semiAngle)).
-/// A consumer that maps this surface onto OCCT must rescale V_occt = v / cos(semiAngle);
-/// the same applies to face:range v. Authored brep:curveUv pcurves, by contrast, are
-/// expressed in the consuming surface's native parameterization (i.e. OCCT slant for an
-/// OCCT-based tessellator), not this axial v.
+/// A consumer that maps this surface onto OCCT must rescale V_occt = v / cos(semiAngle).
 /// 
-/// Both PRC and SMLib define the cone with an axis placement, base radius, and semi-angle.
-/// PRC uses radians for the angular parameter; SMLib (SmCone) uses degrees internally
-/// but this schema normalizes to radians.
+/// That rescale applies to EVERY v authored against this surface: face:range v and
+/// the v of each brep:curveUv control vertex alike. A pcurve is a curve in this
+/// surface's parameter space, so it is expressed in the same axial v as the face
+/// range, not in whatever parameterization the consumer happens to use internally.
+/// Converting one and not the other places the trim at v * cos(semiAngle): on a
+/// cone of base radius 5 and height 10, trimming the surface to 0.894 of its
+/// height and its area to 219.2 against a true 254.2.
+/// 
+/// This matches PRC and STEP AP242 (CONICAL_SURFACE), which both define the cone by an axis
+/// placement, a base radius and a semi-angle. PRC uses radians for the angular parameter and
+/// so does this schema; kernels that hold angles in degrees internally must convert on read
+/// and write.
 /// 
 ///
 class UsdSolidBrepSurfaceConeAPI : public UsdAPISchemaBase

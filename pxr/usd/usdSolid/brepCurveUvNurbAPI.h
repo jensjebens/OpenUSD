@@ -150,7 +150,14 @@ public:
     // CURVEUVCONTROLVERTICES 
     // --------------------------------------------------------------------- //
     /// packed 2d control vertices for all edgeuse UV NurbCurves.
-    /// size() = SUM_ii(curveUvVertexCount[ii]). 
+    /// size() = SUM_ii(curveUvVertexCount[ii]).
+    /// 
+    /// Each (u, v) is a point in the parameter space of the surface the owning
+    /// faceuse's face is on, in that surface's own parameterization -- the same
+    /// one face:range is expressed in. Where a surface's parameterization
+    /// differs from the one a consumer uses internally, a pcurve needs the same
+    /// conversion face:range does; see BrepSurfaceConeAPI for the case where
+    /// this bites. 
     ///
     /// | ||
     /// | -- | -- |

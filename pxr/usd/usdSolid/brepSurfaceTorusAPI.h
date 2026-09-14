@@ -46,9 +46,10 @@ class SdfAssetPath;
 /// The surface normal points outward.
 /// The face:range attribute provides the UV trim domain bounds in radians.
 /// 
-/// Both PRC and SMLib define the torus with an axis placement, major radius, and minor radius.
-/// PRC uses radians for both angular parameters; SMLib (SmTorus) uses degrees internally
-/// but this schema normalizes to radians.
+/// This matches PRC and STEP AP242 (TOROIDAL_SURFACE), which both define the torus by an axis
+/// placement, a major radius and a minor radius. PRC uses radians for both angular parameters
+/// and so does this schema; kernels that hold angles in degrees internally must convert on
+/// read and write.
 /// 
 ///
 class UsdSolidBrepSurfaceTorusAPI : public UsdAPISchemaBase

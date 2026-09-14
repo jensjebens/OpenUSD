@@ -45,10 +45,10 @@ class SdfAssetPath;
 /// The surface normal equals the axis direction.
 /// The face:range attribute provides the UV trim domain bounds for each plane face.
 /// 
-/// This definition is compatible with both PRC (A3DSurfPlaneData) and SMLib (SmPlane)
-/// which both use an axis placement (origin, X axis, Z axis) to define the plane.
-/// Note: SMLib additionally stores a UV scale factor that scales the U and V directions
-/// independently. In this schema, UV scale is always 1.0; any scaling is absorbed into
+/// This definition is compatible with PRC (A3DSurfPlaneData) and STEP AP242 (PLANE), which
+/// both use an axis placement (origin, X axis, Z axis) to define the plane.
+/// Note: kernels that carry a UV scale factor scaling the U and V directions independently
+/// should emit 1.0. In this schema, UV scale is always 1.0; any scaling is absorbed into
 /// the face:range domain bounds.
 /// 
 ///

@@ -45,9 +45,9 @@ class SdfAssetPath;
 /// where t is the angular parameter in radians.
 /// The edge:range attribute provides the parameter bounds {tMin, tMax} in radians.
 /// 
-/// Both PRC (A3DCrvCircleData) and SMLib (SmCircle) define circles with an axis placement
-/// and a radius. PRC uses radians; SMLib uses degrees internally but this schema
-/// normalizes to radians.
+/// This matches PRC (A3DCrvCircleData) and STEP AP242 (CIRCLE), which both define a circle
+/// by an axis placement and a radius. PRC uses radians and so does this schema; kernels that
+/// hold angles in degrees internally must convert on read and write.
 /// 
 ///
 class UsdSolidBrepCurve3dCircleAPI : public UsdAPISchemaBase
