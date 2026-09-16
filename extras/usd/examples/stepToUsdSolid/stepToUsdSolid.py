@@ -1436,6 +1436,9 @@ def extract_brep(rd, cfg, solid_refs=None):
                 solid_faces.append(fi)
         brep_faces.append(solid_faces)
 
+    dropped = _drop_subtolerance_edges(verts, edges, edgeuses, loops, loop_vidx,
+                                       faces, cfg)
+
     by_edge = {}
     for i, eu in enumerate(edgeuses): by_edge.setdefault(eu["edge"], []).append(i)
     for ei, g in by_edge.items():
@@ -1444,7 +1447,8 @@ def extract_brep(rd, cfg, solid_refs=None):
             edgeuses[idx]["entry"] = "topEntry" if k % 2 == 0 else "bottomEntry"
 
     return dict(verts=verts, edges=edges, edgeuses=edgeuses, loops=loops, faces=faces,
-                brep_faces=brep_faces, by_edge=by_edge, loop_vidx=loop_vidx)
+                brep_faces=brep_faces, by_edge=by_edge, loop_vidx=loop_vidx,
+                dropped_edges=dropped)
 
 # ================================================================ region packing
 def pack_regions(b):
@@ -1469,6 +1473,98 @@ def pack_regions(b):
                 fuFaceIndex=fuFaceIndex, fuOrient=fuOrient)
 
 # ================================================================ self-check
+def _edge_in_tolerance_sphere(edge, verts, tol):
+    """True when the whole 3D curve fits inside a sphere of radius tol.
+
+    Proposal rule 7.ii forbids such an edge. Testing containment rather than
+    endpoint separation matters: a nearly-closed arc also brings its two
+    vertices within tol of each other while enclosing the full circle."""
+    pts = [verts[edge["v"][0]], verts[edge["v"][1]]] \
+        + _edge_interior_samples(edge, verts)
+    cx = [sum(p[k] for p in pts) / len(pts) for k in range(3)]
+    return all(math.dist(p, cx) <= tol for p in pts)
+
+def _drop_subtolerance_edges(verts, edges, edgeuses, loops, loop_vidx, faces, cfg):
+    """Weld out every edge that rule 7.ii forbids, and report how many.
+
+    A tolerant modeller emits an edge wherever its own topology has one,
+    including where the two ends have already closed to within the file's
+    declared tolerance -- an NX export of a production robot carries 149 of
+    them. The two vertices are the same point as far as the file is concerned,
+    so welding them and dropping the edge from its loops closes the boundary
+    chain again and leaves the face's shape untouched.
+
+    Runs before the radial chains are built, so nextRadialEUIndex and the
+    top/bottom entry alternation are computed on the surviving edgeuses."""
+    dead = {i for i, e in enumerate(edges)
+            if e["v"][0] != e["v"][1]
+            and _edge_in_tolerance_sphere(e, verts, cfg.edge_degen_tol)}
+    if not dead:
+        return 0
+
+    # Weld each dead edge's two vertices onto the lower index, following chains
+    # so that three mutually-coincident vertices collapse to one.
+    parent = list(range(len(verts)))
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    for i in dead:
+        a, b = (find(x) for x in edges[i]["v"])
+        if a != b: parent[max(a, b)] = min(a, b)
+
+    vkeep = sorted({find(v) for v in range(len(verts))})
+    vnew = {old: n for n, old in enumerate(vkeep)}
+    vmap = [vnew[find(v)] for v in range(len(verts))]
+    # Site the survivor at the centroid of the vertices it absorbs, not at one of
+    # them: every adjacent curve then moves by half the collapsed edge's length
+    # instead of one of them moving by all of it.
+    members = {}
+    for v in range(len(verts)): members.setdefault(find(v), []).append(v)
+    verts[:] = [tuple(sum(verts[m][k] for m in members[v]) / len(members[v])
+                      for k in range(3)) for v in vkeep]
+
+    # Drop the dead edgeuses loop by loop, so each loop's count stays in step
+    # with the flat edgeuse list the schema packs them into.
+    kept_eu, off = [], 0
+    for li, n in enumerate(loops):
+        survivors = [eu for eu in edgeuses[off:off + n] if eu["edge"] not in dead]
+        off += n
+        loops[li] = len(survivors)
+        kept_eu += survivors
+    edgeuses[:] = kept_eu
+
+    ekeep = [i for i in range(len(edges)) if i not in dead]
+    emap = {old: n for n, old in enumerate(ekeep)}
+    edges[:] = [edges[i] for i in ekeep]
+    for e in edges: e["v"] = (vmap[e["v"][0]], vmap[e["v"][1]])
+    for eu in edgeuses: eu["edge"] = emap[eu["edge"]]
+    loop_vidx[:] = [vmap[v] for v in loop_vidx]
+
+    # Re-fit the surviving line edges through their moved vertices, the same
+    # way eidx fits them when it first reads them. A welded vertex shifts by
+    # half the collapsed edge's length, which is enough on its own to push an
+    # already-marginal endpoint past brep:intersectTol3d. Circles and NURBS
+    # would need their parameter range re-solved instead, which is healing
+    # proper and is left to a healer.
+    for e in edges:
+        if e["ctok"] != "BrepCurve3dLineAPI":
+            continue
+        ps, pe = verts[e["v"][0]], verts[e["v"][1]]
+        length = math.dist(ps, pe)
+        if length > cfg.edge_degen_tol:
+            e["geom"] = dict(origin=tuple(ps), direction=vnorm(vsub(pe, ps)))
+            e["rng"] = (0.0, length)
+
+    # A loop emptied by the weld is a single point: author it as a vertex loop
+    # (rule 428) rather than leaving a loop with no edgeuses (BA.145).
+    off = 0
+    for li, n in enumerate(loops):
+        if n == 0 and not loop_vidx[li]:
+            loop_vidx[li] = vmap[find(0)] if not verts else loop_vidx[li]
+    return len(dead)
+
 def self_check(b):
     errs = []
     nv, ne, neu = len(b["verts"]), len(b["edges"]), len(b["edgeuses"])

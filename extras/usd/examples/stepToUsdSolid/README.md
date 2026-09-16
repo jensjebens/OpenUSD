@@ -65,6 +65,32 @@ Together they are about 270 lines. They are kept because they make the output us
 on production CAD assemblies. A reviewer who wants this sample smaller should take
 these first, ahead of anything that reads geometry.
 
+## Where STEP and UsdSolid disagree
+
+STEP and UsdSolid do not accept the same B-reps, so a translator has to convert
+between the two rule sets rather than copy topology across. Two differences show
+up on almost any production CAD file.
+
+**Sub-tolerance edges are removed.** UsdSolid rule 7.ii forbids an edge whose
+curve fits inside a sphere of radius `brep:intersectTol3d`. A tolerant modeller
+emits one wherever its own topology has an edge, including where the two ends
+have already closed to within the file's declared tolerance -- an NX export of a
+KUKA KR 640 carries 149. The importer welds the two vertices to their centroid,
+drops the edge from its loops, and re-fits the adjacent line edges through the
+moved vertex. Adjacent circles and NURBS curves keep their geometry, so an
+endpoint that was already close to the tolerance limit can cross it after the
+weld; re-solving their parameter ranges is healing proper and belongs in a
+healer, not here.
+
+**Seam edges are not yet synthesised.** UsdSolid rule 5.iv requires a face to
+have a single outer loop with seam edges; STEP does not, and exports a full
+revolution as a face that closes on itself with no seam. The importer authors a
+seam where the source provides one but does not mint one where it does not, so a
+full-period cylinder, cone, sphere or torus face fails BA.761. The KUKA export
+produces 2,041 of these. Closing the gap means minting the seam edge and its
+vertices, splitting every boundary edge that crosses it, and rebuilding the
+radial chains through the new edgeuses.
+
 ## Requirements
 
 - A USD build with the **UsdSolid** schema (this repository), so `from pxr import
@@ -79,7 +105,9 @@ usdchecker part.usdc                           # runs the usdSolid validators
 ```
 
 `testenv/testStepToUsdSolid.py` does this end to end on a box it generates
-itself, and asserts that `usdSolidValidators` reports nothing.
+itself, and asserts that `usdSolidValidators` reports nothing. A box exercises
+neither difference above; a production CAD file will report findings, and the
+seam gap is the reason.
 
 A validator establishes that the B-rep is well formed. Establishing that the shape
 is correct needs a tessellator, which this sample does not include.
