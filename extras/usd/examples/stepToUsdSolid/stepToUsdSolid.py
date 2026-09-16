@@ -1438,6 +1438,8 @@ def extract_brep(rd, cfg, solid_refs=None):
 
     dropped = _drop_subtolerance_edges(verts, edges, edgeuses, loops, loop_vidx,
                                        faces, cfg)
+    seams = _synthesize_rim_seams(verts, edges, edgeuses, loops, loop_vidx,
+                                  faces, cfg)
 
     by_edge = {}
     for i, eu in enumerate(edgeuses): by_edge.setdefault(eu["edge"], []).append(i)
@@ -1448,7 +1450,7 @@ def extract_brep(rd, cfg, solid_refs=None):
 
     return dict(verts=verts, edges=edges, edgeuses=edgeuses, loops=loops, faces=faces,
                 brep_faces=brep_faces, by_edge=by_edge, loop_vidx=loop_vidx,
-                dropped_edges=dropped)
+                dropped_edges=dropped, seam_edges=seams)
 
 # ================================================================ region packing
 def pack_regions(b):
@@ -1564,6 +1566,107 @@ def _drop_subtolerance_edges(verts, edges, edgeuses, loops, loop_vidx, faces, cf
         if n == 0 and not loop_vidx[li]:
             loop_vidx[li] = vmap[find(0)] if not verts else loop_vidx[li]
     return len(dead)
+
+def _synthesize_rim_seams(verts, edges, edgeuses, loops, loop_vidx, faces, cfg):
+    """Author the seam edge rule 5.iv wants on a full-period cylinder or cone face.
+
+    STEP exports a full revolution as a face that closes on itself: two rim
+    circles, two loops, no seam. UsdSolid requires one outer loop carrying a
+    seam edge twice, so a translator has to mint what STEP never wrote. This
+    covers the shape those exports overwhelmingly take -- exactly two loops,
+    each a single closed rim -- and leaves richer boundaries alone.
+
+    The seam is the surface's own ruling between the two rim vertices, which is
+    a straight line for a cylinder and for a cone alike. Where the rim vertices
+    sit at different angles about the axis that line would be a helix instead,
+    so one vertex is first slid around its own circle to match the other. That
+    is a re-parameterization of the circle rather than a change of shape, and is
+    only done when the vertex belongs to no other edge.
+
+    Returns the number of faces given a seam."""
+    TWO = 2 * math.pi
+    vuse = Counter()
+    for e in edges:
+        a, b = e["v"]
+        vuse[a] += 1
+        if b != a: vuse[b] += 1
+
+    def angle_about(p, c, z, x):
+        d = vsub(p, c)
+        d = vsub(d, tuple(vdot(d, z) * z[k] for k in range(3)))
+        return math.atan2(vdot(d, vcross(z, x)), vdot(d, x))
+
+    out_loops, out_vidx, out_eus = [], [], []
+    li = eo = 0
+    seamed = 0
+    pinned = set()          # rim vertices an already-minted seam ends on
+    for face in faces:
+        n = face["loopCount"]
+        block = []
+        for _ in range(n):
+            k = loops[li]
+            block.append((k, loop_vidx[li], edgeuses[eo:eo + k]))
+            eo += k; li += 1
+
+        ok = (face["stok"] in ("BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI")
+              and n == 2 and all(k == 1 for k, _, _ in block)
+              and abs((face["rng"][0][1] - face["rng"][0][0]) - TWO) <= 1e-4)
+        if ok:
+            eis = [eus[0]["edge"] for _, _, eus in block]
+            ok = (eis[0] != eis[1]
+                  and all(edges[e]["v"][0] == edges[e]["v"][1] for e in eis))
+        if not ok:
+            for k, vi, eus in block:
+                out_loops.append(k); out_vidx.append(vi); out_eus += eus
+            continue
+
+        sg = face["geom"]
+        z, x, o = vnorm(sg["axis"]), vnorm(sg["refDirection"]), sg["origin"]
+        vs = [edges[e]["v"][0] for e in eis]
+        angs = [angle_about(verts[v], o, z, x) for v in vs]
+        if abs((angs[0] - angs[1] + math.pi) % TWO - math.pi) > 1e-9:
+            # Slide the second rim's vertex round to the first rim's angle.
+            e1, v1 = eis[1], vs[1]
+            cg = edges[e1]["geom"]
+            if (vuse[v1] > 1 or v1 in pinned
+                    or edges[e1]["ctok"] != "BrepCurve3dCircleAPI"):
+                for k, vi, eus in block:
+                    out_loops.append(k); out_vidx.append(vi); out_eus += eus
+                continue
+            c, cz, cx = cg["center"], vnorm(cg["axis"]), vnorm(cg["refDirection"])
+            r = cg["radius"]
+            rad = vsub(verts[vs[0]], o)
+            rad = vnorm(vsub(rad, tuple(vdot(rad, z) * z[k] for k in range(3))))
+            verts[v1] = tuple(c[k] + r * rad[k] for k in range(3))
+            t = angle_about(verts[v1], c, cz, cx)
+            edges[e1]["rng"] = _primary_period(t, t + TWO)
+
+        p0, p1 = verts[vs[0]], verts[vs[1]]
+        length = math.dist(p0, p1)
+        if length <= cfg.edge_degen_tol:
+            for k, vi, eus in block:
+                out_loops.append(k); out_vidx.append(vi); out_eus += eus
+            continue
+        seam = len(edges)
+        edges.append(dict(v=(vs[0], vs[1]), ctok="BrepCurve3dLineAPI",
+                          geom=dict(origin=tuple(p0), direction=vnorm(vsub(p1, p0))),
+                          rng=(0.0, length)))
+        # Round the first rim, up the seam, round the second, back down it. The
+        # rims keep the orientations STEP gave them: as the two bounds of one
+        # face they already wind oppositely, which is what the joined loop needs.
+        out_eus += [block[0][2][0],
+                    dict(edge=seam, orient="same"),
+                    block[1][2][0],
+                    dict(edge=seam, orient="opposite")]
+        out_loops.append(4); out_vidx.append(0)
+        face["loopCount"] = 1
+        pinned.update(vs)
+        seamed += 1
+
+    loops[:] = out_loops
+    loop_vidx[:] = out_vidx
+    edgeuses[:] = out_eus
+    return seamed
 
 def self_check(b):
     errs = []

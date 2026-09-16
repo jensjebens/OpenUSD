@@ -82,14 +82,22 @@ endpoint that was already close to the tolerance limit can cross it after the
 weld; re-solving their parameter ranges is healing proper and belongs in a
 healer, not here.
 
-**Seam edges are not yet synthesised.** UsdSolid rule 5.iv requires a face to
-have a single outer loop with seam edges; STEP does not, and exports a full
-revolution as a face that closes on itself with no seam. The importer authors a
-seam where the source provides one but does not mint one where it does not, so a
-full-period cylinder, cone, sphere or torus face fails BA.761. The KUKA export
-produces 2,041 of these. Closing the gap means minting the seam edge and its
-vertices, splitting every boundary edge that crosses it, and rebuilding the
-radial chains through the new edgeuses.
+**Seam edges are synthesised for cylinders and cones.** UsdSolid rule 5.iv
+requires a face to have a single outer loop carrying a seam edge; STEP does not,
+and exports a full revolution as a face that closes on itself with two rim
+loops and no seam. For a full-period cylinder or cone bounded by two closed
+rims, the importer mints the ruling between the two rim vertices and joins the
+two loops into one -- round the first rim, up the seam, round the second, back
+down it. Where the rim vertices sit at different angles about the axis, one is
+first slid around its own circle so the seam is a ruling rather than a helix;
+that is a re-parameterization of the circle, and is skipped when the vertex
+belongs to another edge or an earlier seam already ends on it.
+
+Faces with a richer boundary are left alone, as are spheres and tori. A torus
+needs its seam at v = 0 on the tube, which is the same fixed parameter origin
+behind the open question on BA.765, so both wait on the same answer. On the
+KUKA export this authors 984 seams and takes BA.761 from 2,041 findings to
+1,057; of what remains, 812 are tori and 52 are spheres.
 
 ## Requirements
 
