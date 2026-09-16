@@ -84,20 +84,24 @@ healer, not here.
 
 **Seam edges are synthesised for cylinders and cones.** UsdSolid rule 5.iv
 requires a face to have a single outer loop carrying a seam edge; STEP does not,
-and exports a full revolution as a face that closes on itself with two rim
-loops and no seam. For a full-period cylinder or cone bounded by two closed
-rims, the importer mints the ruling between the two rim vertices and joins the
-two loops into one -- round the first rim, up the seam, round the second, back
-down it. Where the rim vertices sit at different angles about the axis, one is
-first slid around its own circle so the seam is a ruling rather than a helix;
-that is a re-parameterization of the circle, and is skipped when the vertex
-belongs to another edge or an earlier seam already ends on it.
+and exports a full revolution as a face that closes on itself with its boundary
+split across two loops. Where one of those loops is a single closed rim, the
+importer mints the surface's own ruling from that rim's vertex to where the
+other loop's chain begins and joins the two into one loop -- round the rim, up
+the seam, round the other loop, and back down it. The other loop is traversed
+from its own first vertex, so nothing is rotated and no edge is split.
 
-Faces with a richer boundary are left alone, as are spheres and tori. A torus
-needs its seam at v = 0 on the tube, which is the same fixed parameter origin
-behind the open question on BA.765, so both wait on the same answer. On the
-KUKA export this authors 984 seams and takes BA.761 from 2,041 findings to
-1,057; of what remains, 812 are tori and 52 are spheres.
+A ruling only exists where both ends sit at the same angle about the axis.
+Where they do not, the rim's vertex is slid around its own circle to meet the
+other, which re-parameterizes the circle without changing its shape. That is
+available only while the vertex belongs to no other edge and no earlier seam
+ends on it, since two coaxial faces can share one rim.
+
+Spheres and tori are left alone. A sphere face here always contains a pole, so
+its seam is a meridian running to a vertex the file does not yet carry; a torus
+needs its seam at v = 0 on the tube, the same fixed parameter origin behind the
+open question on BA.765. On the KUKA export this authors 1,114 seams and takes
+BA.761 from 2,041 findings to 927, of which 812 are tori and 52 are spheres.
 
 ## Requirements
 
