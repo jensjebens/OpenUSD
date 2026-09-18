@@ -1378,8 +1378,9 @@ def extract_brep(rd, cfg, solid_refs=None):
                 shell_refs.append(x)
             elif isinstance(x, list):
                 shell_refs += [y for y in x if isinstance(y, tuple) and y[0] == "ref"]
-        solid_faces = []
+        solid_faces = []            # one list of face indices per STEP shell
         for sh in shell_refs:
+            solid_faces.append([])
             for fref in _resolve_shell_faces(rd, sh):
                 fa = rd.args(fref)          # ADVANCED_FACE(name,(bounds),surface,same_sense)
                 sense = not (len(fa) > 3 and fa[3] == ("enum", "F"))
@@ -1433,7 +1434,7 @@ def extract_brep(rd, cfg, solid_refs=None):
                 fi = len(faces)
                 faces.append(dict(loopCount=lc, stok=stok, geom=sg, sense=sense,
                                   rng=rng))
-                solid_faces.append(fi)
+                solid_faces[-1].append(fi)
         brep_faces.append(solid_faces)
 
     dropped = _drop_subtolerance_edges(verts, edges, edgeuses, loops, loop_vidx,
@@ -1454,22 +1455,43 @@ def extract_brep(rd, cfg, solid_refs=None):
 
 # ================================================================ region packing
 def pack_regions(b):
-    """Void-included radial-edge form (#68/#71): each solid -> one Brep with a
-    voidRegion+solidRegion pair; the two faceuses of each face grouped by shell."""
+    """Void-included radial-edge form: regions, their shells, and the two
+    faceuses of every face.
+
+    A STEP body's first shell bounds the solid; the rest are the walls of its
+    internal cavities. The proposal packs that as one region per enclosed
+    volume plus the infinite exterior: a cube with one spherical void has
+    regionCount 3 and region:shellCount [1, 2, 1] -- the infinite void, the
+    solid carrying an outer shell and one inner shell, then the cavity. A
+    manifold body with no voids is the degenerate case of that, [1, 1].
+
+    Each face contributes one faceuse to the region on either side of it: the
+    outer shell faces the infinite void and the solid, a cavity wall faces the
+    solid and that cavity.
+    """
     regionCount, regionType, regionShellCount, shellFaceuseCount = [], [], [], []
     fuFaceIndex, fuOrient = [], []
-    for solid_faces in b["brep_faces"]:
-        N = len(solid_faces)
-        regionCount.append(2)
-        regionType += ["voidRegion", "solidRegion"]
-        regionShellCount += [1, 1]
-        shellFaceuseCount += [N, N]
-        for fi in solid_faces:
+
+    def emit_shell(face_ids, outward):
+        shellFaceuseCount.append(len(face_ids))
+        for fi in face_ids:
             fuFaceIndex.append(fi)
-            fuOrient.append("same" if b["faces"][fi]["sense"] else "opposite")
-        for fi in solid_faces:
-            fuFaceIndex.append(fi)
-            fuOrient.append("opposite" if b["faces"][fi]["sense"] else "same")
+            same = b["faces"][fi]["sense"] == outward
+            fuOrient.append("same" if same else "opposite")
+
+    for shells in b["brep_faces"]:
+        outer, voids = shells[0], shells[1:]
+        regionCount.append(2 + len(voids))
+        regionType += ["voidRegion", "solidRegion"] + ["voidRegion"] * len(voids)
+        regionShellCount += [1, 1 + len(voids)] + [1] * len(voids)
+
+        emit_shell(outer, True)                 # infinite exterior void
+        emit_shell(outer, False)                # solid: its outer shell
+        for v in voids:
+            emit_shell(v, False)                # solid: one inner shell per cavity
+        for v in voids:
+            emit_shell(v, True)                 # each cavity, seen from inside
+
     return dict(regionCount=regionCount, regionType=regionType,
                 regionShellCount=regionShellCount, shellFaceuseCount=shellFaceuseCount,
                 fuFaceIndex=fuFaceIndex, fuOrient=fuOrient)
