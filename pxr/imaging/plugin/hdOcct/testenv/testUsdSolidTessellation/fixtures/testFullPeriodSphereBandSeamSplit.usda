@@ -1,0 +1,68 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+)
+
+# testFullPeriodSphereBandSeamSplit -- the SAME sphere band as
+# testFullPeriodSphereBand (R=5, v=[-pi/4,pi/4]) but authored under the producer
+# convention "split full-period periodic faces at the seam": the full major sweep
+# u=[0,2pi] is split at u=0/2pi AND u=pi into two HALF-period wall faces WALL_A
+# (u=[0,pi]) and WALL_B (u=[pi,2pi]). Each half-face is a proper wire-bounded
+# face (latitude arc at v=-pi/4, seam meridian, latitude arc at v=pi/4, seam
+# meridian), so a reader that cannot tessellate a full-period seam face can
+# consume this with zero reader changes; hdOcct meshes it to the SAME band area
+# as the unsplit twin (asserted split==unsplit in-suite). Extends the seam-split
+# convention evidence (depressed-plane cylinder wall, torus) to the sphere.
+#
+# Vertices: V0=(3.5355,0,-3.5355)[u0,v0] V1=(3.5355,0,3.5355)[u0,v1]
+#           V2=(-3.5355,0,-3.5355)[upi,v0] V3=(-3.5355,0,3.5355)[upi,v1]
+# Edges: E0/E1 latitude arcs at v=-pi/4 (radius 3.5355, z=-3.5355), E2/E3 latitude
+#        arcs at v=+pi/4 (radius 3.5355, z=+3.5355), E4 seam @u=0 (great-circle arc
+#        in x-z plane), E5 seam @u=pi. Loop topology and radial pairing mirror the
+#        torus seam-split; each wall's loop is CCW in its own (u,v) window.
+
+def Xform "World"
+{
+    def BrepArray "SphereBand" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dCircleAPI:edge3dCircle", "BrepSurfaceSphereAPI"]
+    )
+    {
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, -1, 0), (0, 1, 0)]
+        uniform point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, -3.5355339059327378), (0, 0, -3.5355339059327378), (0, 0, 3.5355339059327378), (0, 0, 3.5355339059327378), (0, 0, 0), (0, 0, 0)]
+        uniform double[] brep:edge3dCircle:curve3d:circle:radius = [3.5355339059327378, 3.5355339059327378, 3.5355339059327378, 3.5355339059327378, 5, 5]
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (-1, 0, 0)]
+        uniform double3[] brep:extent = [(-5, -5, -3.5355339059327378), (5, 5, 3.5355339059327378)]
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform uint[] brep:regionCount = [1]
+        uniform vector3d[] brep:surface:sphere:axis = [(0, 0, 1), (0, 0, 1)]
+        uniform point3d[] brep:surface:sphere:center = [(0, 0, 0), (0, 0, 0)]
+        uniform double[] brep:surface:sphere:radius = [5, 5]
+        uniform vector3d[] brep:surface:sphere:refDirection = [(1, 0, 0), (1, 0, 0)]
+        uniform point3d[] brep:vertexPoint:point:position = [(3.5355339059327378, 0, -3.5355339059327378), (3.5355339059327378, 0, 3.5355339059327378), (-3.5355339059327378, 0, -3.5355339059327378), (-3.5355339059327378, 0, 3.5355339059327378)]
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
+        uniform double[] edge:range = [0, 3.1415926535897931, 3.1415926535897931, 6.2831853071795862, 0, 3.1415926535897931, 3.1415926535897931, 6.2831853071795862, -0.78539816339744828, 0.78539816339744828, -0.78539816339744828, 0.78539816339744828]
+        uniform int2[] edge:vertexIndices = [(0, 2), (2, 0), (1, 3), (3, 1), (0, 1), (2, 3)]
+        uniform uint[] edgeuse:edgeIndex = [0, 5, 2, 4, 1, 4, 3, 5]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 7, 2, 5, 4, 3, 6, 1]
+        uniform token[] edgeuse:orientationType = ["same", "same", "opposite", "opposite", "same", "same", "opposite", "opposite"]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry", "topEntry", "bottomEntry", "topEntry", "bottomEntry"]
+        uniform uint[] face:loopCount = [1, 1]
+        uniform double2[] face:range = [(0, -0.78539816339744828), (3.1415926535897931, 0.78539816339744828), (3.1415926535897931, -0.78539816339744828), (6.2831853071795862, 0.78539816339744828)]
+        uniform token[] face:surfaceType = ["BrepSurfaceSphereAPI", "BrepSurfaceSphereAPI"]
+        uniform token[] face:trimType = ["general", "general"]
+        uniform uint[] faceuse:faceIndex = [0, 1, 0, 1]
+        uniform token[] faceuse:orientationType = ["same", "same", "opposite", "opposite"]
+        uniform uint[] loop:edgeuseCount = [4, 4]
+        uniform uint[] loop:vertexIndex = [0, 0]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["voidRegion"]
+        uniform uint[] shell:faceuseCount = [4]
+        uniform token[] shell:pointType = ["none"]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform int2[] wireEdge:vertexIndices = []
+        uniform double[] wireEdge:range = []
+    }
+}

@@ -1,0 +1,72 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+)
+
+# testFullPeriodTorusSeamSplit -- the SAME torus band as testFullPeriodTorus
+# (R=5, r=2, v=[0,pi]) but authored under the PROPOSED producer convention
+# "split full-period periodic faces at the seam": the full major sweep u=[0,2pi]
+# is split at u=0/2pi AND at u=pi into two HALF-period wall faces WALL_A (u=[0,pi])
+# and WALL_B (u=[pi,2pi]). Each half-face is a proper wire-bounded face (rim arc
+# at v=0, seam meridian, rim arc at v=pi, seam meridian), so a reader that cannot
+# tessellate a full-period seam face (needs the parametric fallback, e.g. SMLib)
+# can consume this with zero reader changes. hdOcct (full-period capable via the
+# fallback) meshes the split form to the SAME band area as the unsplit twin
+# (asserted split==unsplit in-suite) -- proving the split encoding does not
+# regress a full-period consumer. This extends the seam-split convention evidence
+# (landed for the depressed-plane cylinder wall in testDepressedPlaneSeamSplit) to
+# a torus.
+#
+# Vertices: V0=(7,0,0)[u0,v0] V1=(3,0,0)[u0,vpi] V2=(-7,0,0)[upi,v0] V3=(-3,0,0)[upi,vpi]
+# Edges: E0/E1 rim arcs at v=0 (radius 7), E2/E3 rim arcs at v=pi (radius 3),
+#        E4 seam @u=0 (tube minor arc, center (5,0,0)), E5 seam @u=pi (center (-5,0,0)).
+# WALL_A loop: E0 same, E5 same, E2 opp, E4 opp;  WALL_B loop: E1 same, E4 same,
+# E3 opp, E5 opp. The two seams E4/E5 are shared (radial pairs); the four rim arcs
+# are single-use boundary. Winding: each wall's loop is CCW in its own (u,v) window.
+
+def Xform "World"
+{
+    def BrepArray "FullTorus" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dCircleAPI:edge3dCircle", "BrepSurfaceTorusAPI"]
+    )
+    {
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, -1, 0), (0, 1, 0)]
+        uniform point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0), (5, 0, 0), (-5, 0, 0)]
+        uniform double[] brep:edge3dCircle:curve3d:circle:radius = [7, 7, 3, 3, 2, 2]
+        uniform vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (-1, 0, 0)]
+        uniform double3[] brep:extent = [(-7, -7, 0), (7, 7, 2)]
+        uniform double[] brep:intersectTol3d = [0.000001]
+        uniform uint[] brep:regionCount = [1]
+        uniform vector3d[] brep:surface:torus:axis = [(0, 0, 1), (0, 0, 1)]
+        uniform double[] brep:surface:torus:majorRadius = [5, 5]
+        uniform double[] brep:surface:torus:minorRadius = [2, 2]
+        uniform point3d[] brep:surface:torus:origin = [(0, 0, 0), (0, 0, 0)]
+        uniform vector3d[] brep:surface:torus:refDirection = [(1, 0, 0), (1, 0, 0)]
+        uniform point3d[] brep:vertexPoint:point:position = [(7, 0, 0), (3, 0, 0), (-7, 0, 0), (-3, 0, 0)]
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
+        uniform double[] edge:range = [0, 3.1415926535897931, 3.1415926535897931, 6.2831853071795862, 0, 3.1415926535897931, 3.1415926535897931, 6.2831853071795862, 0, 3.1415926535897931, 0, 3.1415926535897931]
+        uniform int2[] edge:vertexIndices = [(0, 2), (2, 0), (1, 3), (3, 1), (0, 1), (2, 3)]
+        uniform uint[] edgeuse:edgeIndex = [0, 5, 2, 4, 1, 4, 3, 5]
+        uniform uint[] edgeuse:nextRadialEUIndex = [0, 7, 2, 5, 4, 3, 6, 1]
+        uniform token[] edgeuse:orientationType = ["same", "same", "opposite", "opposite", "same", "same", "opposite", "opposite"]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry", "topEntry", "bottomEntry", "topEntry", "bottomEntry"]
+        uniform uint[] face:loopCount = [1, 1]
+        uniform double2[] face:range = [(0, 0), (3.1415926535897931, 3.1415926535897931), (3.1415926535897931, 0), (6.2831853071795862, 3.1415926535897931)]
+        uniform token[] face:surfaceType = ["BrepSurfaceTorusAPI", "BrepSurfaceTorusAPI"]
+        uniform token[] face:trimType = ["general", "general"]
+        uniform uint[] faceuse:faceIndex = [0, 1, 0, 1]
+        uniform token[] faceuse:orientationType = ["same", "same", "opposite", "opposite"]
+        uniform uint[] loop:edgeuseCount = [4, 4]
+        uniform uint[] loop:vertexIndex = [0, 0]
+        uniform uint[] region:shellCount = [1]
+        uniform token[] region:type = ["voidRegion"]
+        uniform uint[] shell:faceuseCount = [4]
+        uniform token[] shell:pointType = ["none"]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform int2[] wireEdge:vertexIndices = []
+        uniform double[] wireEdge:range = []
+    }
+}
