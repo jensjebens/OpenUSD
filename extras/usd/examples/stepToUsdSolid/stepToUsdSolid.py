@@ -1473,11 +1473,21 @@ def pack_regions(b):
     fuFaceIndex, fuOrient = [], []
 
     def emit_shell(face_ids, outward):
+        """One faceuse per face, on the side facing the region being built.
+
+        faceuse:orientationType names a side of the surface, so the two
+        faceuses of a face are always one `same` and one `opposite`. The
+        ADVANCED_FACE same_sense flag does not belong here: face_range and the
+        loop winding already consume it when the loops are authored, and
+        folding it in a second time flips both faceuses of every reversed face
+        relative to its neighbours. SMLib then finds the two uses of a shared
+        edge in different shells -- 8,100 "Edgeuse/RadialEdgeuse pair not
+        attached to same Shell" failures on the KUKA export, and three bodies
+        it would not read at all."""
         shellFaceuseCount.append(len(face_ids))
         for fi in face_ids:
             fuFaceIndex.append(fi)
-            same = b["faces"][fi]["sense"] == outward
-            fuOrient.append("same" if same else "opposite")
+            fuOrient.append("same" if outward else "opposite")
 
     for shells in b["brep_faces"]:
         outer, voids = shells[0], shells[1:]
