@@ -30,6 +30,7 @@
 #include "pxr/usdValidation/usdValidation/validator.h"
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -2563,6 +2564,51 @@ _BrepArrayReferences(const UsdPrim &usdPrim,
                                     usdPrim.GetPath().GetText(), fu,
                                     faceIndex[fu], b, off.face[b],
                                     off.face[b + 1]));
+            }
+        }
+    }
+
+    // [proposal-1.i] A face has two sides, so exactly two faceuses name it:
+    // one "same", on the positive-normal side of its surface, and one
+    // "opposite". Authoring both on one side leaves a face with no use on the
+    // other, and a kernel walking the radial ring around a shared edge cannot
+    // resolve which region each use bounds.
+    //
+    // This is a per-face rule and deliberately not a per-shell one. A shell
+    // may legitimately mix the two: the proposal's non-manifold cubes author
+    // shell 2 as five "opposite" faceuses and one "same".
+    {
+        const VtArray<TfToken> fuOrient
+            = _Read<TfToken>(brep.GetFaceuseOrientationTypeAttr());
+        static const TfToken sameTok("same");
+        static const TfToken oppositeTok("opposite");
+        for (size_t b = 0; b < n; ++b) {
+            const auto blk = _IndexBlock(off.faceuse, b, n, faceIndex.size());
+            std::map<unsigned int, std::pair<size_t, size_t>> sides;
+            for (size_t fu = blk.first; fu < blk.second; ++fu) {
+                if (fu >= fuOrient.size()) {
+                    break;
+                }
+                auto &s = sides[faceIndex[fu]];
+                if (fuOrient[fu] == sameTok) {
+                    ++s.first;
+                } else if (fuOrient[fu] == oppositeTok) {
+                    ++s.second;
+                }
+            }
+            for (const auto &entry : sides) {
+                if (entry.second.first == 1 && entry.second.second == 1) {
+                    continue;
+                }
+                _Err(&errors,
+                     UsdSolidValidationErrorNameTokens->faceSidesNotPaired,
+                     usdPrim,
+                     TfStringPrintf(
+                         "[proposal-1.i] BrepArray <%s>: face %u in brep %zu is "
+                         "named by %zu \"same\" and %zu \"opposite\" faceuse(s); "
+                         "a face has two sides and needs exactly one of each.",
+                         usdPrim.GetPath().GetText(), entry.first, b,
+                         entry.second.first, entry.second.second));
             }
         }
     }

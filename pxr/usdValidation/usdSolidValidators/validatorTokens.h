@@ -112,6 +112,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((schemaUsageInconsistent, "SchemaUsageInconsistent"))                     \
     /* BrepArrayReferences */                                                  \
     ((faceuseFaceIndexOutOfRange, "FaceuseFaceIndexOutOfRange"))               \
+    ((faceSidesNotPaired, "FaceSidesNotPaired"))                               \
     ((loopVertexIndexOutOfRange, "LoopVertexIndexOutOfRange"))                 \
     ((edgeuseNextRadialIndexOutOfRange, "EdgeuseNextRadialIndexOutOfRange"))   \
     ((edgeuseEdgeIndexOutOfRange, "EdgeuseEdgeIndexOutOfRange"))               \
