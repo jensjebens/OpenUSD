@@ -1146,6 +1146,23 @@ def face_range(stok, sg, fverts, loop_pts=None, sense=True, nverts=0):
         if _wraps_period(loop_pts, uang) or _full_period(ulo, uhi): ulo, uhi = 0.0, _TWO_PI
         else: ulo, uhi = _pad_angular(ulo, uhi)
         vlo, vhi = _pad(min(vs), max(vs), None)
+        # A cone's radius shrinks to nothing at its apex and would go negative
+        # past it, so the apex is the natural floor for v the way 2*pi is for a
+        # periodic u. _pad widens a window by a fraction of its span, which is
+        # enough on a face that reaches the tip to push v through it: SMLib's
+        # SmCone::CreateCanonical rejects the surface outright, and the body
+        # does not import at all. v is authored AXIAL, so the apex sits at
+        # -radius/tan(semiAngle).
+        if stok == "BrepSurfaceConeAPI":
+            t = math.tan(sg["semiAngle"])
+            if abs(t) > DEGENERATE_TOL:
+                apex = -sg["radius"] / t
+                if t > 0.0:
+                    vlo = max(vlo, apex)
+                else:
+                    vhi = min(vhi, apex)
+                if vhi <= vlo:
+                    vlo, vhi = _bump(min(vs), max(vs))
         return ((ulo, uhi), (vlo, vhi))
     if stok == "BrepSurfaceSphereAPI":
         c = sg["center"]
