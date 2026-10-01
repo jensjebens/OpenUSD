@@ -452,6 +452,12 @@ def bspline_surface(rd, ref):
 def curve_geom(rd, ref):
     t = rd.typ(ref)
     a = rd.args(ref)
+    # OCCT-based writers (cadquery, FreeCAD, ...) wrap an edge's 3-D curve in a
+    # SURFACE_CURVE or SEAM_CURVE that also carries its parameter-space curves.
+    # The first attribute is the 3-D curve; the pcurves are not needed here.
+    if t in ("SURFACE_CURVE", "SEAM_CURVE", "INTERSECTION_CURVE",
+             "BOUNDED_SURFACE_CURVE"):
+        return curve_geom(rd, a[1])
     if t == "LINE":
         o = rd.point(a[1])
         vec = rd.args(a[2])
