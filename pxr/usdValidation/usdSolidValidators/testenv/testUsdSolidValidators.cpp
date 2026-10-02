@@ -274,18 +274,17 @@ def Xform "World"
         uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
     }
 
-    # Row 16 (BA.532): curve axis frames use the SAME 1e-6 unit-length tolerance
-    # as surface frames. Circle 0's axis length is off by 5e-5 (length
-    # 1.00005) -> flagged under 1e-6 but NOT under the old 1e-4 curve epsilon.
-    # Circle 1 has a unit axis (clean). BrepArrayAnalyticCurves must flag exactly
-    # one AnalyticCurveAxisNotUnitLength.
+    # BA.532 (BrepArrayAnalyticCurves): brep_validator.py allows an analytic
+    # axis 1e-4 of slack from unit length, for curves and surfaces alike.
+    # Circle 0's axis is 5e-5 long of unit (within it), circle 1's 5e-4 (past
+    # it); the rule reports the first offending axis only.
     def BrepArray "CurveFrameTol"
     {
-        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
-        point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0), (0, 0, 0)]
-        vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1.00005), (0, 0, 1)]
-        vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0)]
-        double[] brep:edge3dCircle:curve3d:circle:radius = [1.0, 1.0]
+        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI"]
+        point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0), (0, 0, 0), (0, 0, 0)]
+        vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1.00005), (0, 0, 1.0005), (0, 0, 2)]
+        vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0), (1, 0, 0)]
+        double[] brep:edge3dCircle:curve3d:circle:radius = [1.0, 1.0, 1.0]
     }
 }
 )usda";
@@ -606,11 +605,8 @@ TestBrepArrayVertexContainment()
 static void
 TestBrepArrayCurveFrameTol()
 {
-    // Row 16 (BA.532): curve axis frames use the same 1e-6 unit-length
-    // tolerance as surface frames. A circle axis of length 1.00005 (off by
-    // 5e-5) is flagged under 1e-6 but was cleared under the old 1e-4 curve
-    // epsilon; a unit axis stays clean. Exactly one
-    // AnalyticCurveAxisNotUnitLength must fire.
+    // BA.532: an axis within 1e-4 of unit length passes, the first one past it
+    // is reported, and later ones are not.
     UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
     const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
         UsdSolidValidatorNameTokens->brepArrayAnalyticCurves);
@@ -622,6 +618,12 @@ TestBrepArrayCurveFrameTol()
     TF_AXIOM(prim);
     const UsdValidationErrorVector errors = validator->Validate(prim);
     TF_AXIOM(_CountError(errors, ".AnalyticCurveAxisNotUnitLength") == 1);
+    TF_AXIOM(_CountRule(errors, "BA.532") == 1);
+    for (const UsdValidationError &error : errors) {
+        if (TfStringStartsWith(error.GetMessage(), "[BA.532]")) {
+            TF_AXIOM(TfStringContains(error.GetMessage(), "axis[1]"));
+        }
+    }
 }
 
 static const std::string countsAndSubsetsContents = R"usda(#usda 1.0
