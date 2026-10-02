@@ -33,7 +33,6 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdSolid/brepArray.h"
-#include "pxr/usd/usdSolid/tokens.h"
 #include "pxr/usdValidation/usdSolidValidators/validatorTokens.h"
 #include "pxr/usdValidation/usdValidation/error.h"
 #include "pxr/usdValidation/usdValidation/registry.h"
@@ -6038,15 +6037,18 @@ _BrepChecker::ValidateZeroLengthUvTrimCurves()
         if (order <= 0 || !cvs.IsTuples() || cvs.Dim() < 2) {
             continue;
         }
-        double uLo = std::numeric_limits<double>::infinity(), uHi = -uLo;
-        double vLo = uLo, vHi = -uLo;
-        for (long long j = first; j < first + numCvs; ++j) {
+        // Python's max() and min() over the list: start from the first
+        // element and replace it only on a strict comparison, so a NaN first
+        // element survives (and makes the extent NaN, which never fails).
+        double uLo = cvs.Tup(static_cast<size_t>(first), 0), uHi = uLo;
+        double vLo = cvs.Tup(static_cast<size_t>(first), 1), vHi = vLo;
+        for (long long j = first + 1; j < first + numCvs; ++j) {
             const double u = cvs.Tup(static_cast<size_t>(j), 0);
             const double v = cvs.Tup(static_cast<size_t>(j), 1);
-            uLo = std::min(uLo, u);
-            uHi = std::max(uHi, u);
-            vLo = std::min(vLo, v);
-            vHi = std::max(vHi, v);
+            uLo = u < uLo ? u : uLo;
+            uHi = u > uHi ? u : uHi;
+            vLo = v < vLo ? v : vLo;
+            vHi = v > vHi ? v : vHi;
         }
         const double diagonal
             = std::sqrt((uHi - uLo) * (uHi - uLo) + (vHi - vLo) * (vHi - vLo));
