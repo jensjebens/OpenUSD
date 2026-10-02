@@ -209,6 +209,24 @@ _CheckAllowedTokens(const UsdPrim &prim, const VtArray<TfToken> &values,
             TfStringJoin(details, ", ").c_str(), allowedDesc.c_str()));
 }
 
+// Whether shell `i` is a point shell: one that contributes a
+// brep:shellPoint:point:position entry. The schema makes shell:pointType
+// meaningful only when the shell has no faceuses and no wire edges, so a
+// "BrepPointAPI" token on a face or wire shell is ignored. A shell index past
+// the end of any of the three arrays is not a point shell; the array sizes are
+// BA.080's to report. Mirrors BrepConstants.is_brep_point_shell in
+// brep_validator.py (OMPE-106532), which BA.325, BA.583 and BA.710 share.
+bool
+_IsBrepPointShell(size_t i, const VtArray<TfToken> &pointTypes,
+                  const VtArray<unsigned int> &faceuseCounts,
+                  const VtArray<unsigned int> &wireEdgeCounts)
+{
+    static const TfToken brepPointApi("BrepPointAPI");
+    return i < pointTypes.size() && i < faceuseCounts.size()
+        && i < wireEdgeCounts.size() && pointTypes[i] == brepPointApi
+        && faceuseCounts[i] == 0u && wireEdgeCounts[i] == 0u;
+}
+
 // The length of an array-valued attribute, whatever its value type. BA.295,
 // BA.320 and BA.325 compare a count against an array whose type another rule
 // already polices, so reading through VtValue keeps a wrong-typed array
@@ -469,11 +487,12 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
 
     // BA.320 / BA.325: BrepPointAPI is the only vertex:pointType and
     // shell:pointType value that carries a position, so the position arrays
-    // hold exactly one point per BrepPointAPI entry. Python only runs each
-    // rule when there is something to compare -- either the point type asks
-    // for positions or positions are authored -- which keeps a BrepArray whose
-    // vertices are all "none" and whose position array is absent out of both
-    // rules.
+    // hold exactly one point per BrepPointAPI vertex and one per point shell
+    // (_IsBrepPointShell: a shell:pointType token counts only on a shell with
+    // no faceuses and no wire edges). Python only runs each rule when there is
+    // something to compare -- either the point type asks for positions or
+    // positions are authored -- which keeps a BrepArray whose vertices are all
+    // "none" and whose position array is absent out of both rules.
     static const TfToken brepPointApi("BrepPointAPI");
     static const TfToken vertexPointPositionName(
         "brep:vertexPoint:point:position");
@@ -502,9 +521,12 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
 
     const VtArray<TfToken> shellPointType
         = _Read<TfToken>(brep.GetShellPointTypeAttr());
+    const VtArray<unsigned int> shellFaceuseCount
+        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
     size_t brepPointShellCount = 0;
-    for (const TfToken &pointType : shellPointType) {
-        if (pointType == brepPointApi) {
+    for (size_t i = 0; i < shellPointType.size(); ++i) {
+        if (_IsBrepPointShell(i, shellPointType, shellFaceuseCount,
+                              shellWireEdgeCount)) {
             ++brepPointShellCount;
         }
     }
@@ -559,8 +581,6 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
     // a single BrepPointAPI point. A shell with none of the three contributes
     // no boundary. Python reports this at warning severity, not as a failed
     // check, and compares only the shells both count arrays cover.
-    const VtArray<unsigned int> shellFaceuseCount
-        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
     if (!shellFaceuseCount.empty() && !shellWireEdgeCount.empty()) {
         const size_t numShells
             = std::min(shellFaceuseCount.size(), shellWireEdgeCount.size());
@@ -2469,6 +2489,38 @@ _BrepArraySchemaUsage(const UsdPrim &usdPrim,
         }
     }
 
+    // BA.583 for shell points. shell:pointType names a point only on a point
+    // shell (_IsBrepPointShell), so a "BrepPointAPI" token on a face or wire
+    // shell neither declares a point nor requires BrepPointAPI:shellPoint.
+    {
+        const VtArray<TfToken> shellPointType
+            = _Read<TfToken>(brep.GetShellPointTypeAttr());
+        const VtArray<unsigned int> shellFaceuseCount
+            = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
+        const VtArray<unsigned int> shellWireEdgeCount
+            = _Read<unsigned int>(brep.GetShellWireEdgeCountAttr());
+        size_t pointShells = 0;
+        for (size_t i = 0; i < shellPointType.size(); ++i) {
+            if (_IsBrepPointShell(i, shellPointType, shellFaceuseCount,
+                                  shellWireEdgeCount)) {
+                ++pointShells;
+            }
+        }
+        if (pointShells > 0
+            && !_HasAppliedSchema(usdPrim,
+                                  TfToken("BrepPointAPI:shellPoint"))) {
+            _Err(&errors,
+                 UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
+                 usdPrim,
+                 TfStringPrintf("[BA.583] BrepArray <%s>: shell:pointType "
+                                "contains %zu 'BrepPointAPI' occurrence(s), "
+                                "but required applied geometry API "
+                                "'BrepPointAPI:shellPoint' is absent from "
+                                "apiSchemas.",
+                                usdPrim.GetPath().GetText(), pointShells));
+        }
+    }
+
     // BA.583, second clause. UV pcurves have no topology type-token array of
     // their own, so presence is inferred from the packed record: a non-zero
     // order or vertexCount for any edgeuse means pcurve data is authored, and
@@ -4198,11 +4250,12 @@ _CheckAnalyticSurfaceOriginContainment(const UsdPrim &usdPrim,
 // -------------------------------------------------------------------------- //
 // BA.710  brep-shell-point-position-extent-containment                       //
 // -------------------------------------------------------------------------- //
-// A shell whose shell:pointType is BrepPointAPI carries one point, and that
-// point belongs to its own Brep, so it is measured against that Brep's
-// brep:extent box rather than the union of boxes BA.310 uses for vertices.
-// Shell points are packed in shell order across the whole BrepArray, so the
-// walk tracks a running shell-point cursor while it partitions shells per Brep.
+// A point shell (_IsBrepPointShell) carries one point, and that point belongs
+// to its own Brep, so it is measured against that Brep's brep:extent box rather
+// than the union of boxes BA.310 uses for vertices. Shell points are packed in
+// shell order across the whole BrepArray, so the walk tracks a running
+// shell-point cursor while it partitions shells per Brep; a BrepPointAPI token
+// on a face or wire shell is ignored and takes no slot in that packing.
 // The comparison carries the single-precision slop of _FloatClose, matching
 // isFloatLessThan / isFloatGreaterThan in brep_validator.py.
 void
@@ -4225,7 +4278,10 @@ _CheckShellPointContainment(const UsdPrim &usdPrim,
     }
     const VtArray<TfToken> shellPointType
         = _Read<TfToken>(brep.GetShellPointTypeAttr());
-    static const TfToken pointTok("BrepPointAPI");
+    const VtArray<unsigned int> shellFaceuseCount
+        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
+    const VtArray<unsigned int> shellWireEdgeCount
+        = _Read<unsigned int>(brep.GetShellWireEdgeCountAttr());
 
     size_t shellOffset = 0;
     size_t regionOffset = 0;
@@ -4249,7 +4305,8 @@ _CheckShellPointContainment(const UsdPrim &usdPrim,
         const GfVec3d &extMax = extent[2 * b + 1];
 
         for (size_t s = shellStart; s < shellEnd; ++s) {
-            if (s >= shellPointType.size() || shellPointType[s] != pointTok) {
+            if (!_IsBrepPointShell(s, shellPointType, shellFaceuseCount,
+                                   shellWireEdgeCount)) {
                 continue;
             }
             if (pointCursor >= shellPositions.size()) {
@@ -5748,15 +5805,21 @@ _BrepArrayNurbs(const UsdPrim &usdPrim,
                                 usdPrim.GetPath().GetText(), cCv.size(),
                                 expectedCv));
         }
-        if (!cW.empty() && cW.size() != expectedCv) {
+        // BA.405: one weight per packed UV control vertex, whether or not the
+        // weights are authored. A missing or empty weights array against a
+        // non-zero control-vertex total is a cardinality failure in its own
+        // right, not an exemption (OMPE-106502); an all-sentinel record (every
+        // vertexCount zero) expects no weights and passes without any.
+        if (cW.size() != expectedCv) {
             _Err(&errors,
                  UsdSolidValidationErrorNameTokens
                      ->nurbControlVertexWeightSizeMismatch,
                  usdPrim,
-                 TfStringPrintf("[BA.405] BrepArray <%s>: curveUv weights size %zu "
-                                "but expected %zu (sum of vertexCount).",
-                                usdPrim.GetPath().GetText(), cW.size(),
-                                expectedCv));
+                 TfStringPrintf("[BA.405] BrepArray <%s>: Invalid size for "
+                                "brep:curveUv:nurb:weights. Expected size "
+                                "%zu, but got %zu.",
+                                usdPrim.GetPath().GetText(), expectedCv,
+                                cW.size()));
         }
         _CheckNurbWeights(usdPrim, "BA.410", "curveUv", cW, &errors);
         _CheckNurbKnots1D(usdPrim, "BA.395", "BA.400", "curveUv", cO, cVC,

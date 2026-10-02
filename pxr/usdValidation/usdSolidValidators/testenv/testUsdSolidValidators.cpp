@@ -50,6 +50,23 @@ _CountError(const UsdValidationErrorVector &errors,
     return count;
 }
 
+// Number of findings a rule produced, counted by the "[BA.xxx]" tag every
+// message leads with. Several rules share an error name (the NURBS size rules
+// all report NurbControlVertexWeightSizeMismatch), so the tag is what tells
+// them apart.
+static size_t
+_CountRule(const UsdValidationErrorVector &errors, const std::string &rule)
+{
+    const std::string tag = "[" + rule + "]";
+    size_t count = 0;
+    for (const UsdValidationError &error : errors) {
+        if (TfStringStartsWith(error.GetMessage(), tag)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 static UsdStageRefPtr
 _OpenLayer(const std::string &contents)
 {
@@ -1137,15 +1154,17 @@ TestBrepArrayMinimumCountsAndSizes()
 
     {
         // vertex:pointType holds 3 entries where edge:vertexIndices reaches
-        // vertex 3, the position array holds 2 of the 3 BrepPointAPI vertices,
-        // and the BrepPointAPI shell has no shellPoint position at all.
+        // vertex 3, and the position array holds 2 of the 3 BrepPointAPI
+        // vertices. The shell's BrepPointAPI token sits on a face shell
+        // (faceuseCount 2), where it is ignored, so no shellPoint position is
+        // expected of it.
         const UsdPrim prim
             = stage->GetPrimAtPath(SdfPath("/World/PointPositionSizes"));
         TF_AXIOM(prim);
         const UsdValidationErrorVector errors = validator->Validate(prim);
         TF_AXIOM(_CountError(errors, ".VertexArraySizeMismatch") == 1);
         TF_AXIOM(_CountError(errors, ".VertexPointPositionSizeMismatch") == 1);
-        TF_AXIOM(_CountError(errors, ".ShellPointPositionSizeMismatch") == 1);
+        TF_AXIOM(_CountError(errors, ".ShellPointPositionSizeMismatch") == 0);
         TF_AXIOM(!_HasError(errors, ".RegionCountBelowMinimum"));
         TF_AXIOM(!_HasError(errors, ".ShellWithoutContent"));
     }
@@ -1194,6 +1213,228 @@ TestBrepArrayGeomSubsets()
     }
 }
 
+// OMPE-106532: shell:pointType names a point only on a shell with no faceuses
+// and no wire edges. The cases mirror test_brep_validator.py's
+// test_ignored_shell_point_tokens_do_not_create_geometry_occurrences,
+// test_true_point_shell_requires_exactly_one_position_occurrence and
+// test_ignored_shell_point_token_does_not_shift_later_brep_position_span.
+static const std::string pointShellContents = R"usda(#usda 1.0
+(
+    defaultPrim = "World"
+)
+def Xform "World"
+{
+    def BrepArray "FaceShellPointToken"
+    {
+        uniform token[] shell:pointType = ["BrepPointAPI"]
+        uniform uint[] shell:faceuseCount = [1]
+        uniform uint[] shell:wireEdgeCount = [0]
+    }
+
+    def BrepArray "WireShellPointToken"
+    {
+        uniform token[] shell:pointType = ["BrepPointAPI"]
+        uniform uint[] shell:faceuseCount = [0]
+        uniform uint[] shell:wireEdgeCount = [1]
+    }
+
+    def BrepArray "TruePointShell"
+    {
+        uniform token[] shell:pointType = ["BrepPointAPI"]
+        uniform uint[] shell:faceuseCount = [0]
+        uniform uint[] shell:wireEdgeCount = [0]
+    }
+
+    def BrepArray "TruePointShellWithPosition"
+    {
+        uniform token[] shell:pointType = ["BrepPointAPI"]
+        uniform uint[] shell:faceuseCount = [0]
+        uniform uint[] shell:wireEdgeCount = [0]
+        uniform point3d[] brep:shellPoint:point:position = [(1, 2, 3)]
+    }
+
+    def BrepArray "IgnoredTokenInside"
+    {
+        uniform uint[] brep:regionCount = [1, 1]
+        uniform uint[] region:shellCount = [1, 1]
+        uniform uint[] shell:faceuseCount = [1, 0]
+        uniform uint[] shell:wireEdgeCount = [0, 0]
+        uniform token[] shell:pointType = ["BrepPointAPI", "BrepPointAPI"]
+        uniform double3[] brep:extent = [(-1, -1, -1), (1, 1, 1), (9, 9, 9), (11, 11, 11)]
+        uniform point3d[] brep:shellPoint:point:position = [(10, 10, 10)]
+    }
+
+    def BrepArray "IgnoredTokenOutside"
+    {
+        uniform uint[] brep:regionCount = [1, 1]
+        uniform uint[] region:shellCount = [1, 1]
+        uniform uint[] shell:faceuseCount = [1, 0]
+        uniform uint[] shell:wireEdgeCount = [0, 0]
+        uniform token[] shell:pointType = ["BrepPointAPI", "BrepPointAPI"]
+        uniform double3[] brep:extent = [(-1, -1, -1), (1, 1, 1), (9, 9, 9), (11, 11, 11)]
+        uniform point3d[] brep:shellPoint:point:position = [(12, 10, 10)]
+    }
+}
+)usda";
+
+static void
+TestBrepArrayPointShells()
+{
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *structure
+        = registry.GetOrLoadValidatorByName(
+            UsdSolidValidatorNameTokens->brepArrayStructure);
+    const UsdValidationValidator *schemaUsage
+        = registry.GetOrLoadValidatorByName(
+            UsdSolidValidatorNameTokens->brepArraySchemaUsage);
+    const UsdValidationValidator *containment
+        = registry.GetOrLoadValidatorByName(
+            UsdSolidValidatorNameTokens->brepArrayContainment);
+    TF_AXIOM(structure && schemaUsage && containment);
+
+    UsdStageRefPtr stage = _OpenLayer(pointShellContents);
+    const auto prim = [&](const char *name) {
+        const UsdPrim p = stage->GetPrimAtPath(
+            SdfPath("/World").AppendChild(TfToken(name)));
+        TF_AXIOM(p);
+        return p;
+    };
+
+    // A BrepPointAPI token on a face or a wire shell is ignored: it asks for
+    // no shellPoint position and no BrepPointAPI:shellPoint.
+    for (const char *name : { "FaceShellPointToken", "WireShellPointToken" }) {
+        TF_AXIOM(_CountRule(structure->Validate(prim(name)), "BA.325") == 0);
+        TF_AXIOM(_CountRule(schemaUsage->Validate(prim(name)), "BA.583")
+                 == 0);
+    }
+
+    // A true point shell asks for exactly one position, and for the API.
+    TF_AXIOM(_CountRule(structure->Validate(prim("TruePointShell")), "BA.325")
+             == 1);
+    TF_AXIOM(_CountRule(schemaUsage->Validate(prim("TruePointShell")),
+                        "BA.583") == 1);
+    TF_AXIOM(_CountRule(structure->Validate(
+                            prim("TruePointShellWithPosition")), "BA.325")
+             == 0);
+
+    // Brep 0's face shell carries an ignored token, so the one position
+    // belongs to Brep 1's point shell and is measured against Brep 1's box.
+    TF_AXIOM(_CountRule(structure->Validate(prim("IgnoredTokenInside")),
+                        "BA.325") == 0);
+    TF_AXIOM(_CountRule(containment->Validate(prim("IgnoredTokenInside")),
+                        "BA.710") == 0);
+    const UsdValidationErrorVector outside
+        = containment->Validate(prim("IgnoredTokenOutside"));
+    TF_AXIOM(_CountRule(outside, "BA.710") == 1);
+    for (const UsdValidationError &error : outside) {
+        if (TfStringStartsWith(error.GetMessage(), "[BA.710]")) {
+            TF_AXIOM(TfStringContains(error.GetMessage(), "brep #1"));
+        }
+    }
+}
+
+// A BrepArray with one UV pcurve per vertexCount entry (order 2, or the 0/0
+// "no pcurve" sentinel), and the weights given -- or none at all when
+// `weights` is null. Mirrors _make_curve_uv_prim in test_brep_validator.py.
+static std::string
+_UvCurvePrimUsda(const std::string &name,
+                 const std::vector<unsigned int> &vertexCounts,
+                 const std::vector<double> *weights)
+{
+    std::vector<std::string> edgeuses, orders, counts, cvs, knots;
+    size_t cvTotal = 0;
+    for (size_t i = 0; i < vertexCounts.size(); ++i) {
+        const unsigned int vc = vertexCounts[i];
+        const unsigned int order = vc == 0 ? 0u : 2u;
+        edgeuses.push_back(TfStringify(i));
+        orders.push_back(TfStringify(order));
+        counts.push_back(TfStringify(vc));
+        for (unsigned int k = 0; k < order + vc; ++k) {
+            knots.push_back(TfStringify(k));
+        }
+        cvTotal += vc;
+    }
+    for (size_t c = 0; c < cvTotal; ++c) {
+        cvs.push_back(TfStringPrintf("(%zu, 0)", c));
+    }
+    std::string text = TfStringPrintf(
+        "    def BrepArray \"%s\" (\n"
+        "        prepend apiSchemas = [\"BrepCurveUvNurbAPI\"]\n"
+        "    )\n"
+        "    {\n"
+        "        uniform uint[] edgeuse:edgeIndex = [%s]\n"
+        "        uniform uint[] brep:curveUv:nurb:order = [%s]\n"
+        "        uniform uint[] brep:curveUv:nurb:vertexCount = [%s]\n"
+        "        uniform double2[] brep:curveUv:nurb:controlVertices = [%s]\n"
+        "        uniform double[] brep:curveUv:nurb:knots = [%s]\n",
+        name.c_str(), TfStringJoin(edgeuses, ", ").c_str(),
+        TfStringJoin(orders, ", ").c_str(), TfStringJoin(counts, ", ").c_str(),
+        TfStringJoin(cvs, ", ").c_str(), TfStringJoin(knots, ", ").c_str());
+    if (weights) {
+        std::vector<std::string> w;
+        for (const double v : *weights) {
+            w.push_back(TfStringify(v));
+        }
+        text += TfStringPrintf(
+            "        uniform double[] brep:curveUv:nurb:weights = [%s]\n",
+            TfStringJoin(w, ", ").c_str());
+    }
+    return text + "    }\n";
+}
+
+static void
+TestBrepArrayUvWeightCardinality()
+{
+    // OMPE-106502: BA.405 compares the packed weights against the packed UV
+    // control-vertex total whether or not weights are authored. The cases are
+    // test_uv_curve_weights_match_packed_control_vertex_count's.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayNurbs);
+    TF_AXIOM(validator);
+
+    struct Case {
+        const char *name;
+        std::vector<unsigned int> vertexCounts;
+        bool authored;
+        std::vector<double> weights;
+        size_t expected;
+    };
+    const std::vector<Case> cases = {
+        { "Missing", { 2 }, false, {}, 1 },
+        { "AuthoredEmpty", { 2 }, true, {}, 1 },
+        { "Short", { 2 }, true, { 1.0 }, 1 },
+        { "Exact", { 2 }, true, { 1.0, 1.0 }, 0 },
+        { "Long", { 2 }, true, { 1.0, 1.0, 1.0 }, 1 },
+        { "PackedShort", { 2, 3 }, true, { 1, 1, 1, 1 }, 1 },
+        { "PackedExact", { 2, 3 }, true, { 1, 1, 1, 1, 1 }, 0 },
+        { "PackedLong", { 2, 3 }, true, { 1, 1, 1, 1, 1, 1 }, 1 },
+        { "MissingSentinelWeights", { 0, 0 }, false, {}, 0 },
+        { "MixedSentinel", { 2, 0 }, true, { 1.0, 1.0 }, 0 },
+        // Positivity (BA.410) is independent of cardinality.
+        { "NonPositive", { 2 }, true, { 0.0, 1.0 }, 0 },
+    };
+
+    std::string contents = "#usda 1.0\ndef Xform \"World\"\n{\n";
+    for (const Case &c : cases) {
+        contents += _UvCurvePrimUsda(c.name, c.vertexCounts,
+                                     c.authored ? &c.weights : nullptr);
+    }
+    contents += "}\n";
+    UsdStageRefPtr stage = _OpenLayer(contents);
+
+    for (const Case &c : cases) {
+        const UsdPrim prim = stage->GetPrimAtPath(
+            SdfPath("/World").AppendChild(TfToken(c.name)));
+        TF_AXIOM(prim);
+        const UsdValidationErrorVector errors = validator->Validate(prim);
+        TF_AXIOM(_CountRule(errors, "BA.405") == c.expected);
+    }
+    const UsdPrim nonPositive
+        = stage->GetPrimAtPath(SdfPath("/World/NonPositive"));
+    TF_AXIOM(_CountRule(validator->Validate(nonPositive), "BA.410") == 1);
+}
+
 int
 main()
 {
@@ -1220,6 +1461,8 @@ main()
     TestBrepArrayCurveFrameTol();
     TestBrepArrayMinimumCountsAndSizes();
     TestBrepArrayGeomSubsets();
+    TestBrepArrayPointShells();
+    TestBrepArrayUvWeightCardinality();
 
     std::cout << "OK\n";
     return EXIT_SUCCESS;
