@@ -16,8 +16,9 @@ spherical/toroidal analytic surfaces, line/circle/ellipse curves (bare or wrappe
 SURFACE_CURVE / SEAM_CURVE), and NURBS surfaces and curves; lowers swept surfaces
 (linear extrusion, revolution) to NURBS; resolves void shells (BREP_WITH_VOIDS /
 ORIENTED_CLOSED_SHELL) and vertex loops; derives the parametric UV window of each
-face from its trimming edges; and reads per-body / per-face colors from STEP styled
-items. The plane-angle unit and the tolerance are read from the file.
+analytic face from its trimming edges (a NURBS face takes its surface's knot
+domain); and reads per-body / per-face colors from STEP styled items. The
+plane-angle unit and the tolerance are read from the file.
 
 Scope: an assembly comes through as one Xform per NEXT_ASSEMBLY_USAGE_OCCURRENCE
 placement, with the part's solids as BrepArray children; a file with no assembly
@@ -309,14 +310,9 @@ def lower_extrusion(rd, ref, vlo=0.0, vhi=1.0):
         cps.append(tuple(p[k] + vlo*dirv[k] for k in range(3)))
         cps.append(tuple(p[k] + vhi*dirv[k] for k in range(3)))
         wts += [w, w]
-    prof = dict(order=basis["order"], knots=basis["knots"],
-                controlVertices=basis["poles"], weights=basis["weights"], nurb=True)
     return dict(nurb=True, uOrder=basis["order"], vOrder=2, uVertexCount=nU, vVertexCount=2,
                 uKnots=basis["knots"], vKnots=[vlo, vlo, vhi, vhi],
-                controlVertices=cps, weights=wts,
-                _uspan=(basis["plo"], basis["phi"]), _vspan=(vlo, vhi),
-                _swept="ext", _prof=prof, _dir=dirv,
-                _porigin=basis["poles"][0], _profdom=(basis["plo"], basis["phi"]))
+                controlVertices=cps, weights=wts)
 
 def lower_revolution(rd, ref, a0=0.0, a1=2*math.pi):
     a = rd.args(ref)
@@ -364,19 +360,14 @@ def lower_revolution(rd, ref, a0=0.0, a1=2*math.pi):
         k = a0 + s*seg
         uK += [k, k]
     uK += [a1, a1, a1]
-    prof = dict(order=basis["order"], knots=basis["knots"],
-                controlVertices=basis["poles"], weights=basis["weights"], nurb=True)
     return dict(nurb=True, uOrder=3, vOrder=basis["order"], uVertexCount=nbU, vVertexCount=nbV,
-                uKnots=uK, vKnots=basis["knots"], controlVertices=cps, weights=wts,
-                _uspan=(a0, a1), _vspan=(basis["plo"], basis["phi"]),
-                _swept="rev", _prof=prof, _axp=axp, _axd=axd,
-                _uarc=(a0, a1), _profdom=(basis["plo"], basis["phi"]))
+                uKnots=uK, vKnots=basis["knots"], controlVertices=cps, weights=wts)
 
 # ================================================================ geometry extraction
-def surface_geom(rd, ref, cfg, fverts=None):
+def surface_geom(rd, ref, cfg, fpts=None):
     """(token, dict-of-arrays) for a face surface. cfg selects cone unit-context
-    and swept-surface lowering. fverts (face boundary vertices) is required for
-    the swept-surface param bounds (PCURVEs are not read)."""
+    and swept-surface lowering. fpts (the face's boundary vertices and edge
+    samples) bound a linear extrusion along its vector (PCURVEs are not read)."""
     t = rd.typ(ref)
     a = rd.args(ref)
     if t == "PLANE":
@@ -399,17 +390,19 @@ def surface_geom(rd, ref, cfg, fverts=None):
         o, z, x = rd.placement(a[1])
         return ("BrepSurfaceTorusAPI", dict(origin=o, axis=z, refDirection=x, majorRadius=float(a[2]), minorRadius=float(a[3])))
     if t == "SURFACE_OF_LINEAR_EXTRUSION":
+        # face:range is the lowered surface's whole knot domain, so the surface
+        # has to reach every boundary point: P = curve(u) + v*vector bounds v by
+        # the points' and the profile hull's extents along the vector.
         vlo, vhi = 0.0, 1.0
         vec = rd.args(a[2])
         d = vnorm(rd.direction(vec[1]))
         mag = float(vec[2])
-        if fverts:
-            hs = [vdot(v, d) for v in fverts]
+        if fpts:
+            hs = [vdot(p, d) for p in fpts]
             base = _lower_curve_to_nurb_local(rd, a[1])
             if base and base["poles"]:
-                b0 = vdot(base["poles"][0], d)
-                vlo = (min(hs) - b0)/mag
-                vhi = (max(hs) - b0)/mag
+                hb = [vdot(p, d) for p in base["poles"]]
+                vlo, vhi = _pad((min(hs) - max(hb))/mag, (max(hs) - min(hb))/mag, None)
                 if not (vhi > vlo + DEGENERATE_TOL):
                     vlo, vhi = 0.0, 1.0
         g = lower_extrusion(rd, ref, vlo, vhi)
@@ -845,203 +838,6 @@ def _base_face_range(stok, sg, fverts):
         return ((0.0, 2*math.pi), (0.0, 2*math.pi))
     return ((0.0, 1.0), (0.0, 1.0))
 
-def _invert_profile_coarse(prof, target, nscan=48):
-    order = prof["order"]
-    knots = prof["knots"]
-    cps = prof["controlVertices"]
-    wts = prof["weights"]
-    p = order - 1
-    lo, hi = knots[p], knots[len(cps)]
-    if not (hi > lo): return lo
-    best = 1e30
-    bt = lo
-    for i in range(nscan + 1):
-        t = lo + (hi - lo) * i / nscan
-        pt, _ = _deboor_rational(order, knots, cps, wts, t)
-        dd = (pt[0]-target[0])**2 + (pt[1]-target[1])**2 + (pt[2]-target[2])**2
-        if dd < best:
-            best = dd
-            bt = t
-    return bt
-
-def _swept_face_range(sg, fverts, loop_pts=None):
-    if not fverts or len(fverts) < 2: return None
-    uo, vo = sg["uOrder"], sg["vOrder"]
-    nU, nV = sg["uVertexCount"], sg["vVertexCount"]
-    uK, vK = sg["uKnots"], sg["vKnots"]
-    udom = (uK[uo-1], uK[nU])
-    vdom = (vK[vo-1], vK[nV])
-    du = udom[1]-udom[0]
-    dv = vdom[1]-vdom[0]
-    if not (du > 0 and dv > 0): return None
-    prof = sg["_prof"]
-    kind = sg["_swept"]
-    us = []
-    vs = []
-    if kind == "ext":
-        d = sg["_dir"]
-        dmag2 = sum(c*c for c in d)
-        if dmag2 <= 0: return None
-        o = sg["_porigin"]
-        for p in fverts:
-            disp = vsub(p, o)
-            fv = vdot(disp, d) / dmag2
-            vs.append(fv)
-            foot = tuple(p[k] - fv*d[k] for k in range(3))
-            us.append(_invert_profile_coarse(prof, foot))
-    else:
-        axp = sg["_axp"]
-        axd = sg["_axd"]
-        a0, a1 = sg["_uarc"]
-        def rot(vec, angle):
-            c, s = math.cos(angle), math.sin(angle)
-            cx = vcross(axd, vec)
-            return tuple(c*vec[k] + s*cx[k] for k in range(3))
-        mag = lambda w: math.sqrt(vdot(w, w))
-        p0 = prof["controlVertices"][0]
-        t0 = vdot(vsub(p0, axp), axd)
-        rad0 = vsub(p0, tuple(axp[k]+t0*axd[k] for k in range(3)))
-        if mag(rad0) < DEGENERATE_TOL:
-            for pp in prof["controlVertices"]:
-                tt = vdot(vsub(pp, axp), axd)
-                rr = vsub(pp, tuple(axp[k]+tt*axd[k] for k in range(3)))
-                if mag(rr) > DEGENERATE_TOL:
-                    rad0 = rr
-                    break
-        xref = vnorm(rad0)
-        yref = vcross(axd, xref)
-        for p in fverts:
-            foot_t = vdot(vsub(p, axp), axd)
-            radial = vsub(p, tuple(axp[k]+foot_t*axd[k] for k in range(3)))
-            ang = math.atan2(vdot(radial, yref), vdot(radial, xref))
-            us.append(ang)
-            back = tuple(axp[k] + foot_t*axd[k] + rot(radial, -ang)[k] for k in range(3))
-            vs.append(_invert_profile_coarse(prof, back))
-    if kind == "rev":
-        ulo, uhi = _wrap_span(us)
-        a0, a1 = sg["_uarc"]
-        def uangf(p):
-            foot_t = vdot(vsub(p, axp), axd)
-            radial = vsub(p, tuple(axp[k] + foot_t*axd[k] for k in range(3)))
-            return math.atan2(vdot(radial, yref), vdot(radial, xref))
-        # the lowered surface has a HARD u domain (its knot vector): a footprint
-        # that wraps past a domain end means the face's UV image is two disjoint
-        # strips at the domain seam, and clipping to one of them silently drops
-        # the other, so promote to the full domain instead.
-        seam_cross = (uhi > udom[1] + DEGENERATE_TOL) or (ulo < udom[0] - DEGENERATE_TOL)
-        full = (seam_cross or _wraps_period(loop_pts, uangf)
-                or (uhi - ulo >= (a1 - a0) - PERIOD_TOL) or _full_period(ulo, uhi))
-        if full: ulo, uhi = udom
-        else:
-            pu = du * PAD_FRAC + PAD_MIN
-            ulo = max(udom[0], ulo - pu)
-            uhi = min(udom[1], uhi + pu)
-        pv = max(dv * PAD_FRAC, dv / 48.0) + PAD_MIN
-    else:
-        pu = max(du * PAD_FRAC, du / 48.0) + PAD_MIN
-        ulo = max(udom[0], min(us) - pu)
-        uhi = min(udom[1], max(us) + pu)
-        pv = dv * PAD_FRAC + PAD_MIN
-    vlo = max(vdom[0], min(vs) - pv)
-    vhi = min(vdom[1], max(vs) + pv)
-    if not (uhi > ulo and vhi > vlo): return None
-    if (uhi - ulo) >= 0.98*du and (vhi - vlo) >= 0.98*dv: return None
-    return ((ulo, uhi), (vlo, vhi))
-
-def _eval_nurb_surface(sg, u, v):
-    uo, vo = sg["uOrder"], sg["vOrder"]
-    nU, nV = sg["uVertexCount"], sg["vVertexCount"]
-    uK, vK = sg["uKnots"], sg["vKnots"]
-    cps = sg["controlVertices"]
-    wts = sg["weights"]
-    def basis(kn, order, n, t):
-        p = order - 1
-        lo, hi = kn[p], kn[n]
-        if t < lo: t = lo
-        if t > hi: t = hi
-        if t >= kn[n]: span = n - 1
-        else:
-            span = p
-            while span < n - 1 and kn[span + 1] <= t: span += 1
-        N = [0.0]*(p + 1)
-        N[0] = 1.0
-        left = [0.0]*(p + 1)
-        right = [0.0]*(p + 1)
-        for j in range(1, p + 1):
-            left[j] = t - kn[span + 1 - j]
-            right[j] = kn[span + j] - t
-            saved = 0.0
-            for r in range(j):
-                denom = right[r + 1] + left[j - r]
-                temp = N[r] / denom if denom != 0 else 0.0
-                N[r] = saved + right[r + 1] * temp
-                saved = left[j - r] * temp
-            N[j] = saved
-        return span, N
-    us, Nu = basis(uK, uo, nU, u)
-    vs, Nv = basis(vK, vo, nV, v)
-    pu = uo - 1
-    pv = vo - 1
-    x = y = z = w = 0.0
-    for i in range(pu + 1):
-        ui = us - pu + i
-        for j in range(pv + 1):
-            vj = vs - pv + j
-            idx = ui * nV + vj
-            b = Nu[i] * Nv[j] * wts[idx]
-            cp = cps[idx]
-            x += b*cp[0]
-            y += b*cp[1]
-            z += b*cp[2]
-            w += b
-    if w == 0: w = 1.0
-    return (x/w, y/w, z/w)
-
-def _nurb_face_range(sg, fverts, coarse=10):
-    uo, vo = sg["uOrder"], sg["vOrder"]
-    nU, nV = sg["uVertexCount"], sg["vVertexCount"]
-    uK, vK = sg["uKnots"], sg["vKnots"]
-    ulo, uhi = uK[uo - 1], uK[nU]
-    vlo, vhi = vK[vo - 1], vK[nV]
-    if not (uhi > ulo and vhi > vlo): return None
-    nu = max(coarse, uo + 1)
-    nv = max(coarse, vo + 1)
-    grid = []
-    for iu in range(nu + 1):
-        gu = ulo + (uhi - ulo) * iu / nu
-        row = []
-        for iv in range(nv + 1):
-            gv = vlo + (vhi - vlo) * iv / nv
-            row.append((gu, gv, _eval_nurb_surface(sg, gu, gv)))
-        grid.append(row)
-    us = []
-    vs = []
-    for p in fverts:
-        best = 1e30
-        bu = ulo
-        bv = vlo
-        for row in grid:
-            for (gu, gv, gp) in row:
-                dd = (gp[0]-p[0])**2 + (gp[1]-p[1])**2 + (gp[2]-p[2])**2
-                if dd < best:
-                    best = dd
-                    bu = gu
-                    bv = gv
-        us.append(bu)
-        vs.append(bv)
-    if not us: return None
-    du = (uhi - ulo)
-    dv = (vhi - vlo)
-    pu = du / nu
-    pv = dv / nv
-    rulo = max(ulo, min(us) - pu)
-    ruhi = min(uhi, max(us) + pu)
-    rvlo = max(vlo, min(vs) - pv)
-    rvhi = min(vhi, max(vs) + pv)
-    if not (ruhi > rulo and rvhi > rvlo): return None
-    if (ruhi - rulo) >= 0.98 * du and (rvhi - rvlo) >= 0.98 * dv: return None
-    return ((rulo, ruhi), (rvlo, rvhi))
-
 def _loop_windings(loop_pts, ang):
     """Net winding (radians) of each ordered boundary loop under the periodic
     angle function ang(point). Consecutive deltas are unwrapped to (-pi, pi],
@@ -1129,14 +925,14 @@ def rebase_periodic_u(stok, sg, rng):
     sg["refDirection"] = vnorm(tuple(c * x[k] + sn * y[k] for k in range(3)))
     return sg, ((0.0, span), v)
 
-def face_range(stok, sg, fverts, loop_pts=None, sense=True, nverts=0):
-    """The face's UV window (face:range), taken from the boundary's actual UV
-    footprint. loop_pts: ordered per-loop boundary sample chains, used for
-    periodic-direction winding promotion and sphere pole containment; sense is
-    the ADVANCED_FACE same_sense flag; nverts = how many leading entries of
-    fverts are true boundary vertices (kept through sample capping). With no
-    boundary samples there is nothing to project, so fall back to the natural
-    period."""
+def face_range(stok, sg, fverts, loop_pts=None, sense=True):
+    """The face's UV window (face:range). An analytic face's window is taken from
+    the boundary's actual UV footprint; a NURBS face (a B-spline surface or a
+    lowered swept surface) takes its surface's whole knot domain. loop_pts:
+    ordered per-loop boundary sample chains, used for periodic-direction winding
+    promotion and sphere pole containment; sense is the ADVANCED_FACE same_sense
+    flag. With no boundary samples there is nothing to project, so fall back to
+    the natural period."""
     if not fverts:
         return _base_face_range(stok, sg, fverts)
     if stok == "BrepSurfacePlaneAPI":
@@ -1223,14 +1019,6 @@ def face_range(stok, sg, fverts, loop_pts=None, sense=True, nverts=0):
         if full_v: vlo, vhi = 0.0, _TWO_PI
         else: vlo, vhi = _pad_angular(vlo, vhi)
         return ((ulo, uhi), (vlo, vhi))
-    if sg.get("nurb"):
-        pts = _cap_face_samples(fverts, nverts)
-        if sg.get("_swept"):
-            r = _swept_face_range(sg, pts, loop_pts)
-            if r is not None: return r
-        r = _nurb_face_range(sg, pts)
-        if r is not None: return r
-        return _base_face_range(stok, sg, fverts)
     return _base_face_range(stok, sg, fverts)
 
 # ================================================================ boundary-edge sampling (H2b)
@@ -1292,24 +1080,6 @@ def _edge_interior_samples(edge, verts, n_nurb=9):
             pts.append(C)
         return pts
     return []
-
-def _cap_samples(pts, cap=400):
-    """Uniform subsample so the NURBS grid-search / profile-inversion paths stay
-    bounded on faces with hundreds of boundary edges."""
-    if len(pts) <= cap:
-        return pts
-    step = (len(pts) - 1) / (cap - 1)
-    return [pts[int(round(i * step))] for i in range(cap)]
-
-def _cap_face_samples(pts, nverts, cap=400):
-    """Cap for the NURBS paths, ALWAYS retaining the boundary vertices (the head
-    of the sample list). Uniform subsampling over the whole list can drop the
-    very vertex that pins a UV extreme: a corner vertex at v = 1.0 falling out
-    of the cap shrinks the authored window to 0.9."""
-    if len(pts) <= cap:
-        return pts
-    nv = min(max(nverts, 0), cap // 2)
-    return pts[:nv] + _cap_samples(pts[nv:], cap - nv)
 
 # ================================================================ shell resolution
 def _resolve_shell_faces(rd, sh_ref):
@@ -1448,9 +1218,9 @@ def extract_brep(rd, cfg, solid_refs=None):
                     if lp: floop_pts.append(lp)
                 for ei in dict.fromkeys(ei for eis, _ in floop_edges for ei in eis):
                     fsamples += esamples[ei]
-                stok, sg = surface_geom(rd, fa[2], cfg, fverts)
+                stok, sg = surface_geom(rd, fa[2], cfg, fsamples)
                 rng = face_range(stok, sg, fsamples, loop_pts=floop_pts,
-                                 sense=sense, nverts=len(fverts))
+                                 sense=sense)
                 sg, rng = rebase_periodic_u(stok, sg, rng)
                 for n, vi in loop_specs:
                     loops.append(n)

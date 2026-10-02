@@ -31,7 +31,9 @@ the file contains:
 - **Swept surfaces** — linear extrusion and revolution — lowered to NURBS with
   exact rational-arc control points.
 - **Void shells** (`BREP_WITH_VOIDS` / `ORIENTED_CLOSED_SHELL`) and **vertex loops**.
-- **Face UV windows** (`face:range`) derived from each face's trimming edges.
+- **Face UV windows** (`face:range`): an analytic face's is derived from its
+  trimming edges; a NURBS face, including a lowered swept surface, takes its
+  surface's knot domain.
 - **Colors** — per-body and per-face `displayColor` read from STEP styled items.
 
 The plane-angle unit (degrees vs radians) and the intersection tolerance are read
