@@ -167,8 +167,13 @@ def Xform "World"
         uniform token[] vertex:pointType = ["BrepPointAPI"]
     }
 
+    # One Brep with one face, so the face is inside the Brep's surface span:
+    # BA.425 checks only the NURBS surfaces of each Brep's face partition.
     def BrepArray "BadNurbOrder"
     {
+        uniform uint[] brep:regionCount = [1]
+        uniform uint[] region:shellCount = [1]
+        uniform uint[] shell:faceuseCount = [2]
         uniform token[] face:surfaceType = ["BrepSurfaceNurbAPI"]
         uint[] brep:surface:nurb:uOrder = [0]
         uint[] brep:surface:nurb:vOrder = [2]

@@ -67,7 +67,7 @@
                         ]
                     },
                     "BrepArraySchemaUsage": {
-                        "doc": "Validates two-way consistency between applied API schemas (BrepPointAPI:vertexPoint and the analytic BrepSurface*API schemas) and the corresponding face:surfaceType / vertex:pointType usage and authored data on a UsdSolid BrepArray.",
+                        "doc": "Validates that the applied API schemas of a UsdSolid BrepArray agree with its topology: every curve, surface or point type used in edge:curveType, wireEdge:curveType, face:surfaceType, vertex:pointType or a point shell, and any authored UV pcurve data, requires its geometry API (BA.583); and for the analytic surfaces and vertex points, a used type requires its data and an applied API requires a use.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],
@@ -121,7 +121,7 @@
                         ]
                     },
                     "BrepArrayNurbs": {
-                        "doc": "Validates NURBS geometry coherence of a UsdSolid BrepArray (surface, edge3d, wireEdge3d, curveUv): array sizes, orders positive and >= 2, order <= vertexCount, control-vertex/weight/knot vector sizes, positive weights, non-decreasing knot vectors, and schema/data usage consistency. BA.650-BA.658 repeat the edge3d checks over the wireEdge3d stratum and additionally require every wireEdge3dNurb control vertex to lie within a brep:extent box.",
+                        "doc": "Validates the NURBS strata of a UsdSolid BrepArray (edge3d, curveUv, surface, wireEdge3d): array sizes against the topology, orders positive and >= 2, order <= vertexCount, control-vertex, weight and knot vector sizes, positive weights, non-decreasing knot vectors, attribute value types, and schema/data usage consistency. BA.650-BA.658 also require every wireEdge3dNurb control vertex to lie within a brep:extent box.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],

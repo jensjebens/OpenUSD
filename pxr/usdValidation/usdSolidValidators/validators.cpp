@@ -819,8 +819,22 @@ public:
     void ValidateMinimumTopologyCounts();
     void ValidateTypeCountExhaustive();
     void ValidateRadialChainConsistency();
+    void ValidateCurve3dNurbControlVerticesWeights();
+    void ValidateCurve3dNurbOrderVertexCount();
+    void ValidateCurve3dKnots();
+    void ValidateCurveUvData();
+    void ValidateSurfaceControlVerticesWeights();
+    void ValidateSurfaceOrdersVertexCounts();
+    void ValidateSurfaceKnots();
+    void ValidateSchemaConsistency();
+    void ValidateNurbsDataCompleteness();
+    void ValidateNurbsMathematicalConsistency();
+    void ValidateNurbsOrderAndVertexCountValues();
+    void ValidateWireEdge3dNurbs();
 
 private:
+    void _ValidateRequiredGeometryApis();
+
     // --- reporting ---------------------------------------------------------
     bool _Owns(const char *rule) const { return _owned.count(rule) != 0; }
 
@@ -2884,6 +2898,1315 @@ _BrepChecker::ValidateRadialChainConsistency()
     }
 }
 
+// Python's `any(y < x - NUMERICAL_TOLERANCE for x, y in zip(k, k[1:]))` over
+// values[start, end): a knot slice that decreases by more than the tolerance.
+bool
+_PyKnotsDecrease(const _PyValue &values, size_t start, size_t end)
+{
+    for (size_t i = start + 1; i < end; ++i) {
+        if (values.Num(i) < values.Num(i - 1) - _PyNumericalTolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// _validate_curve3d_nurb_control_vertices_weights: BA.345 the edge3dNurb
+// weights and control vertices hold sum(vertexCount) entries, BA.350 each
+// weight of each Brep's control-vertex span is positive. Unreadable values
+// are BA.371 (or BA.345 for weights and control vertices) and end the rule.
+void
+_BrepChecker::ValidateCurve3dNurbControlVerticesWeights()
+{
+    const std::string base = "brep:edge3dNurb:curve3d:nurb:";
+    const _PyValue vertexCounts = _Get(base + "vertexCount").NoneToEmpty();
+    const _PyValue weights = _Get(base + "weights").NoneToEmpty();
+    const _PyValue controlVertices
+        = _Get(base + "controlVertices").NoneToEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+
+    if (vertexCounts.IsUnregistered()) {
+        _Fail("BA.371", base + "vertexCount has an unregistered USD type; "
+                               "expected uint[].");
+        return;
+    }
+    if (weights.IsUnregistered()) {
+        _Fail("BA.371", base + "weights has an unregistered USD type; "
+                               "expected double[].");
+        return;
+    }
+    if (!vertexCounts.IsSequence()) {
+        _Fail("BA.371", base + "vertexCount is not a valid sequence; "
+                               "expected uint[].");
+        return;
+    }
+    if (!weights.IsSequence()) {
+        _Fail("BA.345", base + "weights is not a valid sequence; expected "
+                               "double[].");
+        return;
+    }
+    if (vertexCounts.Len() > 0 && !vertexCounts.IsNumbers()) {
+        _Fail("BA.371", base + "vertexCount contains non-integer data; "
+                               "expected uint[].");
+        return;
+    }
+    const double expected = _Sum(vertexCounts);
+    if (expected > 0 || weights.Len() > 0) {
+        _ValidateArraySizesAndAuthored(
+            { base + "weights", base + "controlVertices" }, "BA.345",
+            &expected, true);
+    }
+    if (controlVertices.IsUnregistered()) {
+        _Fail("BA.371", base + "controlVertices has an unregistered USD "
+                               "type; expected point3d[].");
+        return;
+    }
+    if (!controlVertices.IsSequence()) {
+        _Fail("BA.345", TfStringPrintf(
+            "%scontrolVertices is not a valid sequence; expected size %s.",
+            base.c_str(), _PyValue::NumRepr(expected, true).c_str()));
+    } else if (controlVertices.Len() > 0
+               && static_cast<double>(controlVertices.Len()) != expected) {
+        _Fail("BA.345", TfStringPrintf(
+            "Invalid size for %scontrolVertices. Expected %s, but got %zu.",
+            base.c_str(), _PyValue::NumRepr(expected, true).c_str(),
+            controlVertices.Len()));
+    }
+    if (!weights.Truthy() || numBreps == 0 || !weights.IsNumbers()) {
+        return;
+    }
+    const std::vector<long long> &offsets = _Offsets().edgeControlVertices;
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= offsets.size()) {
+            break;
+        }
+        const long long end
+            = std::min(offsets[b + 1], static_cast<long long>(weights.Len()));
+        for (long long w = offsets[b]; w < end; ++w) {
+            size_t i = 0;
+            if (_PyIndex(w, weights.Len(), &i)
+                && weights.Num(i) < _PyNumericalTolerance) {
+                _Fail("BA.350", TfStringPrintf("Invalid weight at index #%lld "
+                                               "in brep #%zu. Weights must be "
+                                               "positive.",
+                                               w, b));
+            }
+        }
+    }
+}
+
+// _validate_curve3d_nurb_order_vertex_count: BA.330 order and vertexCount hold
+// one entry per BrepCurve3dNurbAPI edge (checked when such edges exist or
+// orders are authored), then per Brep curve span BA.335 order positive and
+// BA.340 order <= vertexCount.
+void
+_BrepChecker::ValidateCurve3dNurbOrderVertexCount()
+{
+    const std::string base = "brep:edge3dNurb:curve3d:nurb:";
+    const _PyValue types = _Get("edge:curveType").OrEmpty();
+    double nurbsEdges = 0;
+    for (size_t i = 0; i < types.Len(); ++i) {
+        nurbsEdges += types.Equals(i, "BrepCurve3dNurbAPI") ? 1 : 0;
+    }
+    if (nurbsEdges > 0 || _Get(base + "order").OrEmpty().Len() > 0) {
+        _ValidateArraySizesAndAuthored({ base + "order", base + "vertexCount" },
+                                       "BA.330", &nurbsEdges, true);
+    }
+    if (_Get(base + "order").IsUnregistered()) {
+        _Fail("BA.330", base + "order has an unregistered USD type; expected "
+                               "uint[].");
+        return;
+    }
+    if (_Get(base + "vertexCount").IsUnregistered()) {
+        _Fail("BA.330", base + "vertexCount has an unregistered USD type; "
+                               "expected uint[].");
+        return;
+    }
+    const _PyValue orders = _Get(base + "order").OrEmpty();
+    const _PyValue vertexCounts = _Get(base + "vertexCount").OrEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (!orders.Truthy() || !vertexCounts.Truthy() || numBreps == 0
+        || !orders.IsNumbers() || !vertexCounts.IsNumbers()) {
+        return;
+    }
+    const std::vector<long long> &offsets = _Offsets().edge3dNurbsCurves;
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= offsets.size()) {
+            break;
+        }
+        const long long end = std::min(
+            { offsets[b + 1], static_cast<long long>(orders.Len()),
+              static_cast<long long>(vertexCounts.Len()) });
+        for (long long c = offsets[b]; c < end; ++c) {
+            size_t i = 0, j = 0;
+            if (!_PyIndex(c, orders.Len(), &i)
+                || !_PyIndex(c, vertexCounts.Len(), &j)) {
+                continue;
+            }
+            const double order = orders.Num(i);
+            const double vc = vertexCounts.Num(j);
+            if (order <= 0) {
+                _Fail("BA.335", TfStringPrintf(
+                    "Invalid %sorder %s for curve3d #%lld in brep #%zu. "
+                    "%sorder must be positive.",
+                    base.c_str(), orders.Repr(i).c_str(), c, b, base.c_str()));
+            } else if (order > vc) {
+                _Fail("BA.340", TfStringPrintf(
+                    "Invalid %sorder %s for curve3d #%lld in brep #%zu. "
+                    "%sorder must not exceed %svertexCount %s.",
+                    base.c_str(), orders.Repr(i).c_str(), c, b, base.c_str(),
+                    base.c_str(), vertexCounts.Repr(j).c_str()));
+            }
+        }
+    }
+}
+
+// _validate_curve3d_knots: per Brep curve span, each curve's slice of the
+// packed knots holds vertexCount + order knots (BA.355) and does not decrease
+// (BA.360). Unreadable values are BA.371 and end the rule.
+void
+_BrepChecker::ValidateCurve3dKnots()
+{
+    const std::string base = "brep:edge3dNurb:curve3d:nurb:";
+    if (_Get(base + "knots").IsUnregistered()) {
+        _Fail("BA.371", base + "knots has an unregistered USD type; expected "
+                               "double[].");
+        return;
+    }
+    const _PyValue knots = _Get(base + "knots").OrEmpty();
+    const _PyValue vertexCounts = _Get(base + "vertexCount").OrEmpty();
+    const _PyValue orders = _Get(base + "order").OrEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (vertexCounts.IsUnregistered()) {
+        _Fail("BA.371", base + "vertexCount has an unregistered USD type; "
+                               "expected uint[].");
+        return;
+    }
+    if (orders.IsUnregistered()) {
+        _Fail("BA.371", base + "order has an unregistered USD type; expected "
+                               "uint[].");
+        return;
+    }
+    if (!vertexCounts.IsSequence()) {
+        _Fail("BA.371", base + "vertexCount is not a valid sequence; "
+                               "expected uint[].");
+        return;
+    }
+    if (!orders.IsSequence()) {
+        _Fail("BA.371", base + "order is not a valid sequence; expected "
+                               "uint[].");
+        return;
+    }
+    if (!knots.Truthy() || !vertexCounts.Truthy() || !orders.Truthy()
+        || numBreps == 0 || !knots.IsNumbers() || !vertexCounts.IsNumbers()
+        || !orders.IsNumbers()) {
+        return;
+    }
+    const std::vector<long long> &offsets = _Offsets().edge3dNurbsCurves;
+    long long globalOffset = 0;
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= offsets.size()) {
+            break;
+        }
+        const long long end = std::min(
+            { offsets[b + 1], static_cast<long long>(vertexCounts.Len()),
+              static_cast<long long>(orders.Len()) });
+        for (long long c = offsets[b]; c < end; ++c) {
+            size_t i = 0, j = 0;
+            if (!_PyIndex(c, vertexCounts.Len(), &i)
+                || !_PyIndex(c, orders.Len(), &j)) {
+                continue;
+            }
+            const long long expected = static_cast<long long>(
+                vertexCounts.Num(i) + orders.Num(j));
+            const auto slice
+                = _PySlice(globalOffset, globalOffset + expected, knots.Len());
+            const long long got
+                = static_cast<long long>(slice.second - slice.first);
+            if (got != expected) {
+                _Fail("BA.355", TfStringPrintf(
+                    "Invalid knot count for curve3d #%lld in brep #%zu. "
+                    "Expected %lld knots, but got %lld.",
+                    c, b, expected, got));
+            }
+            if (_PyKnotsDecrease(knots, slice.first, slice.second)) {
+                _Fail("BA.360", TfStringPrintf(
+                    "Invalid knot ordering for curve3d #%lld in brep #%zu. "
+                    "Knots must be non-decreasing.",
+                    c, b));
+            }
+            globalOffset += expected;
+        }
+    }
+}
+
+// _validate_curveUv_data, which runs only when brep:curveUv:nurb:vertexCount
+// or :order is authored: BA.375 order and vertexCount hold one entry per
+// edgeuse; per Brep edgeuse span (the 0/0 record meaning "no pcurve" is
+// skipped) BA.380 order positive and BA.385 order <= vertexCount; BA.390 the
+// control vertices hold sum(vertexCount) entries; BA.395 each curve's knot
+// slice holds vertexCount + order knots and the slices use every knot, BA.400
+// each slice non-decreasing; BA.405 the weights hold sum(vertexCount) entries
+// and BA.410 each curve's weights are positive. Unreadable values are BA.416
+// and end the rule.
+void
+_BrepChecker::ValidateCurveUvData()
+{
+    const std::string base = "brep:curveUv:nurb:";
+    if (!_IsAuthored(base + "vertexCount") && !_IsAuthored(base + "order")) {
+        return;
+    }
+    const double edgeuses
+        = static_cast<double>(_Get("edgeuse:edgeIndex").OrEmpty().Len());
+    _ValidateArraySizesAndAuthored({ base + "vertexCount", base + "order" },
+                                   "BA.375", &edgeuses, true);
+    const std::vector<long long> &offsets = _Offsets().curveUv;
+
+    const _PyValue vertexCounts = _Get(base + "vertexCount").NoneToEmpty();
+    const _PyValue orders = _Get(base + "order").NoneToEmpty();
+    const _PyValue controlVertices
+        = _Get(base + "controlVertices").NoneToEmpty();
+    if (controlVertices.IsUnregistered()) {
+        _Fail("BA.416", base + "controlVertices has an unregistered USD type; "
+                               "expected double2[].");
+        return;
+    }
+    if (vertexCounts.IsUnregistered()) {
+        _Fail("BA.416", base + "vertexCount has an unregistered USD type; "
+                               "expected uint[].");
+        return;
+    }
+    if (orders.IsUnregistered()) {
+        _Fail("BA.416", base + "order has an unregistered USD type; expected "
+                               "uint[].");
+        return;
+    }
+    if (!vertexCounts.IsSequence()) {
+        _Fail("BA.416", base + "vertexCount is not a valid sequence; expected "
+                               "uint[].");
+        return;
+    }
+    if (!orders.IsSequence()) {
+        _Fail("BA.416", base + "order is not a valid sequence; expected "
+                               "uint[].");
+        return;
+    }
+
+    // The curves of Brep b: edgeuses [offsets[b], offsets[b + 1]), numbered
+    // from zero within the Brep.
+    const auto forEachCurve = [&](const auto &fn) {
+        for (size_t b = 0; b + 1 < offsets.size(); ++b) {
+            long long local = 0;
+            for (long long c = offsets[b]; c < offsets[b + 1]; ++c, ++local) {
+                fn(b, local, c);
+            }
+        }
+    };
+
+    if (orders.Truthy() && orders.IsNumbers() && vertexCounts.IsNumbers()) {
+        forEachCurve([&](size_t b, long long local, long long c) {
+            if (c < 0 || c >= static_cast<long long>(orders.Len())
+                || c >= static_cast<long long>(vertexCounts.Len())) {
+                return;
+            }
+            const double order = orders.Num(static_cast<size_t>(c));
+            const double vc = vertexCounts.Num(static_cast<size_t>(c));
+            if (order == 0 && vc == 0) {
+                return;
+            }
+            if (order <= 0) {
+                _Fail("BA.380", TfStringPrintf(
+                    "Invalid %sorder %s for curveUv #%lld in brep #%zu. Order "
+                    "must be positive.",
+                    base.c_str(), orders.Repr(static_cast<size_t>(c)).c_str(),
+                    local, b));
+            } else if (order > vc) {
+                _Fail("BA.385", TfStringPrintf(
+                    "Invalid %sorder %s for curveUv #%lld in brep #%zu. Order "
+                    "must not exceed vertexCount %s.",
+                    base.c_str(), orders.Repr(static_cast<size_t>(c)).c_str(),
+                    local, b,
+                    vertexCounts.Repr(static_cast<size_t>(c)).c_str()));
+            }
+        });
+    }
+
+    if (vertexCounts.Len() > 0 && !vertexCounts.IsNumbers()) {
+        _Fail("BA.416", base + "vertexCount contains non-integer data; "
+                               "expected uint[].");
+        return;
+    }
+    const double expectedTotal = _Sum(vertexCounts);
+    const std::string expectedRepr
+        = _PyValue::NumRepr(expectedTotal, vertexCounts.Integral()
+                                               || vertexCounts.Len() == 0);
+    if (!controlVertices.IsSequence()) {
+        _Fail("BA.390", TfStringPrintf(
+            "%scontrolVertices is not a valid sequence; expected size %s.",
+            base.c_str(), expectedRepr.c_str()));
+    } else if (static_cast<double>(controlVertices.Len()) != expectedTotal) {
+        _Fail("BA.390", TfStringPrintf(
+            "Invalid size for %scontrolVertices. Expected size %s, but got "
+            "%zu.",
+            base.c_str(), expectedRepr.c_str(), controlVertices.Len()));
+    }
+
+    if (_Get(base + "knots").IsUnregistered()) {
+        _Fail("BA.416", base + "knots has an unregistered USD type; expected "
+                               "double[].");
+        return;
+    }
+    const _PyValue knots = _Get(base + "knots").OrEmpty();
+    if (knots.Truthy() && knots.IsNumbers() && vertexCounts.IsNumbers()
+        && orders.IsNumbers()) {
+        long long offset = 0;
+        forEachCurve([&](size_t b, long long local, long long c) {
+            if (c < 0 || c >= static_cast<long long>(vertexCounts.Len())
+                || c >= static_cast<long long>(orders.Len())) {
+                return;
+            }
+            const double vc = vertexCounts.Num(static_cast<size_t>(c));
+            const double order = orders.Num(static_cast<size_t>(c));
+            if (vc == 0 && order == 0) {
+                return;
+            }
+            const long long expected = static_cast<long long>(vc + order);
+            const auto slice = _PySlice(offset, offset + expected, knots.Len());
+            const long long got
+                = static_cast<long long>(slice.second - slice.first);
+            if (got != expected) {
+                _Fail("BA.395", TfStringPrintf(
+                    "Invalid knot count for curveUv #%lld in brep #%zu. "
+                    "Expected %lld, but got %lld.",
+                    local, b, expected, got));
+            }
+            if (_PyKnotsDecrease(knots, slice.first, slice.second)) {
+                _Fail("BA.400", TfStringPrintf(
+                    "Invalid knot ordering for curveUv #%lld in brep #%zu. "
+                    "Knots must be non-decreasing.",
+                    local, b));
+            }
+            offset += expected;
+        });
+        if (offset != static_cast<long long>(knots.Len())) {
+            const size_t brep = offsets.size() >= 2 ? offsets.size() - 2 : 0;
+            _Fail("BA.395", TfStringPrintf(
+                "Invalid packed knot count through brep #%zu. Expected %lld, "
+                "but got %zu.",
+                brep, offset, knots.Len()));
+        }
+    }
+
+    if (_Get(base + "weights").IsUnregistered()) {
+        _Fail("BA.416", base + "weights has an unregistered USD type; expected "
+                               "double[].");
+        return;
+    }
+    const _PyValue weights = _Get(base + "weights").NoneToEmpty();
+    if (!weights.IsSequence()) {
+        _Fail("BA.405", TfStringPrintf(
+            "%sweights is not a valid sequence; expected size %s.",
+            base.c_str(), expectedRepr.c_str()));
+    } else if (static_cast<double>(weights.Len()) != expectedTotal) {
+        _Fail("BA.405", TfStringPrintf(
+            "Invalid size for %sweights. Expected size %s, but got %zu.",
+            base.c_str(), expectedRepr.c_str(), weights.Len()));
+    }
+    if (weights.Len() > 0 && weights.IsNumbers() && vertexCounts.IsNumbers()) {
+        long long offset = 0;
+        forEachCurve([&](size_t b, long long, long long c) {
+            if (c < 0 || c >= static_cast<long long>(vertexCounts.Len())) {
+                return;
+            }
+            const long long vc = static_cast<long long>(
+                vertexCounts.Num(static_cast<size_t>(c)));
+            const auto slice = _PySlice(offset, offset + vc, weights.Len());
+            for (size_t i = slice.first; i < slice.second; ++i) {
+                if (weights.Num(i) < _PyNumericalTolerance) {
+                    _Fail("BA.410", TfStringPrintf(
+                        "Invalid weight at index #%zu in brep #%zu. Weights "
+                        "must be positive.",
+                        i - slice.first, b));
+                }
+            }
+            offset += vc;
+        });
+    }
+}
+
+// _validate_surface_control_vertices_weights: BA.420 the u and v vertex counts
+// align, BA.435 weights and control vertices hold sum(u * v) entries, and
+// BA.440 each weight of each Brep's control-vertex span is positive.
+// Unreadable values are BA.471 and end the rule.
+void
+_BrepChecker::ValidateSurfaceControlVerticesWeights()
+{
+    const std::string base = "brep:surface:nurb:";
+    const _PyValue &uRaw = _Get(base + "vVertexCount");
+    const _PyValue &vRaw = _Get(base + "uVertexCount");
+    if (uRaw.IsUnregistered() || vRaw.IsUnregistered()) {
+        _Fail("BA.471", base + "uVertexCount/vVertexCount has an unregistered "
+                               "USD type; expected uint[].");
+        return;
+    }
+    if (_Get(base + "weights").IsUnregistered()) {
+        _Fail("BA.471", base + "weights has an unregistered USD type; "
+                               "expected double[].");
+        return;
+    }
+    const _PyValue weights = _Get(base + "weights").NoneToEmpty();
+    const _PyValue controlVertices
+        = _Get(base + "controlVertices").NoneToEmpty();
+    const _PyValue u = uRaw.NoneToEmpty();
+    const _PyValue v = vRaw.NoneToEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+
+    // sum(u * v for u, v in zip(u, v, strict=True)): a non-sequence fails
+    // the zip (BA.471), unequal lengths fail strict (BA.420), non-numeric
+    // entries fail the arithmetic (BA.471).
+    if (!u.IsSequence() || !v.IsSequence()) {
+        _Fail("BA.471", base + "uVertexCount/vVertexCount contain invalid or "
+                               "non-integer data; expected uint[] values to "
+                               "compute control vertex count.");
+        return;
+    }
+    if (u.Len() != v.Len()) {
+        _Fail("BA.420", base + "uVertexCount and vVertexCount have mismatched "
+                               "lengths; expected aligned per-surface counts.");
+        return;
+    }
+    if (u.Len() > 0 && (!u.IsNumbers() || !v.IsNumbers())) {
+        _Fail("BA.471", base + "uVertexCount/vVertexCount contain invalid or "
+                               "non-integer data; expected uint[] values to "
+                               "compute control vertex count.");
+        return;
+    }
+    double expected = 0.0;
+    for (size_t i = 0; i < u.Len(); ++i) {
+        expected += u.Num(i) * v.Num(i);
+    }
+    if (expected > 0 || weights.Len() > 0) {
+        _ValidateArraySizesAndAuthored(
+            { base + "weights", base + "controlVertices" }, "BA.435",
+            &expected, true);
+    }
+    if (controlVertices.IsUnregistered()) {
+        _Fail("BA.471", base + "controlVertices has an unregistered USD type; "
+                               "expected point3d[].");
+        return;
+    }
+    if (!weights.IsSequence()) {
+        _Fail("BA.471", base + "weights is not a valid sequence; expected "
+                               "double[].");
+        return;
+    }
+    const std::string expectedRepr = _PyValue::NumRepr(expected, true);
+    if (!controlVertices.IsSequence()) {
+        _Fail("BA.435", TfStringPrintf(
+            "%scontrolVertices is not a valid sequence; expected size %s.",
+            base.c_str(), expectedRepr.c_str()));
+    } else if (expected != 0
+               && static_cast<double>(controlVertices.Len()) != expected) {
+        _Fail("BA.435", TfStringPrintf(
+            "Invalid size for %scontrolVertices. Expected %s, but got %zu.",
+            base.c_str(), expectedRepr.c_str(), controlVertices.Len()));
+    }
+    if (!weights.Truthy() || numBreps == 0 || !weights.IsNumbers()) {
+        return;
+    }
+    const std::vector<long long> &offsets = _Offsets().surfaceControlVertices;
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= offsets.size()) {
+            break;
+        }
+        const long long end
+            = std::min(offsets[b + 1], static_cast<long long>(weights.Len()));
+        for (long long w = offsets[b]; w < end; ++w) {
+            size_t i = 0;
+            if (_PyIndex(w, weights.Len(), &i)
+                && weights.Num(i) < _PyNumericalTolerance) {
+                _Fail("BA.440", TfStringPrintf(
+                    "Invalid weight at index #%lld in brep #%zu. Weights in "
+                    "%sweights must be positive.",
+                    w, b, base.c_str()));
+            }
+        }
+    }
+}
+
+// _validate_surface_orders_vertex_counts: BA.420 the four order / vertex-count
+// arrays hold one entry per BrepSurfaceNurbAPI face (checked when such faces
+// exist or uOrder is authored), then per Brep surface span BA.425 both orders
+// positive (a surface failing it skips BA.430) and BA.430 neither exceeding
+// its vertex count.
+void
+_BrepChecker::ValidateSurfaceOrdersVertexCounts()
+{
+    const std::string base = "brep:surface:nurb:";
+    const _PyValue types = _Get("face:surfaceType").OrEmpty();
+    double nurbsFaces = 0;
+    for (size_t i = 0; i < types.Len(); ++i) {
+        nurbsFaces += types.Equals(i, "BrepSurfaceNurbAPI") ? 1 : 0;
+    }
+    if (nurbsFaces > 0 || _Get(base + "uOrder").OrEmpty().Len() > 0) {
+        _ValidateArraySizesAndAuthored(
+            { base + "uVertexCount", base + "vVertexCount", base + "uOrder",
+              base + "vOrder" },
+            "BA.420", &nurbsFaces, true);
+    }
+    const std::vector<long long> &offsets = _Offsets().surfaceNurbs;
+    const _PyValue uOrder = _Get(base + "uOrder").OrEmpty();
+    const _PyValue vOrder = _Get(base + "vOrder").OrEmpty();
+    const _PyValue uCount = _Get(base + "uVertexCount").OrEmpty();
+    const _PyValue vCount = _Get(base + "vVertexCount").OrEmpty();
+    if (!uOrder.IsNumbers() || !vOrder.IsNumbers() || !uCount.IsNumbers()
+        || !vCount.IsNumbers()) {
+        return;
+    }
+    for (size_t b = 0; b + 1 < offsets.size(); ++b) {
+        long long local = 0;
+        for (long long s = offsets[b]; s < offsets[b + 1]; ++s, ++local) {
+            if (s < 0 || s >= static_cast<long long>(uOrder.Len())
+                || s >= static_cast<long long>(vOrder.Len())
+                || s >= static_cast<long long>(uCount.Len())
+                || s >= static_cast<long long>(vCount.Len())) {
+                continue;
+            }
+            const size_t i = static_cast<size_t>(s);
+            if (uOrder.Num(i) <= 0 || vOrder.Num(i) <= 0) {
+                _Fail("BA.425", TfStringPrintf(
+                    "Invalid order (U: %s, V: %s) for surface #%lld in brep "
+                    "#%zu. Orders must be positive.",
+                    uOrder.Repr(i).c_str(), vOrder.Repr(i).c_str(), local, b));
+                continue;
+            }
+            if (uOrder.Num(i) > uCount.Num(i) || vOrder.Num(i) > vCount.Num(i)) {
+                _Fail("BA.430", TfStringPrintf(
+                    "Invalid order (U: %s, V: %s) for surface #%lld in brep "
+                    "#%zu. Orders must not exceed vertex counts (U: %s, V: "
+                    "%s).",
+                    uOrder.Repr(i).c_str(), vOrder.Repr(i).c_str(), local, b,
+                    uCount.Repr(i).c_str(), vCount.Repr(i).c_str()));
+            }
+        }
+    }
+}
+
+// _validate_surface_knots: per Brep surface span, each surface's slices of
+// uKnots and vKnots hold vertexCount + order knots (BA.445 / BA.450) and do
+// not decrease (BA.455 / BA.460).
+void
+_BrepChecker::ValidateSurfaceKnots()
+{
+    const std::string base = "brep:surface:nurb:";
+    const _PyValue uKnots = _Get(base + "uKnots").OrEmpty();
+    const _PyValue vKnots = _Get(base + "vKnots").OrEmpty();
+    const _PyValue uCount = _Get(base + "uVertexCount").OrEmpty();
+    const _PyValue vCount = _Get(base + "vVertexCount").OrEmpty();
+    const _PyValue uOrder = _Get(base + "uOrder").OrEmpty();
+    const _PyValue vOrder = _Get(base + "vOrder").OrEmpty();
+    const std::vector<long long> &offsets = _Offsets().surfaceNurbs;
+    if (!uCount.IsNumbers() || !vCount.IsNumbers() || !uOrder.IsNumbers()
+        || !vOrder.IsNumbers()) {
+        return;
+    }
+    const bool uNumeric = uKnots.IsNumbers();
+    const bool vNumeric = vKnots.IsNumbers();
+    long long uOffset = 0, vOffset = 0;
+    for (size_t b = 0; b + 1 < offsets.size(); ++b) {
+        long long local = 0;
+        for (long long s = offsets[b]; s < offsets[b + 1]; ++s, ++local) {
+            if (s < 0 || s >= static_cast<long long>(uCount.Len())
+                || s >= static_cast<long long>(vCount.Len())
+                || s >= static_cast<long long>(uOrder.Len())
+                || s >= static_cast<long long>(vOrder.Len())) {
+                continue;
+            }
+            const size_t i = static_cast<size_t>(s);
+            const long long expectedU
+                = static_cast<long long>(uCount.Num(i) + uOrder.Num(i));
+            const long long expectedV
+                = static_cast<long long>(vCount.Num(i) + vOrder.Num(i));
+            const auto uSlice = _PySlice(uOffset, uOffset + expectedU,
+                                         uNumeric ? uKnots.Len() : 0);
+            const auto vSlice = _PySlice(vOffset, vOffset + expectedV,
+                                         vNumeric ? vKnots.Len() : 0);
+            const long long gotU
+                = static_cast<long long>(uSlice.second - uSlice.first);
+            const long long gotV
+                = static_cast<long long>(vSlice.second - vSlice.first);
+            if (gotU != expectedU) {
+                _Fail("BA.445", TfStringPrintf(
+                    "Invalid knot count for surface #%lld in brep #%zu in U "
+                    "direction. Expected %lld knots in brep:surface:nurbs:uKnots "
+                    "for this slice, but got %lld.",
+                    local, b, expectedU, gotU));
+            }
+            if (gotV != expectedV) {
+                _Fail("BA.450", TfStringPrintf(
+                    "Invalid knot count for surface #%lld in brep #%zu in V "
+                    "direction. Expected %lld knots in brep:surface:nurbs:vKnots "
+                    "for this slice, but got %lld.",
+                    local, b, expectedV, gotV));
+            }
+            if (uNumeric
+                && _PyKnotsDecrease(uKnots, uSlice.first, uSlice.second)) {
+                _Fail("BA.455", TfStringPrintf(
+                    "Invalid knot ordering detected in U knot vector for "
+                    "surface #%lld in brep #%zu. Values must be "
+                    "non-decreasing.",
+                    local, b));
+            }
+            if (vNumeric
+                && _PyKnotsDecrease(vKnots, vSlice.first, vSlice.second)) {
+                _Fail("BA.460", TfStringPrintf(
+                    "Invalid knot ordering detected in V knot vector for "
+                    "surface #%lld in brep #%zu. Values must be "
+                    "non-decreasing.",
+                    local, b));
+            }
+            uOffset += expectedU;
+            vOffset += expectedV;
+        }
+    }
+}
+
+// _validate_required_geometry_apis (BA.583): a curve or surface type used in
+// edge:curveType, wireEdge:curveType or face:surfaceType, a BrepPointAPI
+// vertex or point shell, and any authored UV pcurve data each require the
+// matching applied API schema.
+void
+_BrepChecker::_ValidateRequiredGeometryApis()
+{
+    const TfTokenVector applied = _prim.GetAppliedSchemas();
+    const auto isApplied = [&](const std::string &api) {
+        return std::find(applied.begin(), applied.end(), TfToken(api))
+            != applied.end();
+    };
+    struct Use
+    {
+        std::string api, attr, token;
+        size_t count;
+    };
+    std::vector<Use> uses;
+    static const char *const requirements[][3] = {
+        { "vertex:pointType", "BrepPointAPI", "BrepPointAPI:vertexPoint" },
+        { "edge:curveType", "BrepCurve3dNurbAPI",
+          "BrepCurve3dNurbAPI:edge3dNurb" },
+        { "edge:curveType", "BrepCurve3dLineAPI",
+          "BrepCurve3dLineAPI:edge3dLine" },
+        { "edge:curveType", "BrepCurve3dCircleAPI",
+          "BrepCurve3dCircleAPI:edge3dCircle" },
+        { "edge:curveType", "BrepCurve3dEllipseAPI",
+          "BrepCurve3dEllipseAPI:edge3dEllipse" },
+        { "wireEdge:curveType", "BrepCurve3dNurbAPI",
+          "BrepCurve3dNurbAPI:wireEdge3dNurb" },
+        { "wireEdge:curveType", "BrepCurve3dLineAPI",
+          "BrepCurve3dLineAPI:wireEdge3dLine" },
+        { "wireEdge:curveType", "BrepCurve3dCircleAPI",
+          "BrepCurve3dCircleAPI:wireEdge3dCircle" },
+        { "wireEdge:curveType", "BrepCurve3dEllipseAPI",
+          "BrepCurve3dEllipseAPI:wireEdge3dEllipse" },
+        { "face:surfaceType", "BrepSurfaceNurbAPI", "BrepSurfaceNurbAPI" },
+        { "face:surfaceType", "BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI" },
+        { "face:surfaceType", "BrepSurfaceCylinderAPI",
+          "BrepSurfaceCylinderAPI" },
+        { "face:surfaceType", "BrepSurfaceConeAPI", "BrepSurfaceConeAPI" },
+        { "face:surfaceType", "BrepSurfaceSphereAPI", "BrepSurfaceSphereAPI" },
+        { "face:surfaceType", "BrepSurfaceTorusAPI", "BrepSurfaceTorusAPI" },
+    };
+    for (const auto &r : requirements) {
+        const _PyValue values = _SafeGet(r[0]);
+        size_t count = 0;
+        for (size_t i = 0; i < values.Len(); ++i) {
+            count += values.Equals(i, r[1]) ? 1 : 0;
+        }
+        if (count > 0) {
+            uses.push_back({ r[2], r[0], r[1], count });
+        }
+    }
+    const _PyValue pointTypes = _SafeGet("shell:pointType");
+    const _PyValue faceuseCounts = _SafeGet("shell:faceuseCount");
+    const _PyValue wireEdgeCounts = _SafeGet("shell:wireEdgeCount");
+    size_t pointShells = 0;
+    for (size_t i = 0; i < pointTypes.Len(); ++i) {
+        long long fu = 0, we = 0;
+        if (pointTypes.Equals(i, "BrepPointAPI") && i < faceuseCounts.Len()
+            && i < wireEdgeCounts.Len() && faceuseCounts.ToInt(i, &fu)
+            && wireEdgeCounts.ToInt(i, &we) && fu == 0 && we == 0) {
+            ++pointShells;
+        }
+    }
+    if (pointShells > 0) {
+        uses.push_back({ "BrepPointAPI:shellPoint", "shell:pointType",
+                         "BrepPointAPI", pointShells });
+    }
+    for (const Use &use : uses) {
+        if (!isApplied(use.api)) {
+            _Fail("BA.583", TfStringPrintf(
+                "%s contains %zu '%s' occurrence(s), but required applied "
+                "geometry API '%s' is absent from apiSchemas.",
+                use.attr.c_str(), use.count, use.token.c_str(),
+                use.api.c_str()));
+        }
+    }
+
+    const auto anyNonZero = [](const _PyValue &values) {
+        for (size_t i = 0; i < values.Len(); ++i) {
+            if (!values.IsNumbers() || values.Num(i) != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const bool hasRecord = anyNonZero(_SafeGet("brep:curveUv:nurb:order"))
+        || anyNonZero(_SafeGet("brep:curveUv:nurb:vertexCount"));
+    const bool hasPacked
+        = _SafeGet("brep:curveUv:nurb:controlVertices").Len() > 0
+        || _SafeGet("brep:curveUv:nurb:knots").Len() > 0
+        || _SafeGet("brep:curveUv:nurb:weights").Len() > 0;
+    if ((hasRecord || hasPacked) && !isApplied("BrepCurveUvNurbAPI")) {
+        _Fail("BA.583", "Authored UV NURBS pcurve data requires applied "
+                        "geometry API 'BrepCurveUvNurbAPI', but it is absent "
+                        "from apiSchemas.");
+    }
+}
+
+// _validate_schema_consistency: BA.583 (above), then for each NURBS and
+// analytic family that the topology uses or the prim applies, both
+// directions of "used means data is authored" and "applied means used"
+// (BA.370 edge3d NURBS, BA.290 wireEdge3d NURBS, BA.415 UV pcurves, BA.470
+// surface NURBS, BA.485 / 495 / 505 / 516 / 526 the analytic surfaces, BA.305
+// vertex points). Presence of data is tested on one attribute per family.
+void
+_BrepChecker::ValidateSchemaConsistency()
+{
+    _ValidateRequiredGeometryApis();
+    const TfTokenVector applied = _prim.GetAppliedSchemas();
+    const auto isApplied = [&](const char *api) {
+        return std::find(applied.begin(), applied.end(), TfToken(api))
+            != applied.end();
+    };
+    const auto countToken = [&](const char *attr, const char *token) {
+        const _PyValue values = _Get(attr).OrEmpty();
+        size_t count = 0;
+        for (size_t i = 0; i < values.Len(); ++i) {
+            count += values.Equals(i, token) ? 1 : 0;
+        }
+        return count;
+    };
+    const auto hasData = [&](const char *attr) {
+        return _Get(attr).OrEmpty().Truthy();
+    };
+
+    struct Family
+    {
+        const char *rule, *api, *typeAttr, *typeToken, *dataAttr;
+        const char *usedDesc;   // "edges with edge:curveType='...'"
+        const char *dataDesc;   // "brep:edge3dNurb:curve3d:nurb NURBS data"
+        const char *notUsedDesc;
+    };
+    static const Family families[] = {
+        { "BA.370", "BrepCurve3dNurbAPI:edge3dNurb", "edge:curveType",
+          "BrepCurve3dNurbAPI", "brep:edge3dNurb:curve3d:nurb:order",
+          "edges with edge:curveType='BrepCurve3dNurbAPI'",
+          "brep:edge3dNurb:curve3d:nurb NURBS data",
+          "no edges use edge:curveType='BrepCurve3dNurbAPI'" },
+        { "BA.290", "BrepCurve3dNurbAPI:wireEdge3dNurb", "wireEdge:curveType",
+          "BrepCurve3dNurbAPI", "brep:wireEdge3dNurb:curve3d:nurb:order",
+          "wireEdges with wireEdge:curveType='BrepCurve3dNurbAPI'",
+          "brep:wireEdge3dNurb:curve3d:nurb NURBS data",
+          "no wireEdges use wireEdge:curveType='BrepCurve3dNurbAPI'" },
+    };
+    for (const Family &f : families) {
+        const size_t used = countToken(f.typeAttr, f.typeToken);
+        if (used > 0 && !hasData(f.dataAttr)) {
+            _Fail(f.rule, UsdSolidValidationErrorNameTokens
+                              ->nurbSchemaDataIncomplete,
+                  TfStringPrintf("Found %zu %s but no %s is authored.", used,
+                                 f.usedDesc, f.dataDesc));
+        }
+        if (isApplied(f.api) && used == 0) {
+            _Fail(f.rule, TfStringPrintf("%s appears in apiSchemas but %s.",
+                                         f.api, f.notUsedDesc));
+        }
+    }
+
+    // BA.415: UV pcurves, used by edgeuses rather than by a type token.
+    {
+        const bool appliedUv = isApplied("BrepCurveUvNurbAPI");
+        const size_t edgeuses = _Get("edgeuse:edgeIndex").OrEmpty().Len();
+        if (edgeuses > 0 && appliedUv
+            && !hasData("brep:curveUv:nurb:order")) {
+            _Fail("BA.415", UsdSolidValidationErrorNameTokens
+                                ->nurbSchemaDataIncomplete,
+                  TfStringPrintf("Found %zu edgeuses but BrepCurveUvNurbAPI is "
+                                 "in apiSchemas and no brep:curveUv:nurb NURBS "
+                                 "data is authored.",
+                                 edgeuses));
+        }
+        if (appliedUv && edgeuses == 0) {
+            _Fail("BA.415", "BrepCurveUvNurbAPI appears in apiSchemas but no "
+                            "edgeuses exist.");
+        }
+    }
+
+    static const Family surfaces[] = {
+        { "BA.470", "BrepSurfaceNurbAPI", "face:surfaceType",
+          "BrepSurfaceNurbAPI", "brep:surface:nurb:uOrder",
+          "faces with face:surfaceType='BrepSurfaceNurbAPI'",
+          "brep:surface:nurb NURBS data",
+          "no faces use face:surfaceType='BrepSurfaceNurbAPI'" },
+        { "BA.485", "BrepSurfaceSphereAPI", "face:surfaceType",
+          "BrepSurfaceSphereAPI", "brep:surface:sphere:center",
+          "faces with face:surfaceType='BrepSurfaceSphereAPI'",
+          "brep:surface:sphere data",
+          "no faces use face:surfaceType='BrepSurfaceSphereAPI'" },
+        { "BA.495", "BrepSurfacePlaneAPI", "face:surfaceType",
+          "BrepSurfacePlaneAPI", "brep:surface:plane:origin",
+          "faces with face:surfaceType='BrepSurfacePlaneAPI'",
+          "brep:surface:plane data",
+          "no faces use face:surfaceType='BrepSurfacePlaneAPI'" },
+        { "BA.505", "BrepSurfaceCylinderAPI", "face:surfaceType",
+          "BrepSurfaceCylinderAPI", "brep:surface:cylinder:origin",
+          "faces with face:surfaceType='BrepSurfaceCylinderAPI'",
+          "brep:surface:cylinder data",
+          "no faces use face:surfaceType='BrepSurfaceCylinderAPI'" },
+        { "BA.516", "BrepSurfaceConeAPI", "face:surfaceType",
+          "BrepSurfaceConeAPI", "brep:surface:cone:origin",
+          "faces with face:surfaceType='BrepSurfaceConeAPI'",
+          "brep:surface:cone data",
+          "no faces use face:surfaceType='BrepSurfaceConeAPI'" },
+        { "BA.526", "BrepSurfaceTorusAPI", "face:surfaceType",
+          "BrepSurfaceTorusAPI", "brep:surface:torus:origin",
+          "faces with face:surfaceType='BrepSurfaceTorusAPI'",
+          "brep:surface:torus data",
+          "no faces use face:surfaceType='BrepSurfaceTorusAPI'" },
+        { "BA.305", "BrepPointAPI:vertexPoint", "vertex:pointType",
+          "BrepPointAPI", "brep:vertexPoint:point:position",
+          "vertices with vertex:pointType='BrepPointAPI'",
+          "brep:vertexPoint:point:position data",
+          "no vertices use vertex:pointType='BrepPointAPI'" },
+    };
+    for (const Family &f : surfaces) {
+        const size_t used = countToken(f.typeAttr, f.typeToken);
+        if (used > 0 && !hasData(f.dataAttr)) {
+            _Fail(f.rule,
+                  std::string(f.rule) == "BA.470"
+                      ? UsdSolidValidationErrorNameTokens
+                            ->nurbSchemaDataIncomplete
+                      : _RuleErrorName(f.rule),
+                  TfStringPrintf("Found %zu %s but no %s is authored.", used,
+                                 f.usedDesc, f.dataDesc));
+        }
+        if (isApplied(f.api) && used == 0) {
+            _Fail(f.rule, TfStringPrintf("%s appears in apiSchemas but %s.",
+                                         f.api, f.notUsedDesc));
+        }
+    }
+}
+
+// _validate_nurbs_data_completeness (BA.370): a Brep whose edge partition
+// holds a BrepCurve3dNurbAPI edge needs all five edge3dNurb arrays non-empty.
+void
+_BrepChecker::ValidateNurbsDataCompleteness()
+{
+    const _PyValue types = _Get("edge:curveType").OrEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (!types.Truthy() || numBreps == 0) {
+        return;
+    }
+    const std::string base = "brep:edge3dNurb:curve3d:nurb:";
+    static const char *const parts[5]
+        = { "order", "vertexCount", "controlVertices", "weights", "knots" };
+    std::vector<std::string> missing;
+    for (const char *part : parts) {
+        if (!_Get(base + part).OrEmpty().Truthy()) {
+            missing.push_back(part);
+        }
+    }
+    const std::vector<long long> &edges = _Offsets().edges;
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= edges.size()) {
+            break;
+        }
+        size_t nurbs = 0;
+        const long long end
+            = std::min(edges[b + 1], static_cast<long long>(types.Len()));
+        for (long long e = edges[b]; e < end; ++e) {
+            size_t i = 0;
+            if (_PyIndex(e, types.Len(), &i)
+                && types.Equals(i, "BrepCurve3dNurbAPI")) {
+                ++nurbs;
+            }
+        }
+        if (nurbs > 0 && !missing.empty()) {
+            _Fail("BA.370", UsdSolidValidationErrorNameTokens
+                                ->nurbSchemaDataIncomplete,
+                  TfStringPrintf("NURBS curve data is incomplete for brep #%zu. "
+                                 "Missing arrays: %s. Required for %zu edges "
+                                 "with BrepCurve3dNurbAPI.",
+                                 b, _PyNameList(missing).c_str(), nurbs));
+        }
+    }
+}
+
+// _validate_nurbs_mathematical_consistency: a second pass over the edge3d and
+// surface records per Brep span -- BA.340 edge order <= vertexCount, BA.355
+// the packed knots still hold each curve's vertexCount + order, BA.430 each
+// surface order <= its vertex count (U and V reported separately). Python
+// reports these alongside the per-rule checks, so a file can carry both.
+void
+_BrepChecker::ValidateNurbsMathematicalConsistency()
+{
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (numBreps == 0) {
+        return;
+    }
+    const _PyOffsets &o = _Offsets();
+    const std::string e = "brep:edge3dNurb:curve3d:nurb:";
+    const _PyValue orders = _Get(e + "order").OrEmpty();
+    const _PyValue vertexCounts = _Get(e + "vertexCount").OrEmpty();
+    const _PyValue knots = _Get(e + "knots").OrEmpty();
+    const bool edgeNumeric = orders.IsNumbers() && vertexCounts.IsNumbers();
+
+    const auto forEachCurve = [&](const auto &fn) {
+        for (size_t b = 0; b < numBreps; ++b) {
+            if (b + 1 >= o.edge3dNurbsCurves.size()) {
+                break;
+            }
+            const long long end = std::min(
+                { o.edge3dNurbsCurves[b + 1],
+                  static_cast<long long>(orders.Len()),
+                  static_cast<long long>(vertexCounts.Len()) });
+            for (long long c = o.edge3dNurbsCurves[b]; c < end; ++c) {
+                size_t i = 0, j = 0;
+                if (_PyIndex(c, orders.Len(), &i)
+                    && _PyIndex(c, vertexCounts.Len(), &j)) {
+                    fn(b, c, i, j);
+                }
+            }
+        }
+    };
+    if (orders.Truthy() && vertexCounts.Truthy() && edgeNumeric) {
+        forEachCurve([&](size_t b, long long c, size_t i, size_t j) {
+            if (orders.Num(i) > vertexCounts.Num(j)) {
+                _Fail("BA.340", TfStringPrintf(
+                    "Edge NURBS curve #%lld in brep #%zu: order (%s) must be "
+                    "<= vertexCount (%s).",
+                    c, b, orders.Repr(i).c_str(),
+                    vertexCounts.Repr(j).c_str()));
+            }
+        });
+    }
+    if (orders.Truthy() && vertexCounts.Truthy() && knots.Truthy()
+        && edgeNumeric) {
+        long long offset = 0;
+        const long long numKnots = static_cast<long long>(knots.Len());
+        forEachCurve([&](size_t b, long long c, size_t i, size_t j) {
+            const long long expected = static_cast<long long>(
+                orders.Num(i) + vertexCounts.Num(j));
+            if (offset + expected > numKnots) {
+                _Fail("BA.355", TfStringPrintf(
+                    "Edge NURBS curve #%lld in brep #%zu: insufficient knots. "
+                    "Expected %lld, but only %lld remaining.",
+                    c, b, expected, numKnots - offset));
+            }
+            offset += expected;
+        });
+    }
+
+    const std::string s = "brep:surface:nurb:";
+    const _PyValue uOrder = _Get(s + "uOrder").OrEmpty();
+    const _PyValue vOrder = _Get(s + "vOrder").OrEmpty();
+    const _PyValue uCount = _Get(s + "uVertexCount").OrEmpty();
+    const _PyValue vCount = _Get(s + "vVertexCount").OrEmpty();
+    if (!uOrder.Truthy() || !uCount.Truthy() || !vOrder.Truthy()
+        || !vCount.Truthy() || !uOrder.IsNumbers() || !vOrder.IsNumbers()
+        || !uCount.IsNumbers() || !vCount.IsNumbers()) {
+        return;
+    }
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= o.surfaceNurbs.size()) {
+            break;
+        }
+        const long long end = std::min(
+            { o.surfaceNurbs[b + 1], static_cast<long long>(uOrder.Len()),
+              static_cast<long long>(vOrder.Len()),
+              static_cast<long long>(uCount.Len()),
+              static_cast<long long>(vCount.Len()) });
+        for (long long f = o.surfaceNurbs[b]; f < end; ++f) {
+            if (f < 0) {
+                continue;
+            }
+            const size_t i = static_cast<size_t>(f);
+            if (uOrder.Num(i) > uCount.Num(i)) {
+                _Fail("BA.430", TfStringPrintf(
+                    "Surface NURBS #%lld in brep #%zu: uOrder (%s) must be <= "
+                    "uVertexCount (%s).",
+                    f, b, uOrder.Repr(i).c_str(), uCount.Repr(i).c_str()));
+            }
+            if (vOrder.Num(i) > vCount.Num(i)) {
+                _Fail("BA.430", TfStringPrintf(
+                    "Surface NURBS #%lld in brep #%zu: vOrder (%s) must be <= "
+                    "vVertexCount (%s).",
+                    f, b, vOrder.Repr(i).c_str(), vCount.Repr(i).c_str()));
+            }
+        }
+    }
+}
+
+// _validate_nurbs_order_and_vertex_count_values: for each authored order
+// array (edge3d, surface U, surface V, curveUv, wireEdge3d), BA.590 the first
+// order below 2 and BA.591 the first vertexCount below its order. The curveUv
+// 0/0 record ("no pcurve") is exempt from both.
+void
+_BrepChecker::ValidateNurbsOrderAndVertexCountValues()
+{
+    struct Pair
+    {
+        const char *order, *count, *label;
+        bool zeroSentinel;
+    };
+    static const Pair pairs[] = {
+        { "brep:edge3dNurb:curve3d:nurb:order",
+          "brep:edge3dNurb:curve3d:nurb:vertexCount", "edge3dNurb", false },
+        { "brep:surface:nurb:uOrder", "brep:surface:nurb:uVertexCount",
+          "surface U", false },
+        { "brep:surface:nurb:vOrder", "brep:surface:nurb:vVertexCount",
+          "surface V", false },
+        { "brep:curveUv:nurb:order", "brep:curveUv:nurb:vertexCount",
+          "curveUv", true },
+    };
+    for (const Pair &p : pairs) {
+        if (!_IsAuthored(p.order)) {
+            continue;
+        }
+        const _PyValue orders = _Get(p.order);
+        const _PyValue counts
+            = _IsAuthored(p.count) ? _Get(p.count) : _PyValue();
+        if (!orders.Truthy() || !orders.IsNumbers()) {
+            continue;
+        }
+        const bool countsUsable = counts.Truthy() && counts.IsNumbers();
+        for (size_t i = 0; i < orders.Len(); ++i) {
+            if (p.zeroSentinel && orders.Num(i) == 0 && countsUsable
+                && i < counts.Len() && counts.Num(i) == 0) {
+                continue;
+            }
+            if (orders.Num(i) < 2) {
+                _Fail("BA.590", TfStringPrintf(
+                    "%s[%zu] = %s is less than 2 (minimum for %s).", p.order, i,
+                    orders.Repr(i).c_str(), p.label));
+                break;
+            }
+        }
+        if (countsUsable && counts.Len() == orders.Len()) {
+            for (size_t i = 0; i < orders.Len(); ++i) {
+                if (p.zeroSentinel && orders.Num(i) == 0
+                    && counts.Num(i) == 0) {
+                    continue;
+                }
+                if (counts.Num(i) < orders.Num(i)) {
+                    _Fail("BA.591", TfStringPrintf(
+                        "%s[%zu] = %s is less than %s[%zu] = %s for %s.",
+                        p.count, i, counts.Repr(i).c_str(), p.order, i,
+                        orders.Repr(i).c_str(), p.label));
+                    break;
+                }
+            }
+        }
+    }
+
+    const char *weOrderName = "brep:wireEdge3dNurb:curve3d:nurb:order";
+    const char *weCountName = "brep:wireEdge3dNurb:curve3d:nurb:vertexCount";
+    if (!_IsAuthored(weOrderName)) {
+        return;
+    }
+    const _PyValue orders = _Get(weOrderName);
+    const _PyValue counts
+        = _IsAuthored(weCountName) ? _Get(weCountName) : _PyValue();
+    if (!orders.Truthy() || !orders.IsNumbers()) {
+        return;
+    }
+    for (size_t i = 0; i < orders.Len(); ++i) {
+        if (orders.Num(i) < 2) {
+            _Fail("BA.590", TfStringPrintf("%s[%zu] = %s is less than 2 "
+                                           "(minimum for wireEdge3dNurb).",
+                                           weOrderName, i,
+                                           orders.Repr(i).c_str()));
+            break;
+        }
+    }
+    if (counts.Truthy() && counts.IsNumbers()
+        && counts.Len() == orders.Len()) {
+        for (size_t i = 0; i < orders.Len(); ++i) {
+            if (counts.Num(i) < orders.Num(i)) {
+                _Fail("BA.591", TfStringPrintf(
+                    "%s[%zu] = %s is less than order[%zu] = %s for "
+                    "wireEdge3dNurb.",
+                    weCountName, i, counts.Repr(i).c_str(), i,
+                    orders.Repr(i).c_str()));
+                break;
+            }
+        }
+    }
+}
+
+// _validate_wireEdge3d_nurbs (BA.650-BA.658), for a BrepArray whose
+// wireEdge:curveType names a NURBS curve: the five wireEdge3dNurb arrays are
+// all non-empty (BA.658, which ends the rule otherwise), order and vertexCount
+// hold one entry per NURBS wire edge (BA.650), every order is >= 2 (BA.651)
+// and <= its vertexCount (BA.652), control vertices and weights hold
+// sum(vertexCount) entries (BA.653), the first non-positive weight (BA.654),
+// the knots hold sum(vertexCount + order) entries (BA.655), the first
+// decrease within each knot vector (BA.656), and the first control vertex
+// outside every Brep's extent (BA.657).
+void
+_BrepChecker::ValidateWireEdge3dNurbs()
+{
+    const _PyValue types = _SafeGet("wireEdge:curveType");
+    size_t nurbs = 0;
+    for (size_t i = 0; i < types.Len(); ++i) {
+        nurbs += types.Equals(i, "BrepCurve3dNurbAPI") ? 1 : 0;
+    }
+    if (nurbs == 0) {
+        return;
+    }
+    const std::string base = "brep:wireEdge3dNurb:curve3d:nurb:";
+    const _PyValue order = _SafeGet(base + "order");
+    const _PyValue count = _SafeGet(base + "vertexCount");
+    const _PyValue cvs = _SafeGet(base + "controlVertices");
+    const _PyValue weights = _SafeGet(base + "weights");
+    const _PyValue knots = _SafeGet(base + "knots");
+
+    const std::pair<const char *, bool> present[5]
+        = { { "order", order.Len() > 0 },
+            { "vertexCount", count.Len() > 0 },
+            { "controlVertices", cvs.Len() > 0 },
+            { "weights", weights.Len() > 0 },
+            { "knots", knots.Len() > 0 } };
+    std::vector<std::string> have, missing;
+    for (const auto &p : present) {
+        (p.second ? have : missing).push_back(p.first);
+    }
+    if (!missing.empty()) {
+        _Fail("BA.658", TfStringPrintf("WireEdge NURBS data is incomplete. "
+                                       "Present: %s. Missing: %s.",
+                                       _PyNameList(have).c_str(),
+                                       _PyNameList(missing).c_str()));
+        return;
+    }
+    if (order.Len() != nurbs) {
+        _Fail("BA.650", TfStringPrintf("wireEdge NURBS order size (%zu) != "
+                                       "BrepCurve3dNurbAPI count (%zu).",
+                                       order.Len(), nurbs));
+    }
+    if (count.Len() != nurbs) {
+        _Fail("BA.650", TfStringPrintf("wireEdge NURBS vertexCount size (%zu) "
+                                       "!= BrepCurve3dNurbAPI count (%zu).",
+                                       count.Len(), nurbs));
+    }
+    const size_t minLen = std::min(order.Len(), count.Len());
+    long long expectedCvs = 0, expectedKnots = 0;
+    std::vector<long long> orders(minLen), counts(minLen);
+    for (size_t i = 0; i < minLen; ++i) {
+        order.ToInt(i, &orders[i]);
+        count.ToInt(i, &counts[i]);
+        if (orders[i] < 2) {
+            _Fail("BA.651", TfStringPrintf("wireEdge NURBS order[%zu] = %lld is "
+                                           "less than 2.",
+                                           i, orders[i]));
+        }
+        if (orders[i] > counts[i]) {
+            _Fail("BA.652", TfStringPrintf("wireEdge NURBS order[%zu] (%lld) "
+                                           "exceeds vertexCount[%zu] (%lld).",
+                                           i, orders[i], i, counts[i]));
+        }
+        expectedCvs += counts[i];
+        expectedKnots += counts[i] + orders[i];
+    }
+    if (static_cast<long long>(cvs.Len()) != expectedCvs) {
+        _Fail("BA.653", TfStringPrintf("wireEdge NURBS controlVertices size "
+                                       "(%zu) != sum of vertexCounts (%lld).",
+                                       cvs.Len(), expectedCvs));
+    }
+    if (static_cast<long long>(weights.Len()) != expectedCvs) {
+        _Fail("BA.653", TfStringPrintf("wireEdge NURBS weights size (%zu) != "
+                                       "sum of vertexCounts (%lld).",
+                                       weights.Len(), expectedCvs));
+    }
+    for (size_t i = 0; i < weights.Len(); ++i) {
+        double w = 0.0;
+        if (weights.ToFloat(i, &w) && w <= 0.0) {
+            _Fail("BA.654", TfStringPrintf("wireEdge NURBS weights[%zu] = %s "
+                                           "is not positive.",
+                                           i, weights.Repr(i).c_str()));
+            break;
+        }
+    }
+    if (static_cast<long long>(knots.Len()) != expectedKnots) {
+        _Fail("BA.655", TfStringPrintf("wireEdge NURBS knots size (%zu) != "
+                                       "expected (%lld).",
+                                       knots.Len(), expectedKnots));
+    }
+    long long knotOffset = 0;
+    for (size_t i = 0; i < minLen; ++i) {
+        const long long knotLen = counts[i] + orders[i];
+        if (knotOffset + knotLen > static_cast<long long>(knots.Len())) {
+            break;
+        }
+        for (long long j = 1; j < knotLen; ++j) {
+            double a = 0.0, b = 0.0;
+            knots.ToFloat(static_cast<size_t>(knotOffset + j), &b);
+            knots.ToFloat(static_cast<size_t>(knotOffset + j - 1), &a);
+            if (b < a) {
+                _Fail("BA.656", TfStringPrintf("wireEdge NURBS knot vector #%zu "
+                                               "is not non-decreasing at "
+                                               "position %lld.",
+                                               i, j));
+                break;
+            }
+        }
+        knotOffset += knotLen;
+    }
+
+    const _PyValue extent = _SafeGet("brep:extent");
+    if (extent.Len() < 2 || cvs.Len() == 0 || !extent.IsTuples()
+        || !cvs.IsTuples() || cvs.Dim() < 3) {
+        return;
+    }
+    const size_t numBoxes = extent.Len() / 2;
+    const size_t numRegionCounts = _SafeGet("brep:regionCount").Len();
+    const size_t numBreps = std::min(
+        numRegionCounts > 0 ? numRegionCounts : numBoxes, numBoxes);
+    for (size_t c = 0; c < cvs.Len(); ++c) {
+        bool inside = false;
+        for (size_t b = 0; b < numBreps && !inside; ++b) {
+            if (extent.Dim() < 3) {
+                continue;
+            }
+            bool outside = false;
+            for (int a = 0; a < 3; ++a) {
+                outside = outside
+                    || _PyIsFloatLessThan(cvs.Tup(c, a), extent.Tup(2 * b, a))
+                    || _PyIsFloatGreaterThan(cvs.Tup(c, a),
+                                             extent.Tup(2 * b + 1, a));
+            }
+            inside = !outside;
+        }
+        if (!inside) {
+            _Fail("BA.657", TfStringPrintf(
+                "wireEdge NURBS controlVertices[%zu] = [%s, %s, %s] is outside "
+                "all brep extents.",
+                c, _PyValue::NumRepr(cvs.Tup(c, 0), false).c_str(),
+                _PyValue::NumRepr(cvs.Tup(c, 1), false).c_str(),
+                _PyValue::NumRepr(cvs.Tup(c, 2), false).c_str()));
+            break;
+        }
+    }
+}
+
 // -------------------------------------------------------------------------- //
 // BrepArrayStructure                                                         //
 // -------------------------------------------------------------------------- //
@@ -3523,7 +4846,6 @@ _BrepArrayAnalyticSurfaces(const UsdPrim &usdPrim,
 // Shared support for the deferred-rule validators                            //
 // ========================================================================== //
 
-constexpr double _NurbsTol = 1e-11;   // BA.3xx/4xx weight/knot ordering tolerance
 constexpr double _DomainTol = 1e-6;   // BA.56x/57x span tolerance
 // std::numeric_limits<float>::epsilon() ~ 1.19e-7; a float32 value carries
 // up to ~0.5 ulp of quantization, i.e. ~0.6e-7 * magnitude. Extent-
@@ -3549,24 +4871,6 @@ VtArray<T>
 _ReadName(const UsdPrim &prim, const std::string &name)
 {
     return _Read<T>(prim.GetAttribute(TfToken(name)));
-}
-
-bool
-_IsAuthored(const UsdPrim &prim, const std::string &name)
-{
-    const UsdAttribute a = prim.GetAttribute(TfToken(name));
-    return a && a.HasAuthoredValue();
-}
-
-bool
-_HasAppliedSchema(const UsdPrim &prim, const TfToken &schemaToken)
-{
-    for (const TfToken &s : prim.GetAppliedSchemas()) {
-        if (s == schemaToken) {
-            return true;
-        }
-    }
-    return false;
 }
 
 size_t
@@ -3688,226 +4992,6 @@ _ComputeOffsets(const UsdSolidBrepArray &brep)
     }
     o.ok = true;
     return o;
-}
-
-// --- NURBS stratum helpers (shared by surface / edge3d / curveUv) --------- //
-
-void
-_CheckNurbOrderPositive(const UsdPrim &prim, const char *ba, const char *label,
-                        const VtArray<unsigned int> &order,
-                        const VtArray<unsigned int> &vtxCount,
-                        bool allowZeroSentinel,
-                        UsdValidationErrorVector *errors)
-{
-    for (size_t i = 0; i < order.size(); ++i) {
-        const unsigned int vc = i < vtxCount.size() ? vtxCount[i] : 0u;
-        if (allowZeroSentinel && order[i] == 0u && vc == 0u) {
-            continue;
-        }
-        if (order[i] == 0u) {
-            _Err(errors, UsdSolidValidationErrorNameTokens->nurbNonPositiveOrder,
-                 prim,
-                 TfStringPrintf("[%s] BrepArray <%s>: %s order[%zu] = 0 must be "
-                                "positive.",
-                                ba, prim.GetPath().GetText(), label, i));
-        }
-    }
-}
-
-void
-_CheckNurbOrderLEVtx(const UsdPrim &prim, const char *ba, const char *label,
-                     const VtArray<unsigned int> &order,
-                     const VtArray<unsigned int> &vtxCount,
-                     bool allowZeroSentinel, UsdValidationErrorVector *errors)
-{
-    (void)allowZeroSentinel; // sentinel subsumed by the order==0 skip below
-    const size_t m = std::min(order.size(), vtxCount.size());
-    for (size_t i = 0; i < m; ++i) {
-        // order == 0 cannot violate order > vertexCount; it (incl. the all-zero
-        // curveUv sentinel) is handled by the order-positivity check.
-        if (order[i] == 0u) {
-            continue;
-        }
-        if (order[i] > vtxCount[i]) {
-            _Err(errors,
-                 UsdSolidValidationErrorNameTokens->nurbOrderExceedsVertexCount,
-                 prim,
-                 TfStringPrintf("[%s] BrepArray <%s>: %s order[%zu] = %u exceeds "
-                                "vertexCount %u.",
-                                ba, prim.GetPath().GetText(), label, i, order[i],
-                                vtxCount[i]));
-        }
-    }
-}
-
-void
-_CheckNurbOrderMin2(const UsdPrim &prim, const char *label,
-                    const VtArray<unsigned int> &order,
-                    const VtArray<unsigned int> &vtxCount,
-                    bool allowZeroSentinel, UsdValidationErrorVector *errors)
-{
-    for (size_t i = 0; i < order.size(); ++i) {
-        const unsigned int vc = i < vtxCount.size() ? vtxCount[i] : 0u;
-        if (allowZeroSentinel && order[i] == 0u && vc == 0u) {
-            continue;
-        }
-        if (order[i] < 2u) {
-            _Err(errors, UsdSolidValidationErrorNameTokens->nurbOrderBelowMinimum,
-                 prim,
-                 TfStringPrintf("[BA.590] BrepArray <%s>: %s order[%zu] = %u must "
-                                "be >= 2 (degree >= 1).",
-                                prim.GetPath().GetText(), label, i, order[i]));
-            break;
-        }
-    }
-}
-
-void
-_CheckNurbVtxGEOrder(const UsdPrim &prim, const char *label,
-                     const VtArray<unsigned int> &order,
-                     const VtArray<unsigned int> &vtxCount,
-                     bool allowZeroSentinel, UsdValidationErrorVector *errors)
-{
-    if (order.size() != vtxCount.size()) {
-        return;
-    }
-    for (size_t i = 0; i < order.size(); ++i) {
-        if (allowZeroSentinel && order[i] == 0u && vtxCount[i] == 0u) {
-            continue;
-        }
-        if (vtxCount[i] < order[i]) {
-            _Err(errors,
-                 UsdSolidValidationErrorNameTokens->nurbVertexCountBelowOrder,
-                 prim,
-                 TfStringPrintf("[BA.591] BrepArray <%s>: %s vertexCount[%zu] = "
-                                "%u is less than order %u.",
-                                prim.GetPath().GetText(), label, i, vtxCount[i],
-                                order[i]));
-            break;
-        }
-    }
-}
-
-void
-_CheckNurbWeights(const UsdPrim &prim, const char *ba, const char *label,
-                  const VtArray<double> &weights,
-                  UsdValidationErrorVector *errors)
-{
-    for (size_t i = 0; i < weights.size(); ++i) {
-        if (weights[i] < _NurbsTol) {
-            _Err(errors, UsdSolidValidationErrorNameTokens->nurbNonPositiveWeight,
-                 prim,
-                 TfStringPrintf("[%s] BrepArray <%s>: %s weight[%zu] = %g must be "
-                                "positive.",
-                                ba, prim.GetPath().GetText(), label, i,
-                                weights[i]));
-        }
-    }
-}
-
-// Knot vector size + monotonicity for a single (order, vertexCount) direction.
-// Only validated when the knot array is authored (non-empty), matching the
-// reference which gates these checks on present knot data.
-void
-_CheckNurbKnots1D(const UsdPrim &prim, const char *baSize, const char *baMono,
-                  const char *label, const VtArray<unsigned int> &order,
-                  const VtArray<unsigned int> &vtxCount,
-                  const VtArray<double> &knots, UsdValidationErrorVector *errors)
-{
-    if (knots.empty()) {
-        return;
-    }
-    const size_t m = std::min(order.size(), vtxCount.size());
-    size_t expected = 0;
-    for (size_t i = 0; i < m; ++i) {
-        expected += static_cast<size_t>(order[i]) + vtxCount[i];
-    }
-    if (knots.size() != expected) {
-        _Err(errors, UsdSolidValidationErrorNameTokens->nurbKnotCountMismatch,
-             prim,
-             TfStringPrintf("[%s] BrepArray <%s>: %s knot vector size %zu but "
-                            "expected %zu (sum of order + vertexCount).",
-                            baSize, prim.GetPath().GetText(), label,
-                            knots.size(), expected));
-    }
-    size_t off = 0;
-    for (size_t i = 0; i < m; ++i) {
-        const size_t cnt = static_cast<size_t>(order[i]) + vtxCount[i];
-        if (off + cnt > knots.size()) {
-            break;
-        }
-        for (size_t k = 1; k < cnt; ++k) {
-            if (knots[off + k] < knots[off + k - 1] - _NurbsTol) {
-                _Err(errors,
-                     UsdSolidValidationErrorNameTokens->nurbKnotNotMonotonic,
-                     prim,
-                     TfStringPrintf("[%s] BrepArray <%s>: %s knot vector %zu is "
-                                    "not non-decreasing.",
-                                    baMono, prim.GetPath().GetText(), label, i));
-                break;
-            }
-        }
-        off += cnt;
-    }
-}
-
-// An authored attribute's *defined* type (UsdAttribute::GetTypeName) is the
-// schema type for builtin attributes, so it cannot reveal a wrong authored
-// type; and the held C++ value type cannot distinguish role-aliased types such
-// as point3d[] vs vector3d[] (both VtArray<GfVec3d>). Inspect the strongest
-// authored attribute spec's typeName, which preserves the authored role.
-bool
-_AuthoredTypeIn(const UsdPrim &prim, const char *attr,
-                const std::vector<SdfValueTypeName> &acceptable,
-                std::string *got)
-{
-    const UsdAttribute a = prim.GetAttribute(TfToken(attr));
-    if (!a || !a.HasAuthoredValue()) {
-        return false;
-    }
-    for (const SdfPropertySpecHandle &spec :
-         a.GetPropertyStack(UsdTimeCode::Default())) {
-        const SdfAttributeSpecHandle attrSpec
-            = TfDynamic_cast<SdfAttributeSpecHandle>(spec);
-        if (!attrSpec || !attrSpec->GetTypeName()) {
-            continue;
-        }
-        // Strongest authored typeName wins.
-        const SdfValueTypeName authored = attrSpec->GetTypeName();
-        for (const SdfValueTypeName &ok : acceptable) {
-            if (authored == ok) {
-                return false;
-            }
-        }
-        if (got) {
-            *got = authored.GetAsToken().GetString();
-        }
-        return true;
-    }
-    return false;
-}
-
-bool
-_AuthoredTypeMismatch(const UsdPrim &prim, const char *attr,
-                      const SdfValueTypeName &expected, std::string *got)
-{
-    return _AuthoredTypeIn(prim, attr, { expected }, got);
-}
-
-void
-_CheckNurbType(const UsdPrim &prim, const char *ba, const char *attr,
-               const SdfValueTypeName &expected,
-               UsdValidationErrorVector *errors)
-{
-    std::string got;
-    if (_AuthoredTypeMismatch(prim, attr, expected, &got)) {
-        _Err(errors, UsdSolidValidationErrorNameTokens->nurbInvalidDataType,
-             prim,
-             TfStringPrintf("[%s] BrepArray <%s>: attribute %s has type '%s' but "
-                            "expected '%s'.",
-                            ba, prim.GetPath().GetText(), attr, got.c_str(),
-                            expected.GetAsToken().GetText()));
-    }
 }
 
 // --- Analytic curve helpers (BA.53x/54x/55x) ------------------------------ //
@@ -4081,6 +5165,11 @@ _CheckEllipseInstance(const UsdPrim &prim, const char *inst, size_t count,
 // -------------------------------------------------------------------------- //
 // BrepArraySchemaUsage                                                       //
 // -------------------------------------------------------------------------- //
+// The applied geometry APIs agree with the topology: a used curve, surface or
+// point type requires its API (BA.583), and for the analytic surfaces and
+// vertex points, use requires data and an applied API requires use (BA.485,
+// 495, 505, 516, 526, 305). The NURBS families' equivalents (BA.290, 370, 415,
+// 470) report from BrepArrayNurbs.
 UsdValidationErrorVector
 _BrepArraySchemaUsage(const UsdPrim &usdPrim,
                       const UsdValidationTimeRange & /*timeRange*/)
@@ -4088,171 +5177,10 @@ _BrepArraySchemaUsage(const UsdPrim &usdPrim,
     if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
         return {};
     }
-    const UsdSolidBrepArray brep(usdPrim);
-    const VtArray<TfToken> faceSurfaceType
-        = _Read<TfToken>(brep.GetFaceSurfaceTypeAttr());
-    const VtArray<TfToken> vertexPointType
-        = _Read<TfToken>(brep.GetVertexPointTypeAttr());
-    const VtArray<TfToken> edgeCurveType
-        = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
-    const VtArray<TfToken> wireEdgeCurveType
-        = _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr());
-
-    enum class _Driver { Face, Vertex, Edge, WireEdge };
-    struct Item {
-        const char *schemaToken;  // GetAppliedSchemas() membership token
-        const char *driverValue;  // value to count in the driver token array
-        const char *presenceAttr; // attribute whose authorship proves data
-        const char *ba;
-        const char *label;
-        _Driver driver;
-    };
-    static const std::vector<Item> items = {
-        { "BrepPointAPI:vertexPoint", "BrepPointAPI",
-          "brep:vertexPoint:point:position", "BA.305", "vertexPoint",
-          _Driver::Vertex },
-        { "BrepSurfaceSphereAPI", "BrepSurfaceSphereAPI",
-          "brep:surface:sphere:center", "BA.485", "sphere", _Driver::Face },
-        { "BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI",
-          "brep:surface:plane:origin", "BA.495", "plane", _Driver::Face },
-        { "BrepSurfaceCylinderAPI", "BrepSurfaceCylinderAPI",
-          "brep:surface:cylinder:origin", "BA.505", "cylinder", _Driver::Face },
-        { "BrepSurfaceConeAPI", "BrepSurfaceConeAPI", "brep:surface:cone:origin",
-          "BA.516", "cone", _Driver::Face },
-        { "BrepSurfaceTorusAPI", "BrepSurfaceTorusAPI",
-          "brep:surface:torus:origin", "BA.526", "torus", _Driver::Face },
-        // The curve families. brep_validator.py counts these in
-        // edge:curveType and wireEdge:curveType; without them a prim that
-        // declares a NURBS wire edge and applies no
-        // BrepCurve3dNurbAPI:wireEdge3dNurb satisfied BA.583 vacuously.
-        { "BrepCurve3dNurbAPI:edge3dNurb", "BrepCurve3dNurbAPI",
-          "brep:edge3dNurb:curve3d:nurb:controlVertices", "BA.583",
-          "edge3dNurb", _Driver::Edge },
-        { "BrepCurve3dNurbAPI:wireEdge3dNurb", "BrepCurve3dNurbAPI",
-          "brep:wireEdge3dNurb:curve3d:nurb:controlVertices", "BA.583",
-          "wireEdge3dNurb", _Driver::WireEdge },
-    };
-    UsdValidationErrorVector errors;
-    for (const Item &it : items) {
-        const VtArray<TfToken> &driver
-            = it.driver == _Driver::Vertex     ? vertexPointType
-            : it.driver == _Driver::Edge       ? edgeCurveType
-            : it.driver == _Driver::WireEdge   ? wireEdgeCurveType
-                                               : faceSurfaceType;
-        const size_t count = _CountToken(driver, TfToken(it.driverValue));
-        const bool hasData = _IsAuthored(usdPrim, it.presenceAttr);
-        const bool applied
-            = _HasAppliedSchema(usdPrim, TfToken(it.schemaToken));
-        if (count > 0 && !hasData) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
-                 usdPrim,
-                 TfStringPrintf("[%s] BrepArray <%s>: %s usage is declared but "
-                                "no %s data is authored.",
-                                it.ba, usdPrim.GetPath().GetText(), it.label,
-                                it.presenceAttr));
-        }
-        if (applied && count == 0) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
-                 usdPrim,
-                 TfStringPrintf("[%s] BrepArray <%s>: %s is in apiSchemas but no "
-                                "%s usage is declared.",
-                                it.ba, usdPrim.GetPath().GetText(),
-                                it.schemaToken, it.label));
-        }
-        // BA.583: usage declared but the API schema never applied. The two
-        // checks above are each conditioned on the schema being present or the
-        // usage being absent, so a prim that declares usage and applies nothing
-        // satisfies both vacuously while reading as empty in any consumer that
-        // resolves geometry through HasAPI.
-        if (count > 0 && !applied) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
-                 usdPrim,
-                 TfStringPrintf("[BA.583] BrepArray <%s>: %s contains %zu '%s' "
-                                "occurrence(s), but required applied geometry "
-                                "API '%s' is absent from apiSchemas.",
-                                usdPrim.GetPath().GetText(),
-                                it.driver == _Driver::Vertex
-                                    ? "vertex:pointType"
-                                    : it.driver == _Driver::Edge
-                                        ? "edge:curveType"
-                                        : it.driver == _Driver::WireEdge
-                                            ? "wireEdge:curveType"
-                                            : "face:surfaceType",
-                                count, it.driverValue, it.schemaToken));
-        }
-    }
-
-    // BA.583 for shell points. shell:pointType names a point only on a point
-    // shell (_IsBrepPointShell), so a "BrepPointAPI" token on a face or wire
-    // shell neither declares a point nor requires BrepPointAPI:shellPoint.
-    {
-        const VtArray<TfToken> shellPointType
-            = _Read<TfToken>(brep.GetShellPointTypeAttr());
-        const VtArray<unsigned int> shellFaceuseCount
-            = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
-        const VtArray<unsigned int> shellWireEdgeCount
-            = _Read<unsigned int>(brep.GetShellWireEdgeCountAttr());
-        size_t pointShells = 0;
-        for (size_t i = 0; i < shellPointType.size(); ++i) {
-            if (_IsBrepPointShell(i, shellPointType, shellFaceuseCount,
-                                  shellWireEdgeCount)) {
-                ++pointShells;
-            }
-        }
-        if (pointShells > 0
-            && !_HasAppliedSchema(usdPrim,
-                                  TfToken("BrepPointAPI:shellPoint"))) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
-                 usdPrim,
-                 TfStringPrintf("[BA.583] BrepArray <%s>: shell:pointType "
-                                "contains %zu 'BrepPointAPI' occurrence(s), "
-                                "but required applied geometry API "
-                                "'BrepPointAPI:shellPoint' is absent from "
-                                "apiSchemas.",
-                                usdPrim.GetPath().GetText(), pointShells));
-        }
-    }
-
-    // BA.583, second clause. UV pcurves have no topology type-token array of
-    // their own, so presence is inferred from the packed record: a non-zero
-    // order or vertexCount for any edgeuse means pcurve data is authored, and
-    // that requires BrepCurveUvNurbAPI. Data authored without the schema is
-    // unreachable exactly as above.
-    {
-        const VtArray<unsigned int> uvOrder
-            = _Read<unsigned int>(usdPrim.GetAttribute(
-                TfToken("brep:curveUv:nurb:order")));
-        const VtArray<unsigned int> uvVertexCount
-            = _Read<unsigned int>(usdPrim.GetAttribute(
-                TfToken("brep:curveUv:nurb:vertexCount")));
-
-        bool hasUvRecord = false;
-        for (const unsigned int v : uvOrder) {
-            if (v != 0) { hasUvRecord = true; break; }
-        }
-        if (!hasUvRecord) {
-            for (const unsigned int v : uvVertexCount) {
-                if (v != 0) { hasUvRecord = true; break; }
-            }
-        }
-
-        if (hasUvRecord
-            && !_HasAppliedSchema(usdPrim, TfToken("BrepCurveUvNurbAPI"))) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->schemaUsageInconsistent,
-                 usdPrim,
-                 TfStringPrintf("[BA.583] BrepArray <%s>: authored UV NURBS "
-                                "pcurve data requires BrepCurveUvNurbAPI, which "
-                                "is absent from apiSchemas.",
-                                usdPrim.GetPath().GetText()));
-        }
-    }
-
-    return errors;
+    _BrepChecker c(usdPrim, { "BA.305", "BA.485", "BA.495", "BA.505", "BA.516",
+                              "BA.526", "BA.583" });
+    c.ValidateSchemaConsistency();
+    return c.TakeErrors();
 }
 
 // -------------------------------------------------------------------------- //
@@ -5833,6 +6761,10 @@ _BrepArrayAnalyticCurves(const UsdPrim &usdPrim,
 // -------------------------------------------------------------------------- //
 // BrepArrayNurbs                                                             //
 // -------------------------------------------------------------------------- //
+// The NURBS strata -- edge3d (BA.330-371), UV pcurves (BA.375-416), surfaces
+// (BA.420-471), wireEdge3d (BA.650-658) -- and the order / vertexCount floors
+// shared by all four (BA.590 / BA.591), in the order brep_validator.py runs
+// them.
 UsdValidationErrorVector
 _BrepArrayNurbs(const UsdPrim &usdPrim,
                 const UsdValidationTimeRange & /*timeRange*/)
@@ -5840,539 +6772,29 @@ _BrepArrayNurbs(const UsdPrim &usdPrim,
     if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
         return {};
     }
-    const UsdSolidBrepArray brep(usdPrim);
-    const SdfValueTypeName uintA = SdfValueTypeNames->UIntArray;
-    const SdfValueTypeName dblA = SdfValueTypeNames->DoubleArray;
-    const SdfValueTypeName dbl2A = SdfValueTypeNames->Double2Array;
-    const SdfValueTypeName p3A = SdfValueTypeNames->Point3dArray;
-
-    UsdValidationErrorVector errors;
-
-    // --- Surface NURBS (single-apply, no instance segment) --- //
-    const VtArray<TfToken> faceSurfaceType
-        = _Read<TfToken>(brep.GetFaceSurfaceTypeAttr());
-    const size_t nSurf
-        = _CountToken(faceSurfaceType, TfToken("BrepSurfaceNurbAPI"));
-    const VtArray<unsigned int> uVC
-        = _ReadName<unsigned int>(usdPrim, "brep:surface:nurb:uVertexCount");
-    const VtArray<unsigned int> vVC
-        = _ReadName<unsigned int>(usdPrim, "brep:surface:nurb:vVertexCount");
-    const VtArray<unsigned int> uO
-        = _ReadName<unsigned int>(usdPrim, "brep:surface:nurb:uOrder");
-    const VtArray<unsigned int> vO
-        = _ReadName<unsigned int>(usdPrim, "brep:surface:nurb:vOrder");
-    if (nSurf > 0 || !uO.empty()) {
-        if (uVC.size() != nSurf) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.420] BrepArray <%s>: brep:surface:nurb:"
-                                "uVertexCount size %zu but expected %zu.",
-                                usdPrim.GetPath().GetText(), uVC.size(), nSurf));
-        }
-        if (vVC.size() != nSurf) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.420] BrepArray <%s>: brep:surface:nurb:"
-                                "vVertexCount size %zu but expected %zu.",
-                                usdPrim.GetPath().GetText(), vVC.size(), nSurf));
-        }
-        if (uO.size() != nSurf) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.420] BrepArray <%s>: brep:surface:nurb:uOrder "
-                                "size %zu but expected %zu.",
-                                usdPrim.GetPath().GetText(), uO.size(), nSurf));
-        }
-        if (vO.size() != nSurf) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.420] BrepArray <%s>: brep:surface:nurb:vOrder "
-                                "size %zu but expected %zu.",
-                                usdPrim.GetPath().GetText(), vO.size(), nSurf));
-        }
-        _CheckNurbOrderPositive(usdPrim, "BA.425", "surface U", uO, uVC, false,
-                                &errors);
-        _CheckNurbOrderPositive(usdPrim, "BA.425", "surface V", vO, vVC, false,
-                                &errors);
-        _CheckNurbOrderLEVtx(usdPrim, "BA.430", "surface U", uO, uVC, false,
-                             &errors);
-        _CheckNurbOrderLEVtx(usdPrim, "BA.430", "surface V", vO, vVC, false,
-                             &errors);
-        _CheckNurbOrderMin2(usdPrim, "surface U", uO, uVC, false, &errors);
-        _CheckNurbOrderMin2(usdPrim, "surface V", vO, vVC, false, &errors);
-        _CheckNurbVtxGEOrder(usdPrim, "surface U", uO, uVC, false, &errors);
-        _CheckNurbVtxGEOrder(usdPrim, "surface V", vO, vVC, false, &errors);
-
-        const VtArray<GfVec3d> cv
-            = _ReadName<GfVec3d>(usdPrim, "brep:surface:nurb:controlVertices");
-        const VtArray<double> w
-            = _ReadName<double>(usdPrim, "brep:surface:nurb:weights");
-        size_t expectedCv = 0;
-        const size_t ms = std::min(uVC.size(), vVC.size());
-        for (size_t i = 0; i < ms; ++i) {
-            expectedCv += static_cast<size_t>(uVC[i]) * vVC[i];
-        }
-        if (cv.size() != expectedCv || w.size() != expectedCv) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens
-                     ->nurbControlVertexWeightSizeMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.435] BrepArray <%s>: surface controlVertices "
-                                "(%zu) / weights (%zu) size but expected %zu "
-                                "(sum of uVertexCount*vVertexCount).",
-                                usdPrim.GetPath().GetText(), cv.size(), w.size(),
-                                expectedCv));
-        }
-        _CheckNurbWeights(usdPrim, "BA.440", "surface", w, &errors);
-        _CheckNurbKnots1D(
-            usdPrim, "BA.445", "BA.455", "surface U", uO, uVC,
-            _ReadName<double>(usdPrim, "brep:surface:nurb:uKnots"), &errors);
-        _CheckNurbKnots1D(
-            usdPrim, "BA.450", "BA.460", "surface V", vO, vVC,
-            _ReadName<double>(usdPrim, "brep:surface:nurb:vKnots"), &errors);
-        if (nSurf > 0 && uO.empty()) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->nurbSchemaDataIncomplete,
-                 usdPrim,
-                 TfStringPrintf("[BA.470] BrepArray <%s>: faces declare "
-                                "BrepSurfaceNurbAPI but no brep:surface:nurb data "
-                                "is authored.",
-                                usdPrim.GetPath().GetText()));
-        }
-        if (_HasAppliedSchema(usdPrim, TfToken("BrepSurfaceNurbAPI"))
-            && nSurf == 0) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->nurbSchemaUsageInconsistent,
-                 usdPrim,
-                 TfStringPrintf("[BA.470] BrepArray <%s>: BrepSurfaceNurbAPI is in "
-                                "apiSchemas but no face uses "
-                                "face:surfaceType=BrepSurfaceNurbAPI.",
-                                usdPrim.GetPath().GetText()));
-        }
-        _CheckNurbType(usdPrim, "BA.471", "brep:surface:nurb:uOrder", uintA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.471", "brep:surface:nurb:vOrder", uintA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.471", "brep:surface:nurb:uVertexCount", uintA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.471", "brep:surface:nurb:vVertexCount", uintA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.471", "brep:surface:nurb:controlVertices",
-                       p3A, &errors);
-        _CheckNurbType(usdPrim, "BA.471", "brep:surface:nurb:weights", dblA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.471", "brep:surface:nurb:uKnots", dblA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.471", "brep:surface:nurb:vKnots", dblA,
-                       &errors);
-    }
-
-    // --- Edge 3D NURBS (multi-apply instance edge3dNurb) --- //
-    const VtArray<TfToken> edgeCurveType
-        = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
-    const size_t nEdge
-        = _CountToken(edgeCurveType, TfToken("BrepCurve3dNurbAPI"));
-    const VtArray<unsigned int> eO
-        = _ReadName<unsigned int>(usdPrim, "brep:edge3dNurb:curve3d:nurb:order");
-    const VtArray<unsigned int> eVC = _ReadName<unsigned int>(
-        usdPrim, "brep:edge3dNurb:curve3d:nurb:vertexCount");
-    if (nEdge > 0 || !eO.empty()) {
-        if (eO.size() != nEdge) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.330] BrepArray <%s>: edge3dNurb order size "
-                                "%zu but expected %zu.",
-                                usdPrim.GetPath().GetText(), eO.size(), nEdge));
-        }
-        if (eVC.size() != nEdge) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.330] BrepArray <%s>: edge3dNurb vertexCount "
-                                "size %zu but expected %zu.",
-                                usdPrim.GetPath().GetText(), eVC.size(), nEdge));
-        }
-        _CheckNurbOrderPositive(usdPrim, "BA.335", "edge3d", eO, eVC, false,
-                                &errors);
-        _CheckNurbOrderLEVtx(usdPrim, "BA.340", "edge3d", eO, eVC, false,
-                             &errors);
-        _CheckNurbOrderMin2(usdPrim, "edge3d", eO, eVC, false, &errors);
-        _CheckNurbVtxGEOrder(usdPrim, "edge3d", eO, eVC, false, &errors);
-
-        const VtArray<GfVec3d> eCv = _ReadName<GfVec3d>(
-            usdPrim, "brep:edge3dNurb:curve3d:nurb:controlVertices");
-        const VtArray<double> eW
-            = _ReadName<double>(usdPrim, "brep:edge3dNurb:curve3d:nurb:weights");
-        size_t expectedCv = 0;
-        for (unsigned int c : eVC) {
-            expectedCv += c;
-        }
-        if (eCv.size() != expectedCv || eW.size() != expectedCv) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens
-                     ->nurbControlVertexWeightSizeMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.345] BrepArray <%s>: edge3dNurb "
-                                "controlVertices (%zu) / weights (%zu) size but "
-                                "expected %zu (sum of vertexCount).",
-                                usdPrim.GetPath().GetText(), eCv.size(),
-                                eW.size(), expectedCv));
-        }
-        _CheckNurbWeights(usdPrim, "BA.350", "edge3d", eW, &errors);
-        _CheckNurbKnots1D(
-            usdPrim, "BA.355", "BA.360", "edge3d", eO, eVC,
-            _ReadName<double>(usdPrim, "brep:edge3dNurb:curve3d:nurb:knots"),
-            &errors);
-        if (nEdge > 0 && eO.empty()) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->nurbSchemaDataIncomplete,
-                 usdPrim,
-                 TfStringPrintf("[BA.370] BrepArray <%s>: edges declare "
-                                "BrepCurve3dNurbAPI but no brep:edge3dNurb data is "
-                                "authored.",
-                                usdPrim.GetPath().GetText()));
-        }
-        if (_HasAppliedSchema(usdPrim,
-                              TfToken("BrepCurve3dNurbAPI:edge3dNurb"))
-            && nEdge == 0) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->nurbSchemaUsageInconsistent,
-                 usdPrim,
-                 TfStringPrintf("[BA.370] BrepArray <%s>: "
-                                "BrepCurve3dNurbAPI:edge3dNurb is in apiSchemas "
-                                "but no edge uses edge:curveType="
-                                "BrepCurve3dNurbAPI.",
-                                usdPrim.GetPath().GetText()));
-        }
-        _CheckNurbType(usdPrim, "BA.371", "brep:edge3dNurb:curve3d:nurb:order",
-                       uintA, &errors);
-        _CheckNurbType(usdPrim, "BA.371",
-                       "brep:edge3dNurb:curve3d:nurb:vertexCount", uintA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.371",
-                       "brep:edge3dNurb:curve3d:nurb:controlVertices", p3A,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.371", "brep:edge3dNurb:curve3d:nurb:weights",
-                       dblA, &errors);
-        _CheckNurbType(usdPrim, "BA.371", "brep:edge3dNurb:curve3d:nurb:knots",
-                       dblA, &errors);
-    }
-
-    // --- WireEdge 3D NURBS (instance wireEdge3dNurb) --- //
-    const VtArray<TfToken> wireCurveType
-        = _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr());
-    const size_t nWire
-        = _CountToken(wireCurveType, TfToken("BrepCurve3dNurbAPI"));
-    const VtArray<unsigned int> wO = _ReadName<unsigned int>(
-        usdPrim, "brep:wireEdge3dNurb:curve3d:nurb:order");
-    const VtArray<unsigned int> wVC = _ReadName<unsigned int>(
-        usdPrim, "brep:wireEdge3dNurb:curve3d:nurb:vertexCount");
-    if (nWire > 0 && wO.empty()) {
-        _Err(&errors,
-             UsdSolidValidationErrorNameTokens->nurbSchemaDataIncomplete, usdPrim,
-             TfStringPrintf("[BA.290] BrepArray <%s>: wireEdges declare "
-                            "BrepCurve3dNurbAPI but no brep:wireEdge3dNurb data is "
-                            "authored.",
-                            usdPrim.GetPath().GetText()));
-    }
-    if (_HasAppliedSchema(usdPrim, TfToken("BrepCurve3dNurbAPI:wireEdge3dNurb"))
-        && nWire == 0) {
-        _Err(&errors,
-             UsdSolidValidationErrorNameTokens->nurbSchemaUsageInconsistent,
-             usdPrim,
-             TfStringPrintf("[BA.290] BrepArray <%s>: "
-                            "BrepCurve3dNurbAPI:wireEdge3dNurb is in apiSchemas "
-                            "but no wireEdge uses wireEdge:curveType="
-                            "BrepCurve3dNurbAPI.",
-                            usdPrim.GetPath().GetText()));
-    }
-    if (!wO.empty()) {
-        _CheckNurbOrderMin2(usdPrim, "wireEdge3d", wO, wVC, false, &errors);
-        _CheckNurbVtxGEOrder(usdPrim, "wireEdge3d", wO, wVC, false, &errors);
-    }
-    // BA.650 - BA.658 are the wireEdge counterparts of the edge3d family above
-    // (BA.330 - BA.370): the brep:wireEdge3dNurb stratum is sized against the
-    // wireEdge:curveType entries naming BrepCurve3dNurbAPI, the way the edge3d
-    // stratum is sized against edge:curveType. They run only when a wireEdge
-    // actually declares a NURBS curve; a BrepArray with no wire edges authors
-    // none of these arrays and the BA.290 checks above cover the schema-usage
-    // case on their own.
-    if (nWire > 0) {
-        const VtArray<GfVec3d> wCv = _ReadName<GfVec3d>(
-            usdPrim, "brep:wireEdge3dNurb:curve3d:nurb:controlVertices");
-        const VtArray<double> wW = _ReadName<double>(
-            usdPrim, "brep:wireEdge3dNurb:curve3d:nurb:weights");
-        const VtArray<double> wKn = _ReadName<double>(
-            usdPrim, "brep:wireEdge3dNurb:curve3d:nurb:knots");
-
-        // BA.658: the five arrays are read together by every rule below, so a
-        // stratum missing any one of them is reported once and the rest of the
-        // family is skipped -- a size rule run against an absent array reports
-        // the absence a second time under a number that means something else.
-        const bool present[5] = { !wO.empty(), !wVC.empty(), !wCv.empty(),
-                                  !wW.empty(), !wKn.empty() };
-        static const char *const partNames[5]
-            = { "order", "vertexCount", "controlVertices", "weights", "knots" };
-        const bool complete = present[0] && present[1] && present[2]
-            && present[3] && present[4];
-        if (!complete) {
-            std::vector<std::string> have, missing;
-            for (int i = 0; i < 5; ++i) {
-                (present[i] ? have : missing).push_back(partNames[i]);
-            }
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->nurbSchemaDataIncomplete,
-                 usdPrim,
-                 TfStringPrintf("[BA.658] BrepArray <%s>: wireEdge3dNurb data is "
-                                "incomplete. Present: [%s]. Missing: [%s].",
-                                usdPrim.GetPath().GetText(),
-                                TfStringJoin(have, ", ").c_str(),
-                                TfStringJoin(missing, ", ").c_str()));
-        } else {
-            // BA.650: order / vertexCount sized by the BrepCurve3dNurbAPI count.
-            if (wO.size() != nWire) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                     usdPrim,
-                     TfStringPrintf("[BA.650] BrepArray <%s>: wireEdge3dNurb "
-                                    "order size %zu but expected %zu.",
-                                    usdPrim.GetPath().GetText(), wO.size(),
-                                    nWire));
-            }
-            if (wVC.size() != nWire) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                     usdPrim,
-                     TfStringPrintf("[BA.650] BrepArray <%s>: wireEdge3dNurb "
-                                    "vertexCount size %zu but expected %zu.",
-                                    usdPrim.GetPath().GetText(), wVC.size(),
-                                    nWire));
-            }
-
-            // BA.651 (order >= 2) and BA.652 (order <= vertexCount) report every
-            // offending curve, and the same pass accumulates the control-vertex
-            // total BA.653 needs.
-            const size_t mWire = std::min(wO.size(), wVC.size());
-            size_t expectedWireCv = 0;
-            for (size_t i = 0; i < mWire; ++i) {
-                if (wO[i] < 2u) {
-                    _Err(&errors,
-                         UsdSolidValidationErrorNameTokens
-                             ->nurbOrderBelowMinimum,
-                         usdPrim,
-                         TfStringPrintf("[BA.651] BrepArray <%s>: wireEdge3d "
-                                        "order[%zu] = %u must be >= 2 "
-                                        "(degree >= 1).",
-                                        usdPrim.GetPath().GetText(), i, wO[i]));
-                }
-                if (wO[i] > wVC[i]) {
-                    _Err(&errors,
-                         UsdSolidValidationErrorNameTokens
-                             ->nurbOrderExceedsVertexCount,
-                         usdPrim,
-                         TfStringPrintf("[BA.652] BrepArray <%s>: wireEdge3d "
-                                        "order[%zu] = %u exceeds vertexCount %u.",
-                                        usdPrim.GetPath().GetText(), i, wO[i],
-                                        wVC[i]));
-                }
-                expectedWireCv += wVC[i];
-            }
-
-            // BA.653: controlVertices and weights each hold one entry per
-            // control point. Reported per attribute, so a file that gets one of
-            // the two right still names the one it got wrong.
-            if (wCv.size() != expectedWireCv) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens
-                         ->nurbControlVertexWeightSizeMismatch,
-                     usdPrim,
-                     TfStringPrintf("[BA.653] BrepArray <%s>: wireEdge3dNurb "
-                                    "controlVertices size %zu but expected %zu "
-                                    "(sum of vertexCount).",
-                                    usdPrim.GetPath().GetText(), wCv.size(),
-                                    expectedWireCv));
-            }
-            if (wW.size() != expectedWireCv) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens
-                         ->nurbControlVertexWeightSizeMismatch,
-                     usdPrim,
-                     TfStringPrintf("[BA.653] BrepArray <%s>: wireEdge3dNurb "
-                                    "weights size %zu but expected %zu (sum of "
-                                    "vertexCount).",
-                                    usdPrim.GetPath().GetText(), wW.size(),
-                                    expectedWireCv));
-            }
-
-            // BA.654 (positive weights), BA.655 (knot count) and BA.656 (knots
-            // non-decreasing) are the same checks the edge3d stratum runs.
-            _CheckNurbWeights(usdPrim, "BA.654", "wireEdge3d", wW, &errors);
-            _CheckNurbKnots1D(usdPrim, "BA.655", "BA.656", "wireEdge3d", wO, wVC,
-                              wKn, &errors);
-
-            // BA.657: each control vertex lies within one of the brep:extent
-            // boxes. Per-point Brep attribution is not derivable from the flat
-            // data, so the union of the boxes is used; for a single Brep that is
-            // exactly that Brep's box. Reports the first offending control
-            // vertex, because the failure this catches -- a stratum indexed
-            // against the wrong Brep -- names itself once.
-            //
-            // Severity follows BA.365 / BA.465, which ask the same question
-            // of edge3d and surface control hulls: an Error, as
-            // brep_validator.py reports all three as failed checks.
-            const VtArray<GfVec3d> wireExtent
-                = _Read<GfVec3d>(brep.GetBrepExtentAttr());
-            const VtArray<unsigned int> wireRegionCount
-                = _Read<unsigned int>(brep.GetBrepRegionCountAttr());
-            const size_t numWireBoxes = wireExtent.size() / 2;
-            const size_t numWireBreps = wireRegionCount.empty()
-                ? numWireBoxes
-                : std::min(wireRegionCount.size(), numWireBoxes);
-            const double wireSlop
-                = std::max(_FirstAuthoredIntersectTol3d(brep), _DomainTol);
-            for (size_t c = 0; c < wCv.size() && numWireBreps > 0; ++c) {
-                const GfVec3d &p = wCv[c];
-                bool inside = false;
-                for (size_t b = 0; b < numWireBreps && !inside; ++b) {
-                    const GfVec3d &mn = wireExtent[2 * b];
-                    const GfVec3d &mx = wireExtent[2 * b + 1];
-                    bool within = true;
-                    for (int k = 0; k < 3; ++k) {
-                        const double lo
-                            = mn[k] - wireSlop - _ExtentFloatRel * std::abs(mn[k]);
-                        const double hi
-                            = mx[k] + wireSlop + _ExtentFloatRel * std::abs(mx[k]);
-                        if (p[k] < lo || p[k] > hi) {
-                            within = false;
-                            break;
-                        }
-                    }
-                    inside = within;
-                }
-                if (!inside) {
-                    _Err(&errors,
-                         UsdSolidValidationErrorNameTokens
-                             ->controlPointOutsideBrepExtent,
-                         usdPrim,
-                         TfStringPrintf("[BA.657] BrepArray <%s>: wireEdge3dNurb "
-                                        "control vertex %zu (%g, %g, %g) lies "
-                                        "outside all brep:extent boxes (NURBS "
-                                        "control hulls may legitimately exceed "
-                                        "the curve bounds).",
-                                        usdPrim.GetPath().GetText(), c, p[0],
-                                        p[1], p[2]));
-                    break;
-                }
-            }
-        }
-    }
-
-    // --- Curve UV NURBS (single-apply, one trim curve per edgeuse) --- //
-    const size_t euCount
-        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr()).size();
-    const VtArray<unsigned int> cO
-        = _ReadName<unsigned int>(usdPrim, "brep:curveUv:nurb:order");
-    const VtArray<unsigned int> cVC
-        = _ReadName<unsigned int>(usdPrim, "brep:curveUv:nurb:vertexCount");
-    // BA.415 (schema-usage) is independent of whether curveUv value data is
-    // authored: "API applied but no data / no edgeuses" is itself the failure.
-    {
-        const bool appliedUv
-            = _HasAppliedSchema(usdPrim, TfToken("BrepCurveUvNurbAPI"));
-        if (appliedUv && euCount > 0 && cO.empty()) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->nurbSchemaDataIncomplete,
-                 usdPrim,
-                 TfStringPrintf("[BA.415] BrepArray <%s>: BrepCurveUvNurbAPI is in "
-                                "apiSchemas but no brep:curveUv:nurb data is "
-                                "authored.",
-                                usdPrim.GetPath().GetText()));
-        }
-        if (appliedUv && euCount == 0) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->nurbSchemaUsageInconsistent,
-                 usdPrim,
-                 TfStringPrintf("[BA.415] BrepArray <%s>: BrepCurveUvNurbAPI is in "
-                                "apiSchemas but no edgeuses exist.",
-                                usdPrim.GetPath().GetText()));
-        }
-    }
-    const bool runUv = _IsAuthored(usdPrim, "brep:curveUv:nurb:order")
-        || _IsAuthored(usdPrim, "brep:curveUv:nurb:vertexCount");
-    if (runUv) {
-        if (cO.size() != euCount) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.375] BrepArray <%s>: brep:curveUv:nurb:order "
-                                "size %zu but expected %zu (edgeuse count).",
-                                usdPrim.GetPath().GetText(), cO.size(), euCount));
-        }
-        if (cVC.size() != euCount) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->nurbSizeArrayMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.375] BrepArray <%s>: "
-                                "brep:curveUv:nurb:vertexCount size %zu but "
-                                "expected %zu (edgeuse count).",
-                                usdPrim.GetPath().GetText(), cVC.size(),
-                                euCount));
-        }
-        _CheckNurbOrderPositive(usdPrim, "BA.380", "curveUv", cO, cVC, true,
-                                &errors);
-        _CheckNurbOrderLEVtx(usdPrim, "BA.385", "curveUv", cO, cVC, true,
-                             &errors);
-        _CheckNurbOrderMin2(usdPrim, "curveUv", cO, cVC, true, &errors);
-        _CheckNurbVtxGEOrder(usdPrim, "curveUv", cO, cVC, true, &errors);
-
-        const VtArray<GfVec2d> cCv
-            = _ReadName<GfVec2d>(usdPrim, "brep:curveUv:nurb:controlVertices");
-        const VtArray<double> cW
-            = _ReadName<double>(usdPrim, "brep:curveUv:nurb:weights");
-        size_t expectedCv = 0;
-        for (unsigned int c : cVC) {
-            expectedCv += c;
-        }
-        if (cCv.size() != expectedCv) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens
-                     ->nurbControlVertexWeightSizeMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.390] BrepArray <%s>: curveUv controlVertices "
-                                "size %zu but expected %zu (sum of vertexCount).",
-                                usdPrim.GetPath().GetText(), cCv.size(),
-                                expectedCv));
-        }
-        // BA.405: one weight per packed UV control vertex, whether or not the
-        // weights are authored. A missing or empty weights array against a
-        // non-zero control-vertex total is a cardinality failure in its own
-        // right, not an exemption (OMPE-106502); an all-sentinel record (every
-        // vertexCount zero) expects no weights and passes without any.
-        if (cW.size() != expectedCv) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens
-                     ->nurbControlVertexWeightSizeMismatch,
-                 usdPrim,
-                 TfStringPrintf("[BA.405] BrepArray <%s>: Invalid size for "
-                                "brep:curveUv:nurb:weights. Expected size "
-                                "%zu, but got %zu.",
-                                usdPrim.GetPath().GetText(), expectedCv,
-                                cW.size()));
-        }
-        _CheckNurbWeights(usdPrim, "BA.410", "curveUv", cW, &errors);
-        _CheckNurbKnots1D(usdPrim, "BA.395", "BA.400", "curveUv", cO, cVC,
-                          _ReadName<double>(usdPrim, "brep:curveUv:nurb:knots"),
-                          &errors);
-        _CheckNurbType(usdPrim, "BA.416", "brep:curveUv:nurb:order", uintA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.416", "brep:curveUv:nurb:vertexCount", uintA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.416", "brep:curveUv:nurb:controlVertices",
-                       dbl2A, &errors);
-        _CheckNurbType(usdPrim, "BA.416", "brep:curveUv:nurb:knots", dblA,
-                       &errors);
-        _CheckNurbType(usdPrim, "BA.416", "brep:curveUv:nurb:weights", dblA,
-                       &errors);
-    }
-
-    return errors;
+    _BrepChecker c(usdPrim,
+                   { "BA.290", "BA.330", "BA.335", "BA.340", "BA.345", "BA.350",
+                     "BA.355", "BA.360", "BA.370", "BA.371", "BA.375", "BA.380",
+                     "BA.385", "BA.390", "BA.395", "BA.400", "BA.405", "BA.410",
+                     "BA.415", "BA.416", "BA.420", "BA.425", "BA.430", "BA.435",
+                     "BA.440", "BA.445", "BA.450", "BA.455", "BA.460", "BA.470",
+                     "BA.471", "BA.590", "BA.591", "BA.650", "BA.651", "BA.652",
+                     "BA.653", "BA.654", "BA.655", "BA.656", "BA.657",
+                     "BA.658" });
+    c.ValidateCurve3dNurbControlVerticesWeights();
+    c.ValidateCurve3dNurbOrderVertexCount();
+    c.ValidateCurve3dKnots();
+    c.ValidateCurveUvData();
+    c.ValidateSurfaceControlVerticesWeights();
+    c.ValidateSurfaceOrdersVertexCounts();
+    c.ValidateSurfaceKnots();
+    c.ValidateSchemaConsistency();
+    c.ValidateNurbsDataCompleteness();
+    c.ValidateNurbsMathematicalConsistency();
+    c.ValidateAttributeDataTypes();
+    c.ValidateNurbsOrderAndVertexCountValues();
+    c.ValidateWireEdge3dNurbs();
+    return c.TakeErrors();
 }
 
 // ========================================================================== //
