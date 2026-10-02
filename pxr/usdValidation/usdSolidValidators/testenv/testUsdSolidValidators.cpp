@@ -116,6 +116,9 @@ def Xform "World"
 
     def BrepArray "BadRanges"
     {
+        uniform uint[] brep:regionCount = [1]
+        uniform uint[] region:shellCount = [1]
+        uniform uint[] shell:faceuseCount = [4]
         uniform uint[] face:loopCount = [1, 0]
         uniform double2[] face:range = [(0, 0), (1, 1), (0, 0), (0, 5)]
         uniform double[] edge:range = [0, 1, 5, 2]
@@ -241,17 +244,15 @@ def Xform "World"
         uniform double[] edge:range = [0, 6.283185307179586, 0, 1.5707963267948966]
     }
 
-    # BA.010 (BrepArrayStructure, NonFiniteIntersectTol3d): a non-finite
-    # (NaN via 0/0... here authored as inf) intersection tolerance. A non-finite
-    # tolerance silently poisons every tolerance-based rule downstream; it is
-    # neither "positive" nor "<= 0.0", so the ordering check alone cannot catch
-    # it. BrepArrayStructure must flag NonFiniteIntersectTol3d, and must NOT
-    # additionally report NonPositiveIntersectTol3d for the same entry.
-    def BrepArray "NonFiniteTol"
+    # BA.010 (BrepArrayStructure): brep_validator.py flags a brep:intersectTol3d
+    # entry below NUMERICAL_TOLERANCE (1e-11), so 0 and 1e-12 fail and 1e-11
+    # passes. A NaN or an infinity compares false against the bound, and Python
+    # does not flag it either.
+    def BrepArray "TolBelowNumericalTolerance"
     {
-        uniform double[] brep:intersectTol3d = [inf]
-        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
-        uniform uint[] brep:regionCount = [1]
+        uniform double[] brep:intersectTol3d = [0, 1e-12, 1e-11, nan, inf]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1), (0, 0, 0), (1, 1, 1), (0, 0, 0), (1, 1, 1), (0, 0, 0), (1, 1, 1), (0, 0, 0), (1, 1, 1)]
+        uniform uint[] brep:regionCount = [1, 1, 1, 1, 1]
     }
 
     # Row 14 (BA.310): brep:extent containment slop must follow the
@@ -357,38 +358,22 @@ TestBrepArrayStructure()
 }
 
 static void
-TestBrepArrayStructureNonFiniteTol()
+TestBrepArrayStructureTolerance()
 {
-    // BA.010: a non-finite brep:intersectTol3d must be flagged with the
-    // NonFiniteIntersectTol3d error (and NOT double-flagged as non-positive),
-    // while a valid finite positive tolerance stays clean.
+    // BA.010: a brep:intersectTol3d entry below NUMERICAL_TOLERANCE is flagged,
+    // each on its own; NaN and infinity are not.
     UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
     const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
         UsdSolidValidatorNameTokens->brepArrayStructure);
     TF_AXIOM(validator);
 
     UsdStageRefPtr stage = _OpenLayer(layerContents);
-
-    {
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/NonFiniteTol"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(_HasError(errors, ".NonFiniteIntersectTol3d"));
-        // A non-finite value must not ALSO be reported as non-positive.
-        TF_AXIOM(!_HasError(errors, ".NonPositiveIntersectTol3d"));
-    }
-    {
-        // Positive case: GoodCylinder authors no intersectTol3d, and the
-        // BadStructure prim's -1.0 tolerance is the non-positive (not
-        // non-finite) case, so it must NOT trip the finiteness check.
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/BadStructure"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(!_HasError(errors, ".NonFiniteIntersectTol3d"));
-        TF_AXIOM(_HasError(errors, ".NonPositiveIntersectTol3d"));
-    }
+    const UsdPrim prim
+        = stage->GetPrimAtPath(SdfPath("/World/TolBelowNumericalTolerance"));
+    TF_AXIOM(prim);
+    const UsdValidationErrorVector errors = validator->Validate(prim);
+    TF_AXIOM(_CountError(errors, ".NonPositiveIntersectTol3d") == 2);
+    TF_AXIOM(_CountRule(errors, "BA.010") == 2);
 }
 
 static void
@@ -757,11 +742,15 @@ def Xform "World"
 static void
 TestBrepArrayMinimumCountsAndSizes()
 {
-    // BA.270 / BA.295 / BA.320 / BA.325 / BA.700 / BA.701 / BA.702.
+    // BA.320 / BA.325 / BA.700 / BA.701 / BA.702 (BrepArrayStructure) and
+    // BA.270 / BA.295 (BrepArrayTopology).
     UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
     const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
         UsdSolidValidatorNameTokens->brepArrayStructure);
-    TF_AXIOM(validator);
+    const UsdValidationValidator *topology
+        = registry.GetOrLoadValidatorByName(
+            UsdSolidValidatorNameTokens->brepArrayTopology);
+    TF_AXIOM(validator && topology);
 
     UsdStageRefPtr stage = _OpenLayer(countsAndSubsetsContents);
 
@@ -785,8 +774,11 @@ TestBrepArrayMinimumCountsAndSizes()
             = stage->GetPrimAtPath(SdfPath("/World/PointPositionSizes"));
         TF_AXIOM(prim);
         const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(_CountError(errors, ".VertexArraySizeMismatch") == 1);
-        TF_AXIOM(_CountError(errors, ".VertexPointPositionSizeMismatch") == 1);
+        TF_AXIOM(_CountError(topology->Validate(prim),
+                             ".VertexArraySizeMismatch") == 1);
+        // Once for the array size, once for the Brep's three BrepPointAPI
+        // vertices having two positions left to take.
+        TF_AXIOM(_CountError(errors, ".VertexPointPositionSizeMismatch") == 2);
         TF_AXIOM(_CountError(errors, ".ShellPointPositionSizeMismatch") == 0);
         TF_AXIOM(!_HasError(errors, ".RegionCountBelowMinimum"));
         TF_AXIOM(!_HasError(errors, ".ShellWithoutContent"));
@@ -797,7 +789,7 @@ TestBrepArrayMinimumCountsAndSizes()
         const UsdPrim prim
             = stage->GetPrimAtPath(SdfPath("/World/WireEdgeRangeStructure"));
         TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
+        const UsdValidationErrorVector errors = topology->Validate(prim);
         TF_AXIOM(_CountError(errors, ".InvalidWireEdgeRangeStructure") == 1);
     }
 }
@@ -1281,7 +1273,7 @@ main()
 {
     TestRegistration();
     TestBrepArrayStructure();
-    TestBrepArrayStructureNonFiniteTol();
+    TestBrepArrayStructureTolerance();
     TestBrepArraySpans();
     TestBrepArrayTopology();
     TestBrepArrayTokenValues();

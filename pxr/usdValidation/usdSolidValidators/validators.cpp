@@ -5,20 +5,31 @@
 // https://openusd.org/license.
 //
 
+#include "pxr/base/gf/half.h"
 #include "pxr/base/gf/vec2d.h"
+#include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec2h.h"
 #include "pxr/base/gf/vec2i.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/base/gf/vec3h.h"
+#include "pxr/base/gf/vec3i.h"
+#include "pxr/base/gf/vec4d.h"
+#include "pxr/base/gf/vec4f.h"
+#include "pxr/base/gf/vec4h.h"
+#include "pxr/base/gf/vec4i.h"
 #include "pxr/base/tf/registryManager.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/attributeSpec.h"
+#include "pxr/usd/sdf/types.h"
 #include "pxr/usd/sdf/valueTypeName.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primDefinition.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdSolid/brepArray.h"
@@ -33,9 +44,13 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
+#include <map>
+#include <numeric>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -90,107 +105,6 @@ _FirstAuthoredIntersectTol3d(const UsdSolidBrepArray &brep)
         : _FallbackIntersectTol3d;
 }
 
-size_t
-_Sum(const VtArray<unsigned int> &values)
-{
-    size_t sum = 0;
-    for (const unsigned int v : values) {
-        sum += v;
-    }
-    return sum;
-}
-
-// Each stratum's array-size requirement has its own rule number, so the rule is
-// a parameter rather than a property of this helper: region sizes are BA.065,
-// shells BA.080, faceuses BA.100, faces BA.120, face:range BA.150, loops
-// BA.165, edgeuses BA.180, edges BA.210, edge:range BA.230, wire edges BA.250
-// and wireEdge:range BA.270.
-void
-_CheckSize(const UsdPrim &prim, const char *rule, const char *attrName,
-           size_t actual, size_t expected, const std::string &expectedDesc,
-           const TfToken &errorName, UsdValidationErrorVector *errors)
-{
-    if (actual != expected) {
-        errors->emplace_back(
-            errorName, UsdValidationErrorType::Error, _PrimSites(prim),
-            TfStringPrintf(
-                "[%s] BrepArray <%s>: attribute %s has size %zu but expected "
-                "%zu (%s).",
-                rule, prim.GetPath().GetText(), attrName, actual, expected,
-                expectedDesc.c_str()));
-    }
-}
-
-// Renders an allowed-token list the way the Python brep_validator prints it
-// ("['solidRegion', 'voidRegion']"), so the native message for a token-validity
-// rule reads the same as its Python counterpart. The allowed sets below are
-// vectors because the order they are written in reaches the reader in this
-// tail; a std::set<TfToken> would sort them lexicographically and the two
-// validators would print the same set in two different orders.
-std::string
-_FormatAllowedTokens(const std::vector<TfToken> &allowed)
-{
-    std::vector<std::string> quoted;
-    quoted.reserve(allowed.size());
-    for (const TfToken &token : allowed) {
-        quoted.push_back(TfStringPrintf("'%s'", token.GetText()));
-    }
-    return "[" + TfStringJoin(quoted, ", ") + "]";
-}
-
-// The token-validity rules BA.075 / BA.090 / BA.110 / BA.130 / BA.135 /
-// BA.190 / BA.195 / BA.245 / BA.260 / BA.315 all reduce to "every entry of this
-// token[] attribute is drawn from this fixed set". Python reports one finding
-// per attribute (naming every offending index) instead of one finding per
-// offending index; this reproduces that grouping so a file with N bad tokens in
-// one attribute produces one finding here and one finding there.
-void
-_CheckAllowedTokens(const UsdPrim &prim, const VtArray<TfToken> &values,
-                    const std::vector<TfToken> &allowed, const char *ruleId,
-                    const char *attrName, const char *itemName,
-                    const TfToken &errorName,
-                    UsdValidationErrorVector *errors)
-{
-    std::vector<size_t> invalid;
-    for (size_t i = 0; i < values.size(); ++i) {
-        if (std::find(allowed.begin(), allowed.end(), values[i])
-            == allowed.end()) {
-            invalid.push_back(i);
-        }
-    }
-    if (invalid.empty()) {
-        return;
-    }
-
-    const std::string allowedDesc = _FormatAllowedTokens(allowed);
-
-    if (invalid.size() == 1) {
-        const size_t i = invalid.front();
-        errors->emplace_back(
-            errorName, UsdValidationErrorType::Error, _PrimSites(prim),
-            TfStringPrintf(
-                "[%s] BrepArray <%s>: %s[%zu] has invalid value '%s' for %s "
-                "#%zu. Allowed values are %s.",
-                ruleId, prim.GetPath().GetText(), attrName, i,
-                values[i].GetText(), itemName, i, allowedDesc.c_str()));
-        return;
-    }
-
-    std::vector<std::string> details;
-    details.reserve(invalid.size());
-    for (const size_t i : invalid) {
-        details.push_back(TfStringPrintf("[%zu]='%s'", i,
-                                         values[i].GetText()));
-    }
-    errors->emplace_back(
-        errorName, UsdValidationErrorType::Error, _PrimSites(prim),
-        TfStringPrintf(
-            "[%s] BrepArray <%s>: %s has invalid values at indices: %s. "
-            "Allowed values are %s.",
-            ruleId, prim.GetPath().GetText(), attrName,
-            TfStringJoin(details, ", ").c_str(), allowedDesc.c_str()));
-}
-
 // Whether shell `i` is a point shell: one that contributes a
 // brep:shellPoint:point:position entry. The schema makes shell:pointType
 // meaningful only when the shell has no faceuses and no wire edges, so a
@@ -209,60 +123,2774 @@ _IsBrepPointShell(size_t i, const VtArray<TfToken> &pointTypes,
         && faceuseCounts[i] == 0u && wireEdgeCounts[i] == 0u;
 }
 
-// The length of an array-valued attribute, whatever its value type. BA.295,
-// BA.320 and BA.325 compare a count against an array whose type another rule
-// already polices, so reading through VtValue keeps a wrong-typed array
-// reporting its real length instead of zero.
-size_t
-_ArraySize(const UsdAttribute &attr)
+// ========================================================================== //
+// brep_validator.py port                                                     //
+// ========================================================================== //
+//
+// The BA.xxx rules are defined by tools/brep_validator/brep_validator.py in
+// the solidmodeling repository, which is the reference implementation. The
+// rules in this file are ports of its methods and keep its control flow:
+// where Python stops after a structural error, skips a stratum, reports per
+// element rather than per attribute, or measures against a partition its own
+// helper computed, the port does the same, so the two validators report the
+// same findings on the same file. Each ported method names the Python method
+// it mirrors.
+//
+// Python runs every method from one entry point, BrepValidator.CheckPrim. Here
+// each registered validator owns a set of rules and runs the methods that can
+// produce them on a _BrepChecker, which drops the findings of rules the
+// validator does not own. A Python method that reports under several rules
+// (_validate_edge_arrays reports seven) therefore runs once per validator that
+// owns one of them, and each rule is reported by exactly one validator.
+
+// The number brep_validator.py calls BrepConstants.NUMERICAL_TOLERANCE.
+constexpr double _PyNumericalTolerance = 1e-11;
+
+// An attribute value as brep_validator.py sees it.
+//
+// Python reads values with Usd.Attribute.Get(), which returns what the layer
+// authored, not the type the schema declares: an int[] where the schema says
+// uint[] reads as integers, a float[] as floats, a string[] as strings, and an
+// unregistered type name such as uint2[] as Sdf.UnregisteredValue. The rules
+// then duck-type the value, so a wrong-typed array is still counted, summed and
+// compared. Reading the typed C++ value instead (a VtArray<unsigned int> from
+// an int[]) yields an empty array, and every rule downstream then judges a
+// different file from the one Python judged.
+//
+// Numbers of any width (bool, int, uint, int64, half, float, double) are held
+// as doubles with a flag for integral types; str and token elements as
+// strings; GfVec2/3/4 of any scalar as tuples. A scalar (non-array) value is
+// not a sequence: Python would raise on len() or iteration, and the port
+// treats it as absent instead.
+class _PyValue
 {
-    VtValue value;
-    if (!attr || !attr.Get(&value) || !value.IsArrayValued()) {
-        return 0;
+public:
+    enum class Kind { None, Unregistered, Scalar, Array };
+    enum class Elem { Number, String, Tuple, Other };
+
+    // attr.Get(): None when the attribute is invalid or has no value.
+    static _PyValue Read(const UsdAttribute &attr)
+    {
+        _PyValue v;
+        VtValue value;
+        if (!attr || !attr.Get(&value) || value.IsEmpty()) {
+            return v;
+        }
+        if (value.IsHolding<SdfUnregisteredValue>()) {
+            v._kind = Kind::Unregistered;
+            return v;
+        }
+        v._kind = value.IsArrayValued() ? Kind::Array : Kind::Scalar;
+        if (v._LoadNumber<bool>(value, true)
+            || v._LoadNumber<unsigned char>(value, true)
+            || v._LoadNumber<int>(value, true)
+            || v._LoadNumber<unsigned int>(value, true)
+            || v._LoadNumber<int64_t>(value, true)
+            || v._LoadNumber<uint64_t>(value, true)
+            || v._LoadNumber<GfHalf>(value, false)
+            || v._LoadNumber<float>(value, false)
+            || v._LoadNumber<double>(value, false)
+            || v._LoadString<std::string>(value)
+            || v._LoadString<TfToken>(value)
+            || v._LoadTuple<GfVec2d>(value) || v._LoadTuple<GfVec2f>(value)
+            || v._LoadTuple<GfVec2h>(value) || v._LoadTuple<GfVec2i>(value)
+            || v._LoadTuple<GfVec3d>(value) || v._LoadTuple<GfVec3f>(value)
+            || v._LoadTuple<GfVec3h>(value) || v._LoadTuple<GfVec3i>(value)
+            || v._LoadTuple<GfVec4d>(value) || v._LoadTuple<GfVec4f>(value)
+            || v._LoadTuple<GfVec4h>(value) || v._LoadTuple<GfVec4i>(value)) {
+            return v;
+        }
+        v._elem = Elem::Other;
+        v._size = v._kind == Kind::Array ? value.GetArraySize() : 1;
+        return v;
     }
-    return value.GetArraySize();
+
+    // Python's [].
+    static _PyValue EmptyList()
+    {
+        _PyValue v;
+        v._kind = Kind::Array;
+        v._elem = Elem::Number;
+        return v;
+    }
+
+    // A Python list of numbers built by a rule (first_vertex, second_vertex).
+    static _PyValue Numbers(std::vector<double> values, bool integral)
+    {
+        _PyValue v;
+        v._kind = Kind::Array;
+        v._elem = Elem::Number;
+        v._integral = integral;
+        v._size = values.size();
+        v._num = std::move(values);
+        return v;
+    }
+
+    bool IsNone() const { return _kind == Kind::None; }
+    bool IsUnregistered() const { return _kind == Kind::Unregistered; }
+    // Whether Python's len() and iteration work.
+    bool IsSequence() const { return _kind == Kind::Array; }
+    // len(value); zero for a value that is not a sequence.
+    size_t Len() const { return IsSequence() ? _size : 0; }
+
+    // Python truthiness: None and empty arrays are false, an
+    // Sdf.UnregisteredValue (a plain object) is true.
+    bool Truthy() const
+    {
+        switch (_kind) {
+        case Kind::None:
+            return false;
+        case Kind::Unregistered:
+            return true;
+        case Kind::Array:
+            return _size > 0;
+        case Kind::Scalar:
+            if (_elem == Elem::Number) {
+                return _num[0] != 0.0;
+            }
+            if (_elem == Elem::String) {
+                return !_str[0].empty();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // `value or []`. An unregistered value is truthy and stays.
+    _PyValue OrEmpty() const { return Truthy() ? *this : EmptyList(); }
+    // `[] if value is None else value`.
+    _PyValue NoneToEmpty() const { return IsNone() ? EmptyList() : *this; }
+
+    Elem GetElem() const { return _elem; }
+    bool IsNumbers() const { return IsSequence() && _elem == Elem::Number; }
+    bool IsStrings() const { return IsSequence() && _elem == Elem::String; }
+    bool IsTuples() const { return IsSequence() && _elem == Elem::Tuple; }
+    bool Integral() const { return _integral; }
+
+    double Num(size_t i) const { return _num[i]; }
+    const std::string &Str(size_t i) const { return _str[i]; }
+    size_t Dim() const { return _dim; }
+    double Tup(size_t i, size_t c) const { return _num[i * _dim + c]; }
+
+    // int(element). False where Python raises: a string that is not a base-10
+    // integer, a NaN or infinite float, a tuple.
+    bool ToInt(size_t i, long long *out) const
+    {
+        if (_elem == Elem::Number) {
+            const double x = _num[i];
+            if (!std::isfinite(x)) {
+                return false;
+            }
+            *out = static_cast<long long>(std::trunc(x));
+            return true;
+        }
+        if (_elem == Elem::String) {
+            return _ParseInt(_str[i], out);
+        }
+        return false;
+    }
+
+    // float(element). False where Python raises.
+    bool ToFloat(size_t i, double *out) const
+    {
+        if (_elem == Elem::Number) {
+            *out = _num[i];
+            return true;
+        }
+        if (_elem == Elem::String) {
+            const std::string s = TfStringTrim(_str[i]);
+            if (s.empty()) {
+                return false;
+            }
+            char *end = nullptr;
+            const double x = std::strtod(s.c_str(), &end);
+            if (end != s.c_str() + s.size()) {
+                return false;
+            }
+            *out = x;
+            return true;
+        }
+        return false;
+    }
+
+    // `element == text`: only a str element can equal a string.
+    bool Equals(size_t i, const std::string &text) const
+    {
+        return _elem == Elem::String && _str[i] == text;
+    }
+
+    // str(element), for messages.
+    std::string Repr(size_t i) const
+    {
+        switch (_elem) {
+        case Elem::Number:
+            return NumRepr(_num[i], _integral);
+        case Elem::String:
+            return _str[i];
+        case Elem::Tuple: {
+            std::vector<std::string> parts;
+            for (size_t c = 0; c < _dim; ++c) {
+                parts.push_back(TfStringPrintf("%g", Tup(i, c)));
+            }
+            return "(" + TfStringJoin(parts, ", ") + ")";
+        }
+        case Elem::Other:
+            break;
+        }
+        return "?";
+    }
+
+    // Python's repr of a number: integers without a fractional part, floats
+    // with one.
+    static std::string NumRepr(double x, bool integral)
+    {
+        if (integral) {
+            return TfStringPrintf("%lld", static_cast<long long>(x));
+        }
+        if (std::isnan(x)) {
+            return "nan";
+        }
+        if (std::isinf(x)) {
+            return x > 0 ? "inf" : "-inf";
+        }
+        if (x == std::trunc(x) && std::abs(x) < 1e16) {
+            return TfStringPrintf("%.1f", x);
+        }
+        return TfStringPrintf("%.17g", x);
+    }
+
+private:
+    template <class T>
+    bool _LoadNumber(const VtValue &value, bool integral)
+    {
+        if (value.IsHolding<VtArray<T>>()) {
+            const VtArray<T> &a = value.UncheckedGet<VtArray<T>>();
+            _num.reserve(a.size());
+            for (const T &x : a) {
+                _num.push_back(_ToDouble(x));
+            }
+            _size = a.size();
+        } else if (value.IsHolding<T>()) {
+            _num.push_back(_ToDouble(value.UncheckedGet<T>()));
+            _size = 1;
+        } else {
+            return false;
+        }
+        _elem = Elem::Number;
+        _integral = integral;
+        return true;
+    }
+
+    template <class T>
+    bool _LoadString(const VtValue &value)
+    {
+        if (value.IsHolding<VtArray<T>>()) {
+            const VtArray<T> &a = value.UncheckedGet<VtArray<T>>();
+            _str.reserve(a.size());
+            for (const T &x : a) {
+                _str.push_back(_ToString(x));
+            }
+            _size = a.size();
+        } else if (value.IsHolding<T>()) {
+            _str.push_back(_ToString(value.UncheckedGet<T>()));
+            _size = 1;
+        } else {
+            return false;
+        }
+        _elem = Elem::String;
+        return true;
+    }
+
+    template <class V>
+    bool _LoadTuple(const VtValue &value)
+    {
+        const size_t dim = V::dimension;
+        if (value.IsHolding<VtArray<V>>()) {
+            const VtArray<V> &a = value.UncheckedGet<VtArray<V>>();
+            _num.reserve(a.size() * dim);
+            for (const V &x : a) {
+                for (size_t c = 0; c < dim; ++c) {
+                    _num.push_back(_ToDouble(x[c]));
+                }
+            }
+            _size = a.size();
+        } else if (value.IsHolding<V>()) {
+            const V &x = value.UncheckedGet<V>();
+            for (size_t c = 0; c < dim; ++c) {
+                _num.push_back(_ToDouble(x[c]));
+            }
+            _size = 1;
+        } else {
+            return false;
+        }
+        _elem = Elem::Tuple;
+        _dim = dim;
+        _integral = std::is_integral<typename V::ScalarType>::value;
+        return true;
+    }
+
+    template <class T>
+    static double _ToDouble(const T &x) { return static_cast<double>(x); }
+    static double _ToDouble(const GfHalf &x)
+    {
+        return static_cast<double>(static_cast<float>(x));
+    }
+    static double _ToDouble(const bool &x) { return x ? 1.0 : 0.0; }
+    static std::string _ToString(const std::string &s) { return s; }
+    static std::string _ToString(const TfToken &t) { return t.GetString(); }
+
+    // Python int(str): optional surrounding whitespace, an optional sign, and
+    // base-10 digits, which may be grouped with single underscores.
+    static bool _ParseInt(const std::string &text, long long *out)
+    {
+        const std::string s = TfStringTrim(text);
+        size_t i = 0;
+        bool negative = false;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) {
+            negative = s[i] == '-';
+            ++i;
+        }
+        if (i >= s.size()) {
+            return false;
+        }
+        long long value = 0;
+        bool lastDigit = false;
+        for (; i < s.size(); ++i) {
+            const char ch = s[i];
+            if (ch >= '0' && ch <= '9') {
+                value = value * 10 + (ch - '0');
+                lastDigit = true;
+            } else if (ch == '_' && lastDigit && i + 1 < s.size()) {
+                lastDigit = false;
+            } else {
+                return false;
+            }
+        }
+        if (!lastDigit) {
+            return false;
+        }
+        *out = negative ? -value : value;
+        return true;
+    }
+
+    Kind _kind = Kind::None;
+    Elem _elem = Elem::Other;
+    bool _integral = false;
+    size_t _size = 0;
+    size_t _dim = 0;
+    std::vector<double> _num;
+    std::vector<std::string> _str;
+};
+
+// Python's floor division of integers, which rounds toward negative infinity.
+long long
+_PyFloorDiv(long long a, long long b)
+{
+    long long q = a / b;
+    if ((a % b != 0) && ((a < 0) != (b < 0))) {
+        --q;
+    }
+    return q;
 }
 
-// The single-attribute form of the Python brep_validator's
-// _validate_array_sizes_and_authored, which BA.295, BA.320 and BA.325 all
-// reduce to: an unauthored attribute is reported as missing, and an authored
-// one must hold exactly the expected number of entries. Python splits
-// "authored" across two attribute queries -- IsAuthored (any opinion at all)
-// decides whether the attribute counts as present, HasAuthoredValue decides
-// whether its length is read -- so a type declaration carrying no value is
-// authored with size zero. The three rules inherit that split, and the message
-// tail reproduces Python's dict repr so the native and Python validators print
-// the same counts in the same shape.
-void
-_CheckExpectedArraySize(const UsdPrim &prim, const UsdAttribute &attr,
-                        const char *attrName, size_t actual, size_t expected,
-                        const char *ruleId, const TfToken &errorName,
-                        UsdValidationErrorVector *errors)
+// The [start, end) element range of Python's sequence[start:end] on a sequence
+// of length n: negative bounds count from the end, and both are clamped.
+std::pair<size_t, size_t>
+_PySlice(long long start, long long end, size_t n)
 {
-    if (!attr || !attr.IsAuthored()) {
-        errors->emplace_back(
-            errorName, UsdValidationErrorType::Error, _PrimSites(prim),
-            TfStringPrintf(
-                "[%s] BrepArray <%s>: %s is not authored in BrepArray.",
-                ruleId, prim.GetPath().GetText(), attrName));
+    const long long len = static_cast<long long>(n);
+    if (start < 0) {
+        start = std::max(start + len, 0LL);
+    }
+    if (end < 0) {
+        end = std::max(end + len, 0LL);
+    }
+    start = std::min(start, len);
+    end = std::min(end, len);
+    if (end < start) {
+        end = start;
+    }
+    return { static_cast<size_t>(start), static_cast<size_t>(end) };
+}
+
+// Python's sequence[i] index on a sequence of length n: a negative index
+// counts from the end. False where Python raises IndexError.
+bool
+_PyIndex(long long i, size_t n, size_t *out)
+{
+    const long long len = static_cast<long long>(n);
+    if (i < 0) {
+        i += len;
+    }
+    if (i < 0 || i >= len) {
+        return false;
+    }
+    *out = static_cast<size_t>(i);
+    return true;
+}
+
+// [0] followed by the running sums of `counts` (compute_offsets in
+// _compute_brep_offsets).
+std::vector<long long>
+_PyCumulative(const std::vector<long long> &counts)
+{
+    std::vector<long long> out(1, 0);
+    long long running = 0;
+    for (const long long c : counts) {
+        running += c;
+        out.push_back(running);
+    }
+    return out;
+}
+
+// Python's repr of a list of attribute names: ['a', 'b'].
+std::string
+_PyNameList(const std::vector<std::string> &names)
+{
+    std::vector<std::string> quoted;
+    for (const std::string &n : names) {
+        quoted.push_back("'" + n + "'");
+    }
+    return "[" + TfStringJoin(quoted, ", ") + "]";
+}
+
+// The error name a rule reports under unless the finding names another. Each
+// rule keeps the name the native validators gave it before the port.
+TfToken
+_RuleErrorName(const std::string &rule)
+{
+    const auto *t = &(*UsdSolidValidationErrorNameTokens);
+    static const std::unordered_map<std::string, TfToken> names = {
+        { "BA.000", t->inconsistentBrepArraySizes },
+        { "BA.005", t->missingBrepAttributes },
+        { "BA.010", t->nonPositiveIntersectTol3d },
+        { "BA.020", t->inconsistentBrepArraySizes },
+        { "BA.025", t->invalidExtentOrder },
+        { "BA.030", t->invalidExtentOrder },
+        { "BA.035", t->invalidExtentOrder },
+        { "BA.040", t->brepExtentOutsidePrimExtent },
+        { "BA.045", t->brepExtentOutsidePrimExtent },
+        { "BA.050", t->brepExtentOutsidePrimExtent },
+        { "BA.061", t->invalidAttributeDataType },
+        { "BA.065", t->inconsistentRegionArraySizes },
+        { "BA.070", t->attributeNotAuthored },
+        { "BA.075", t->invalidRegionType },
+        { "BA.076", t->invalidAttributeDataType },
+        { "BA.080", t->inconsistentShellArraySizes },
+        { "BA.085", t->attributeNotAuthored },
+        { "BA.090", t->invalidShellPointType },
+        { "BA.091", t->invalidAttributeDataType },
+        { "BA.100", t->inconsistentFaceuseArraySizes },
+        { "BA.105", t->attributeNotAuthored },
+        { "BA.110", t->invalidFaceuseOrientationType },
+        { "BA.115", t->faceuseFaceIndexOutOfRange },
+        { "BA.116", t->invalidAttributeDataType },
+        { "BA.120", t->inconsistentFaceArraySizes },
+        { "BA.125", t->attributeNotAuthored },
+        { "BA.130", t->invalidFaceSurfaceType },
+        { "BA.135", t->invalidFaceTrimType },
+        { "BA.140", t->invalidFaceLoopCount },
+        { "BA.145", t->invalidFaceRangeStructure },
+        { "BA.150", t->inconsistentFaceArraySizes },
+        { "BA.155", t->degenerateFaceURange },
+        { "BA.160", t->degenerateFaceVRange },
+        { "BA.161", t->invalidAttributeDataType },
+        { "BA.165", t->inconsistentLoopArraySizes },
+        { "BA.170", t->attributeNotAuthored },
+        { "BA.175", t->loopVertexIndexOutOfRange },
+        { "BA.176", t->invalidAttributeDataType },
+        { "BA.180", t->inconsistentEdgeuseArraySizes },
+        { "BA.185", t->attributeNotAuthored },
+        { "BA.190", t->invalidEdgeuseOrientationType },
+        { "BA.195", t->invalidEdgeuseRadialEntryType },
+        { "BA.196", t->invalidAttributeDataType },
+        { "BA.200", t->edgeuseNextRadialIndexOutOfRange },
+        { "BA.205", t->edgeuseEdgeIndexOutOfRange },
+        { "BA.210", t->inconsistentEdgeArraySizes },
+        { "BA.215", t->attributeNotAuthored },
+        { "BA.225", t->edgeVertexIndexOutOfRange },
+        { "BA.230", t->inconsistentEdgeArraySizes },
+        { "BA.235", t->invalidEdgeRangeOrder },
+        { "BA.237", t->invalidAttributeDataType },
+        { "BA.245", t->invalidEdgeCurveType },
+        { "BA.250", t->inconsistentWireEdgeArraySizes },
+        { "BA.255", t->attributeNotAuthored },
+        { "BA.260", t->invalidWireEdgeCurveType },
+        { "BA.265", t->wireEdgeVertexIndexOutOfRange },
+        { "BA.270", t->invalidWireEdgeRangeStructure },
+        { "BA.275", t->invalidWireEdgeRangeOrder },
+        { "BA.290", t->nurbSchemaUsageInconsistent },
+        { "BA.291", t->invalidAttributeDataType },
+        { "BA.295", t->vertexArraySizeMismatch },
+        { "BA.300", t->attributeNotAuthored },
+        { "BA.305", t->schemaUsageInconsistent },
+        { "BA.310", t->vertexPositionOutsideBrepExtent },
+        { "BA.315", t->invalidVertexPointType },
+        { "BA.316", t->invalidAttributeDataType },
+        { "BA.320", t->vertexPointPositionSizeMismatch },
+        { "BA.325", t->shellPointPositionSizeMismatch },
+        { "BA.326", t->invalidAttributeDataType },
+        { "BA.327", t->invalidAttributeDataType },
+        { "BA.330", t->nurbSizeArrayMismatch },
+        { "BA.335", t->nurbNonPositiveOrder },
+        { "BA.340", t->nurbOrderExceedsVertexCount },
+        { "BA.345", t->nurbControlVertexWeightSizeMismatch },
+        { "BA.350", t->nurbNonPositiveWeight },
+        { "BA.355", t->nurbKnotCountMismatch },
+        { "BA.360", t->nurbKnotNotMonotonic },
+        { "BA.365", t->controlPointOutsideBrepExtent },
+        { "BA.370", t->nurbSchemaUsageInconsistent },
+        { "BA.371", t->nurbInvalidDataType },
+        { "BA.375", t->nurbSizeArrayMismatch },
+        { "BA.380", t->nurbNonPositiveOrder },
+        { "BA.385", t->nurbOrderExceedsVertexCount },
+        { "BA.390", t->nurbControlVertexWeightSizeMismatch },
+        { "BA.395", t->nurbKnotCountMismatch },
+        { "BA.400", t->nurbKnotNotMonotonic },
+        { "BA.405", t->nurbControlVertexWeightSizeMismatch },
+        { "BA.410", t->nurbNonPositiveWeight },
+        { "BA.415", t->nurbSchemaUsageInconsistent },
+        { "BA.416", t->nurbInvalidDataType },
+        { "BA.420", t->nurbSizeArrayMismatch },
+        { "BA.425", t->nurbNonPositiveOrder },
+        { "BA.430", t->nurbOrderExceedsVertexCount },
+        { "BA.435", t->nurbControlVertexWeightSizeMismatch },
+        { "BA.440", t->nurbNonPositiveWeight },
+        { "BA.445", t->nurbKnotCountMismatch },
+        { "BA.450", t->nurbKnotCountMismatch },
+        { "BA.455", t->nurbKnotNotMonotonic },
+        { "BA.460", t->nurbKnotNotMonotonic },
+        { "BA.465", t->controlPointOutsideBrepExtent },
+        { "BA.470", t->nurbSchemaUsageInconsistent },
+        { "BA.471", t->nurbInvalidDataType },
+        { "BA.480", t->inconsistentAnalyticSurfaceCount },
+        { "BA.481", t->nonPositiveSurfaceRadius },
+        { "BA.482", t->nonUnitSurfaceAxis },
+        { "BA.483", t->nonUnitSurfaceRefDirection },
+        { "BA.484", t->nonOrthogonalSurfaceAxes },
+        { "BA.485", t->schemaUsageInconsistent },
+        { "BA.490", t->inconsistentAnalyticSurfaceCount },
+        { "BA.491", t->nonUnitSurfaceAxis },
+        { "BA.492", t->nonUnitSurfaceRefDirection },
+        { "BA.493", t->nonOrthogonalSurfaceAxes },
+        { "BA.495", t->schemaUsageInconsistent },
+        { "BA.500", t->inconsistentAnalyticSurfaceCount },
+        { "BA.501", t->nonPositiveSurfaceRadius },
+        { "BA.502", t->nonUnitSurfaceAxis },
+        { "BA.503", t->nonUnitSurfaceRefDirection },
+        { "BA.504", t->nonOrthogonalSurfaceAxes },
+        { "BA.505", t->schemaUsageInconsistent },
+        { "BA.510", t->inconsistentAnalyticSurfaceCount },
+        { "BA.511", t->nonPositiveSurfaceRadius },
+        { "BA.512", t->nonUnitSurfaceAxis },
+        { "BA.513", t->nonUnitSurfaceRefDirection },
+        { "BA.514", t->nonOrthogonalSurfaceAxes },
+        { "BA.515", t->invalidConeSemiAngle },
+        { "BA.516", t->schemaUsageInconsistent },
+        { "BA.520", t->inconsistentAnalyticSurfaceCount },
+        { "BA.521", t->nonPositiveSurfaceRadius },
+        { "BA.522", t->nonPositiveSurfaceRadius },
+        { "BA.523", t->nonUnitSurfaceAxis },
+        { "BA.524", t->nonUnitSurfaceRefDirection },
+        { "BA.525", t->nonOrthogonalSurfaceAxes },
+        { "BA.526", t->schemaUsageInconsistent },
+        { "BA.530", t->analyticCurveArraySizeMismatch },
+        { "BA.531", t->analyticCurveNonPositiveRadius },
+        { "BA.532", t->analyticCurveAxisNotUnitLength },
+        { "BA.533", t->analyticCurveRefDirectionNotUnitLength },
+        { "BA.534", t->analyticCurveAxisRefDirectionNotOrthogonal },
+        { "BA.540", t->analyticCurveArraySizeMismatch },
+        { "BA.541", t->lineDirectionNotUnitLength },
+        { "BA.550", t->analyticCurveArraySizeMismatch },
+        { "BA.551", t->analyticCurveNonPositiveRadius },
+        { "BA.552", t->analyticCurveNonPositiveRadius },
+        { "BA.553", t->analyticCurveAxisNotUnitLength },
+        { "BA.554", t->analyticCurveRefDirectionNotUnitLength },
+        { "BA.555", t->analyticCurveAxisRefDirectionNotOrthogonal },
+        { "BA.560", t->surfaceDomainSpanExceeded },
+        { "BA.561", t->sphereVDomainOutOfBounds },
+        { "BA.562", t->surfaceDomainSpanExceeded },
+        { "BA.563", t->surfaceDomainSpanExceeded },
+        { "BA.564", t->surfaceDomainSpanExceeded },
+        { "BA.565", t->surfaceDomainSpanExceeded },
+        { "BA.570", t->edgeRangeSpanExceeded },
+        { "BA.571", t->edgeRangeSpanExceeded },
+        { "BA.580", t->faceusePairingViolation },
+        { "BA.581", t->radialEdgeuseChainNotClosed },
+        { "BA.582", t->orphanEdge },
+        { "BA.583", t->schemaUsageInconsistent },
+        { "BA.590", t->nurbOrderBelowMinimum },
+        { "BA.591", t->nurbVertexCountBelowOrder },
+        { "BA.600", t->analyticCurveEndpointVertexMismatch },
+        { "BA.601", t->analyticCurveEndpointVertexMismatch },
+        { "BA.602", t->analyticCurveEndpointVertexMismatch },
+        { "BA.610", t->circleVertexRadiusMismatch },
+        { "BA.620", t->analyticSurfaceOriginOutsideBrepExtent },
+        { "BA.630", t->angularRangeOutsidePrimaryPeriod },
+        { "BA.631", t->angularRangeOutsidePrimaryPeriod },
+        { "BA.640", t->faceVDomainNotOrdered },
+        { "BA.650", t->nurbSizeArrayMismatch },
+        { "BA.651", t->nurbOrderBelowMinimum },
+        { "BA.652", t->nurbOrderExceedsVertexCount },
+        { "BA.653", t->nurbControlVertexWeightSizeMismatch },
+        { "BA.654", t->nurbNonPositiveWeight },
+        { "BA.655", t->nurbKnotCountMismatch },
+        { "BA.656", t->nurbKnotNotMonotonic },
+        { "BA.657", t->controlPointOutsideBrepExtent },
+        { "BA.658", t->nurbSchemaDataIncomplete },
+        { "BA.660", t->nonFiniteFloatArrayValue },
+        { "BA.670", t->radialChainEdgeInconsistent },
+        { "BA.680", t->geomSubsetIndexOutOfRange },
+        { "BA.681", t->geomSubsetIndicesOverlap },
+        { "BA.682", t->geomSubsetMaterialBindingTargetMissing },
+        { "BA.700", t->regionCountBelowMinimum },
+        { "BA.701", t->regionShellCountBelowMinimum },
+        { "BA.702", t->shellWithoutContent },
+        { "BA.710", t->shellPointPositionOutsideBrepExtent },
+        { "BA.720", t->edgeCurveTypeNotExhaustive },
+        { "BA.721", t->wireEdgeCurveTypeNotExhaustive },
+        { "BA.722", t->faceSurfaceTypeNotExhaustive },
+        { "BA.730", t->nurbsEdgeEndpointVertexMismatch },
+        { "BA.750", t->uvTrimCurveOutsideFaceDomain },
+        { "BA.761", t->fullPeriodFaceNoSeamEdgeuse },
+        { "BA.762", t->fullPeriodFaceDomainNotAligned },
+        { "BA.763", t->uvLoopNotClosed },
+        { "BA.764", t->zeroLengthUvTrimCurve },
+        { "BA.765", t->analyticPeriodicDomainOutOfBounds },
+    };
+    const auto it = names.find(rule);
+    return it == names.end() ? TfToken() : it->second;
+}
+
+// The partitions brep_validator.py's _compute_brep_offsets returns: for each
+// stratum, [0] followed by the running per-Brep totals, so the objects of
+// Brep b occupy [s[b], s[b + 1]). Python integers, so a count authored as a
+// negative int[] value carries through as Python carries it.
+struct _PyOffsets
+{
+    std::vector<long long> regions, shells, faceuses, faces, loops, edgeuses,
+        edges, wireedges, vertices, edgeControlVertices,
+        surfaceControlVertices, edge3dNurbsCurves, surfaceNurbs, curveUv;
+};
+
+// One BrepArray under one validator: the ported brep_validator.py methods,
+// sharing one read of each attribute and one offset computation, reporting
+// only the rules the validator owns.
+class _BrepChecker
+{
+public:
+    _BrepChecker(const UsdPrim &prim, std::initializer_list<const char *> owned)
+        : _prim(prim), _path(prim.GetPath().GetString())
+    {
+        for (const char *rule : owned) {
+            _owned.insert(rule);
+        }
+    }
+
+    UsdValidationErrorVector TakeErrors() { return std::move(_errors); }
+
+    // _compute_brep_offsets, for the BA.091 it reports while coercing the count
+    // arrays. Every other method computes the offsets on first use too, as
+    // Python's cached helper does, so calling this first changes nothing else.
+    void ComputeBrepOffsets() { _Offsets(); }
+
+    void ValidateBrepExtent();
+    void ValidateBrepTols();
+    void ValidateBrepArray();
+    void ValidateRegionArrays();
+    void ValidateShellArrays();
+    void ValidateFaceuseArrays();
+    void ValidateFaceArrays();
+    void ValidateFaceLoopCountMinimum();
+    void ValidateFaceusePairing();
+    void ValidateFaceRanges();
+    void ValidateLoopArrays();
+    void ValidateLoopVertexIndex();
+    void ValidateEdgeAndEdgeuseAuthorship();
+    void ValidateEdgeArrays();
+    void ValidateEdgeuseArraysIfAny();
+    void ValidateWireEdgeArrays();
+    void ValidateRadialEdgeuseClosure();
+    void ValidateOrphanEdges();
+    void ValidateVertexArrays();
+    void ValidatePointPosition();
+    void ValidateTopologyGeometryCorrespondence();
+    void ValidateAttributeDataTypes();
+    void ValidateMinimumTopologyCounts();
+    void ValidateTypeCountExhaustive();
+    void ValidateRadialChainConsistency();
+
+private:
+    // --- reporting ---------------------------------------------------------
+    bool _Owns(const char *rule) const { return _owned.count(rule) != 0; }
+
+    void _Report(const char *rule, const TfToken &name,
+                 UsdValidationErrorType type, const std::string &message)
+    {
+        if (!_Owns(rule)) {
+            return;
+        }
+        _errors.emplace_back(name, type, _PrimSites(_prim),
+                             TfStringPrintf("[%s] BrepArray <%s>: %s", rule,
+                                            _path.c_str(), message.c_str()));
+    }
+
+    // _AddFailedCheck.
+    void _Fail(const char *rule, const std::string &message)
+    {
+        _Report(rule, _RuleErrorName(rule), UsdValidationErrorType::Error,
+                message);
+    }
+    void _Fail(const char *rule, const TfToken &name,
+               const std::string &message)
+    {
+        _Report(rule, name, UsdValidationErrorType::Error, message);
+    }
+    // _AddWarning.
+    void _Warn(const char *rule, const std::string &message)
+    {
+        _Report(rule, _RuleErrorName(rule), UsdValidationErrorType::Warn,
+                message);
+    }
+
+    // --- attribute access --------------------------------------------------
+    UsdAttribute _Attr(const std::string &name) const
+    {
+        return _prim.GetAttribute(TfToken(name));
+    }
+
+    // brep_array.GetAttribute(name).Get(), read once per checker.
+    const _PyValue &_Get(const std::string &name)
+    {
+        auto it = _cache.find(name);
+        if (it == _cache.end()) {
+            it = _cache.emplace(name, _PyValue::Read(_Attr(name))).first;
+        }
+        return it->second;
+    }
+
+    // BrepConstants.safe_get_attribute: [] for a missing, unregistered or
+    // non-sequence value.
+    _PyValue _SafeGet(const std::string &name)
+    {
+        const _PyValue &v = _Get(name);
+        return v.IsSequence() ? v : _PyValue::EmptyList();
+    }
+
+    // attr.IsAuthored(), on a possibly invalid attribute.
+    bool _IsAuthored(const std::string &name) const
+    {
+        const UsdAttribute a = _Attr(name);
+        return a && a.IsAuthored();
+    }
+
+    bool _HasAuthoredValue(const std::string &name) const
+    {
+        const UsdAttribute a = _Attr(name);
+        return a && a.HasAuthoredValue();
+    }
+
+    // `[int(v) for v in (values or [])]`; false where Python raises.
+    static bool _IntList(const _PyValue &value, std::vector<long long> *out)
+    {
+        out->clear();
+        const _PyValue v = value.OrEmpty();
+        if (!v.IsSequence()) {
+            return false;
+        }
+        for (size_t i = 0; i < v.Len(); ++i) {
+            long long x = 0;
+            if (!v.ToInt(i, &x)) {
+                return false;
+            }
+            out->push_back(x);
+        }
+        return true;
+    }
+
+    // sum(values) over a numeric sequence, as a double, and whether every
+    // element was numeric (Python raises on anything else).
+    static double _Sum(const _PyValue &value)
+    {
+        double total = 0.0;
+        if (value.IsNumbers()) {
+            for (size_t i = 0; i < value.Len(); ++i) {
+                total += value.Num(i);
+            }
+        }
+        return total;
+    }
+
+    // `sum(values) if values else 0` on attr.Get().
+    double _SumIfAny(const std::string &name) { return _Sum(_Get(name).OrEmpty()); }
+
+    // --- brep_validator.py helpers -----------------------------------------
+    std::pair<_PyValue, size_t> _GetAttrSequence(const std::string &name,
+                                                 const char *rule,
+                                                 const char *expectedDesc);
+    void _ValidateArraySizesAndAuthored(
+        const std::vector<std::string> &attributes, const char *rule,
+        const double *size, bool requireAuthored);
+    void _ValidateAuthorshipOnly(const std::vector<std::string> &attributes,
+                                 const char *rule);
+    void _ValidateAllowedTokens(const std::string &name,
+                                const std::vector<std::string> &allowed,
+                                const char *rule, const char *itemName);
+    struct _IndexArray
+    {
+        std::string name;
+        _PyValue values;
+    };
+    void _ValidateIndexingRelationships(const std::vector<double> &counts,
+                                        const std::vector<_IndexArray> &arrays,
+                                        const std::vector<long long> &offsets,
+                                        const char *rule);
+    void _ValidateStratumDataTypes(
+        const std::vector<std::pair<const char *, const char *>> &attributes,
+        const char *rule);
+    const _PyOffsets &_Offsets();
+    std::vector<long long> _NurbsControlVertexOffsets(
+        bool edge, const std::vector<long long> &entityOffsets);
+    std::vector<long long> _TypeCountOffsets(
+        const char *typeAttr, const char *typeToken,
+        const std::vector<long long> &entityOffsets);
+    // The Brep whose [offsets[i], offsets[i + 1]) holds `index`, if any.
+    static bool _FindBrep(const std::vector<long long> &offsets, double index,
+                          size_t *brep)
+    {
+        for (size_t i = 0; i + 1 < offsets.size(); ++i) {
+            if (offsets[i] <= index && index < offsets[i + 1]) {
+                *brep = i;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    UsdPrim _prim;
+    std::string _path;
+    std::unordered_set<std::string> _owned;
+    UsdValidationErrorVector _errors;
+    std::unordered_map<std::string, _PyValue> _cache;
+    bool _offsetsComputed = false;
+    _PyOffsets _offsets;
+};
+
+// _get_attr_sequence: the value of an authored attribute as a sequence, and
+// its length. A missing attribute, one declared without a value, or one with
+// no authored opinion reads as ([], 0) silently; an unregistered type or a
+// non-sequence value is reported under `rule` and also reads as ([], 0).
+std::pair<_PyValue, size_t>
+_BrepChecker::_GetAttrSequence(const std::string &name, const char *rule,
+                               const char *expectedDesc)
+{
+    const UsdAttribute attr = _Attr(name);
+    if (!attr || !attr.HasAuthoredValue() || !attr.IsAuthored()) {
+        return { _PyValue::EmptyList(), 0 };
+    }
+    const _PyValue &value = _Get(name);
+    if (value.IsUnregistered()) {
+        _Fail(rule, TfStringPrintf("%s has an unregistered USD type; "
+                                   "expected %s.",
+                                   name.c_str(), expectedDesc));
+        return { _PyValue::EmptyList(), 0 };
+    }
+    if (!value.IsSequence()) {
+        _Fail(rule, TfStringPrintf("%s is not a valid sequence; expected %s.",
+                                   name.c_str(), expectedDesc));
+        return { _PyValue::EmptyList(), 0 };
+    }
+    return { value, value.Len() };
+}
+
+// _validate_array_sizes_and_authored: every attribute is authored (when
+// required), the authored ones agree on their size, and that size is `size`
+// when one is given. One finding per missing attribute, one for any
+// disagreement, one for a size mismatch -- not one per attribute.
+void
+_BrepChecker::_ValidateArraySizesAndAuthored(
+    const std::vector<std::string> &attributes, const char *rule,
+    const double *size, bool requireAuthored)
+{
+    std::vector<std::pair<std::string, size_t>> sizes;
+    for (const std::string &name : attributes) {
+        if (!_IsAuthored(name)) {
+            if (requireAuthored) {
+                _Fail(rule, TfStringPrintf("%s is not authored in BrepArray.",
+                                           name.c_str()));
+            }
+        } else {
+            sizes.emplace_back(
+                name, _GetAttrSequence(name, rule, "a valid USD array").second);
+        }
+    }
+    if (sizes.empty() && !requireAuthored) {
         return;
     }
-    if (!attr.HasAuthoredValue()) {
-        actual = 0;
+    const auto sizesRepr = [&]() {
+        std::vector<std::string> parts;
+        for (const auto &s : sizes) {
+            parts.push_back(TfStringPrintf("'%s': %zu", s.first.c_str(),
+                                           s.second));
+        }
+        return "{" + TfStringJoin(parts, ", ") + "}";
+    };
+    bool consistent = true;
+    for (const auto &s : sizes) {
+        consistent = consistent && s.second == sizes.front().second;
     }
-    if (actual != expected) {
-        errors->emplace_back(
-            errorName, UsdValidationErrorType::Error, _PrimSites(prim),
-            TfStringPrintf(
-                "[%s] BrepArray <%s>: Expected size %zu does not match actual "
-                "sizes {'%s': %zu}.",
-                ruleId, prim.GetPath().GetText(), expected, attrName, actual));
+    if (!consistent) {
+        _Fail(rule,
+              TfStringPrintf("Inconsistent sizes detected across %s "
+                             "attributes: %s.",
+                             _PyNameList(attributes).c_str(),
+                             sizesRepr().c_str()));
+    }
+    if (size) {
+        bool mismatch = false;
+        for (const auto &s : sizes) {
+            mismatch = mismatch || static_cast<double>(s.second) != *size;
+        }
+        if (mismatch) {
+            _Fail(rule, TfStringPrintf(
+                            "Expected size %s does not match actual sizes %s.",
+                            _PyValue::NumRepr(*size, *size == std::trunc(*size))
+                                .c_str(),
+                            sizesRepr().c_str()));
+        }
+    }
+}
+
+// _validate_authorship_only: each attribute has an authored opinion.
+void
+_BrepChecker::_ValidateAuthorshipOnly(const std::vector<std::string> &attributes,
+                                      const char *rule)
+{
+    for (const std::string &name : attributes) {
+        if (!_IsAuthored(name)) {
+            _Fail(rule, TfStringPrintf("%s is not authored in BrepArray.",
+                                       name.c_str()));
+        }
+    }
+}
+
+// _validate_allowed_tokens: every entry of the attribute is one of `allowed`,
+// reported once per attribute, naming every offending index.
+void
+_BrepChecker::_ValidateAllowedTokens(const std::string &name,
+                                     const std::vector<std::string> &allowed,
+                                     const char *rule, const char *itemName)
+{
+    const _PyValue &values = _Get(name);
+    if (!values.Truthy() || !values.IsSequence()) {
+        return;
+    }
+    std::vector<size_t> invalid;
+    for (size_t i = 0; i < values.Len(); ++i) {
+        bool ok = false;
+        for (const std::string &a : allowed) {
+            ok = ok || values.Equals(i, a);
+        }
+        if (!ok) {
+            invalid.push_back(i);
+        }
+    }
+    if (invalid.empty()) {
+        return;
+    }
+    const std::string allowedRepr = _PyNameList(allowed);
+    if (invalid.size() == 1) {
+        const size_t i = invalid.front();
+        _Fail(rule, TfStringPrintf("%s[%zu] has invalid value '%s' for %s "
+                                   "#%zu. Allowed values are %s.",
+                                   name.c_str(), i, values.Repr(i).c_str(),
+                                   itemName, i, allowedRepr.c_str()));
+        return;
+    }
+    std::vector<std::string> details;
+    for (const size_t i : invalid) {
+        details.push_back(
+            TfStringPrintf("[%zu]='%s'", i, values.Repr(i).c_str()));
+    }
+    _Fail(rule, TfStringPrintf("%s has invalid values at indices: %s. Allowed "
+                               "values are %s.",
+                               name.c_str(), TfStringJoin(details, ", ").c_str(),
+                               allowedRepr.c_str()));
+}
+
+// _validate_indexing_relationships: each index array has one entry per
+// counted object, and block b of it (counts[b] entries) indexes inside
+// [offsets[b], offsets[b + 1]). A pair-valued entry (int2) is checked
+// component by component. An absent array (Python None) is reported even when
+// nothing is counted.
+void
+_BrepChecker::_ValidateIndexingRelationships(
+    const std::vector<double> &counts, const std::vector<_IndexArray> &arrays,
+    const std::vector<long long> &offsets, const char *rule)
+{
+    if (counts.empty()) {
+        return;
+    }
+    std::vector<double> blockOffsets(1, 0.0);
+    double total = 0.0;
+    for (const double c : counts) {
+        total += c;
+        blockOffsets.push_back(total);
+    }
+    const size_t numBreps = counts.size();
+    const std::string totalRepr = _PyValue::NumRepr(total, total == std::trunc(total));
+
+    for (const _IndexArray &a : arrays) {
+        const _PyValue &array = a.values;
+        if (!array.Truthy() && total > 0) {
+            _Fail(rule, TfStringPrintf("%s is missing or not authored, thus "
+                                       "the indexing is not valid.",
+                                       a.name.c_str()));
+            continue;
+        }
+        if (array.IsNone()) {
+            _Fail(rule, TfStringPrintf("%s is None, thus the indexing is not "
+                                       "valid.",
+                                       a.name.c_str()));
+            continue;
+        }
+        if (static_cast<double>(array.Len()) != total) {
+            _Fail(rule, TfStringPrintf("%s size %zu does not match expected "
+                                       "size %s, thus the indexing is not "
+                                       "valid.",
+                                       a.name.c_str(), array.Len(),
+                                       totalRepr.c_str()));
+            continue;
+        }
+        for (size_t b = 0; b < numBreps; ++b) {
+            if (b + 1 >= offsets.size()) {
+                _Fail(rule, TfStringPrintf("Insufficient offsets for brep_idx "
+                                           "%zu. Offsets length: %zu, expected "
+                                           "at least %zu",
+                                           b, offsets.size(), b + 2));
+                continue;
+            }
+            const double partitionStart = static_cast<double>(offsets[b]);
+            const double partitionEnd = static_cast<double>(offsets[b + 1]);
+            const auto block = _PySlice(static_cast<long long>(blockOffsets[b]),
+                                        static_cast<long long>(blockOffsets[b + 1]),
+                                        array.Len());
+            for (size_t i = block.first; i < block.second; ++i) {
+                if (array.IsTuples() && array.Dim() == 2) {
+                    for (size_t c = 0; c < 2; ++c) {
+                        const double sub = array.Tup(i, c);
+                        if (sub < partitionStart || sub >= partitionEnd) {
+                            _Fail(rule, TfStringPrintf(
+                                "%s contains invalid index %s (element %zu of "
+                                "pair %s) in block #%zu. Expected to be in "
+                                "range [%lld, %lld).",
+                                a.name.c_str(),
+                                _PyValue::NumRepr(sub, array.Integral()).c_str(),
+                                c, array.Repr(i).c_str(), b, offsets[b],
+                                offsets[b + 1]));
+                        }
+                    }
+                } else if (array.IsNumbers()) {
+                    const double idx = array.Num(i);
+                    if (idx < partitionStart || idx >= partitionEnd) {
+                        _Fail(rule, TfStringPrintf(
+                            "%s contains invalid index %s in block #%zu. "
+                            "Expected to be in range [%lld, %lld).",
+                            a.name.c_str(), array.Repr(i).c_str(), b,
+                            offsets[b], offsets[b + 1]));
+                    }
+                }
+                // Any other element type makes Python raise on the comparison;
+                // there is nothing to compare here either.
+            }
+        }
+    }
+}
+
+// _validate_stratum_data_types: an attribute with an authored value must be
+// authored with the type the schema declares for it -- or, for an attribute
+// no applied schema declares, the type listed here. The authored type is the
+// strongest spec's typeName, which keeps the role (point3d[] vs vector3d[])
+// that the held GfVec3d value does not.
+void
+_BrepChecker::_ValidateStratumDataTypes(
+    const std::vector<std::pair<const char *, const char *>> &attributes,
+    const char *rule)
+{
+    const UsdPrimDefinition &primDef = _prim.GetPrimDefinition();
+    const TfTokenVector &defined = primDef.GetPropertyNames();
+    for (const auto &entry : attributes) {
+        const TfToken name(entry.first);
+        const UsdAttribute attr = _prim.GetAttribute(name);
+        if (!attr || !attr.HasAuthoredValue()) {
+            continue;
+        }
+        const std::string schemaType = attr.GetTypeName().GetAsToken().GetString();
+        std::string authoredType;
+        for (const SdfPropertySpecHandle &spec :
+             attr.GetPropertyStack(UsdTimeCode::Default())) {
+            const SdfAttributeSpecHandle attrSpec
+                = TfDynamic_cast<SdfAttributeSpecHandle>(spec);
+            if (attrSpec && attrSpec->GetTypeName()) {
+                authoredType = attrSpec->GetTypeName().GetAsToken().GetString();
+                break;
+            }
+        }
+        const std::string actual
+            = authoredType.empty() ? schemaType : authoredType;
+        const bool schemaDefines
+            = std::find(defined.begin(), defined.end(), name) != defined.end();
+        const std::string expected = schemaDefines ? schemaType : entry.second;
+        if (actual != expected) {
+            _Fail(rule, TfStringPrintf(
+                "Invalid data type for %s. Schema expects '%s' but got "
+                "'%s'.%s",
+                entry.first, expected.c_str(), actual.c_str(),
+                authoredType.empty()
+                    ? ""
+                    : TfStringPrintf(" Authored type: '%s'.",
+                                     authoredType.c_str()).c_str()));
+        }
+    }
+}
+
+// _compute_nurbs_control_vertex_offsets: per-Brep control-vertex totals. Python
+// sums the vertex counts of the curves (or surfaces) whose index falls in each
+// Brep's edge (or face) range -- indexing the NURBS record by edge or face
+// index, not by NURBS curve index -- and that is reproduced here.
+std::vector<long long>
+_BrepChecker::_NurbsControlVertexOffsets(
+    bool edge, const std::vector<long long> &entityOffsets)
+{
+    const std::vector<long long> zeros(entityOffsets.size(), 0);
+    std::vector<long long> counts;
+    if (edge) {
+        const _PyValue vc
+            = _Get("brep:edge3dNurb:curve3d:nurb:vertexCount").OrEmpty();
+        if (!vc.Truthy() || !vc.IsNumbers()) {
+            return zeros;
+        }
+        for (size_t b = 0; b + 1 < entityOffsets.size(); ++b) {
+            long long total = 0;
+            const long long end
+                = std::min(entityOffsets[b + 1],
+                           static_cast<long long>(vc.Len()));
+            for (long long e = entityOffsets[b]; e < end; ++e) {
+                size_t i = 0;
+                if (_PyIndex(e, vc.Len(), &i)) {
+                    total += static_cast<long long>(vc.Num(i));
+                }
+            }
+            counts.push_back(total);
+        }
+    } else {
+        const _PyValue u
+            = _Get("brep:surface:nurb:uVertexCount").OrEmpty();
+        const _PyValue v
+            = _Get("brep:surface:nurb:vVertexCount").OrEmpty();
+        if (!u.Truthy() || !v.Truthy() || !u.IsNumbers() || !v.IsNumbers()) {
+            return zeros;
+        }
+        for (size_t b = 0; b + 1 < entityOffsets.size(); ++b) {
+            long long total = 0;
+            const long long end = std::min(
+                { entityOffsets[b + 1], static_cast<long long>(u.Len()),
+                  static_cast<long long>(v.Len()) });
+            for (long long f = entityOffsets[b]; f < end; ++f) {
+                size_t iu = 0, iv = 0;
+                if (_PyIndex(f, u.Len(), &iu) && _PyIndex(f, v.Len(), &iv)) {
+                    total += static_cast<long long>(u.Num(iu) * v.Num(iv));
+                }
+            }
+            counts.push_back(total);
+        }
+    }
+    return _PyCumulative(counts);
+}
+
+// _compute_edge3d_nurbs_data_offsets / _compute_surface_nurbs_data_offsets:
+// per-Brep counts of the edges (faces) whose type is the NURBS type.
+std::vector<long long>
+_BrepChecker::_TypeCountOffsets(const char *typeAttr, const char *typeToken,
+                                const std::vector<long long> &entityOffsets)
+{
+    const _PyValue types = _Get(typeAttr).OrEmpty();
+    if (!types.Truthy()) {
+        return std::vector<long long>(entityOffsets.size(), 0);
+    }
+    std::vector<long long> counts;
+    for (size_t b = 0; b + 1 < entityOffsets.size(); ++b) {
+        long long count = 0;
+        const long long end = std::min(entityOffsets[b + 1],
+                                       static_cast<long long>(types.Len()));
+        for (long long e = entityOffsets[b]; e < end; ++e) {
+            size_t i = 0;
+            if (_PyIndex(e, types.Len(), &i) && types.Equals(i, typeToken)) {
+                ++count;
+            }
+        }
+        counts.push_back(count);
+    }
+    return _PyCumulative(counts);
+}
+
+// _compute_brep_offsets.
+//
+// The count arrays are coerced to integers first; any that cannot be is
+// reported under BA.091, one finding per attribute, and every partition is
+// then empty -- which Python's downstream rules read as "no Brep owns
+// anything".
+//
+// The partitions are not all derived the same way, and Python's choices are
+// kept. Regions, shells, faceuses, faces and loops come from the count arrays.
+// With one Brep (or none), edges, vertices and edgeuses span their whole
+// authored arrays; with more than one, edges and vertices are counted from the
+// distinct indices each Brep's edgeuses reach. Faces are faceuses // 2.
+const _PyOffsets &
+_BrepChecker::_Offsets()
+{
+    if (_offsetsComputed) {
+        return _offsets;
+    }
+    _offsetsComputed = true;
+    _PyOffsets &o = _offsets;
+
+    struct Counts
+    {
+        const char *name;
+        std::vector<long long> values;
+        bool ok;
+    };
+    Counts c[6] = { { "brep:regionCount", {}, true },
+                    { "region:shellCount", {}, true },
+                    { "shell:faceuseCount", {}, true },
+                    { "face:loopCount", {}, true },
+                    { "loop:edgeuseCount", {}, true },
+                    { "shell:wireEdgeCount", {}, true } };
+    bool allOk = true;
+    for (Counts &count : c) {
+        count.ok = _IntList(_Get(count.name).NoneToEmpty(), &count.values);
+        if (!count.ok) {
+            _Fail("BA.091", TfStringPrintf("%s has invalid data type; expected "
+                                           "integers.",
+                                           count.name));
+            allOk = false;
+        }
+    }
+    if (!allOk) {
+        return o;
+    }
+    const std::vector<long long> &regionCounts = c[0].values;
+    const std::vector<long long> &shellCountsPerRegion = c[1].values;
+    const std::vector<long long> &faceuseCountsPerShell = c[2].values;
+    const std::vector<long long> &loopCountsPerFace = c[3].values;
+    const std::vector<long long> &edgeuseCountsPerLoop = c[4].values;
+    const std::vector<long long> &wireedgeCountsPerShell = c[5].values;
+
+    // sum(values[start:end]) with Python slice semantics.
+    const auto sliceSum = [](const std::vector<long long> &values,
+                             long long start, long long end) {
+        const auto r = _PySlice(start, end, values.size());
+        long long s = 0;
+        for (size_t i = r.first; i < r.second; ++i) {
+            s += values[i];
+        }
+        return s;
+    };
+    const long long nRegionCounts = static_cast<long long>(regionCounts.size());
+
+    o.regions = _PyCumulative(regionCounts);
+
+    std::vector<long long> shells;
+    for (size_t b = 0; b < regionCounts.size(); ++b) {
+        const long long start = o.regions[b];
+        long long end = o.regions[b + 1];
+        const long long n = static_cast<long long>(shellCountsPerRegion.size());
+        if (!shellCountsPerRegion.empty() && start < n) {
+            end = std::min(end, n);
+            shells.push_back(sliceSum(shellCountsPerRegion, start, end));
+        } else {
+            shells.push_back(0);
+        }
+    }
+    o.shells = _PyCumulative(shells);
+
+    std::vector<long long> faceuses;
+    for (size_t b = 0; b < shells.size(); ++b) {
+        const long long start = o.shells[b];
+        long long end = o.shells[b + 1];
+        const long long n = static_cast<long long>(faceuseCountsPerShell.size());
+        if (!faceuseCountsPerShell.empty() && start < n) {
+            end = std::min(end, n);
+            faceuses.push_back(sliceSum(faceuseCountsPerShell, start, end));
+        } else {
+            faceuses.push_back(0);
+        }
+    }
+    o.faceuses = _PyCumulative(faceuses);
+
+    std::vector<long long> faces;
+    for (const long long fu : faceuses) {
+        faces.push_back(_PyFloorDiv(fu, 2));
+    }
+    o.faces = _PyCumulative(faces);
+
+    std::vector<long long> loops;
+    if (!loopCountsPerFace.empty()) {
+        const long long maxIndex = static_cast<long long>(loopCountsPerFace.size());
+        for (size_t b = 0; b < faces.size(); ++b) {
+            const long long safeStart = std::min(o.faces[b], maxIndex);
+            const long long safeEnd = std::min(o.faces[b + 1], maxIndex);
+            loops.push_back(safeStart < safeEnd
+                                ? sliceSum(loopCountsPerFace, safeStart, safeEnd)
+                                : 0);
+        }
+    } else {
+        loops.assign(faces.empty() ? 1 : faces.size(), 0);
+    }
+    o.loops = _PyCumulative(loops);
+
+    std::vector<long long> edgeusesPerBrep;
+    for (long long b = 0; b < nRegionCounts; ++b) {
+        long long total = 0;
+        const long long loopStart = o.loops[b];
+        const long long loopEnd = std::min(
+            o.loops[b + 1], static_cast<long long>(edgeuseCountsPerLoop.size()));
+        for (long long lp = loopStart; lp < loopEnd; ++lp) {
+            size_t i = 0;
+            if (_PyIndex(lp, edgeuseCountsPerLoop.size(), &i)) {
+                total += edgeuseCountsPerLoop[i];
+            }
+        }
+        edgeusesPerBrep.push_back(total);
+    }
+    o.edgeuses = _PyCumulative(edgeusesPerBrep);
+
+    std::vector<long long> wireedges;
+    {
+        const long long maxIndex
+            = static_cast<long long>(wireedgeCountsPerShell.size());
+        for (size_t b = 0; b < shells.size(); ++b) {
+            const long long safeStart = std::min(o.shells[b], maxIndex);
+            const long long safeEnd = std::min(o.shells[b + 1], maxIndex);
+            wireedges.push_back(
+                safeStart < safeEnd
+                    ? sliceSum(wireedgeCountsPerShell, safeStart, safeEnd)
+                    : 0);
+        }
+    }
+    o.wireedges = _PyCumulative(wireedges);
+
+    const size_t numBreps = regionCounts.size();
+    long long totalEdges = 0, totalEdgeuses = 0;
+    if (numBreps > 1) {
+        const _PyValue edgeuseEdgeIndices = _Get("edgeuse:edgeIndex").OrEmpty();
+        // The distinct values a Brep's edgeuses name, kept as doubles so 5 and
+        // 5.0 are one edge, as they are in a Python set.
+        std::vector<std::set<double>> edgeSets;
+        std::vector<long long> edgeCounts;
+        for (size_t b = 0; b < numBreps; ++b) {
+            std::set<double> edges;
+            if (edgeuseEdgeIndices.IsNumbers()) {
+                const auto r = _PySlice(o.edgeuses[b], o.edgeuses[b + 1],
+                                        edgeuseEdgeIndices.Len());
+                for (size_t i = r.first; i < r.second; ++i) {
+                    edges.insert(edgeuseEdgeIndices.Num(i));
+                }
+            }
+            edgeCounts.push_back(static_cast<long long>(edges.size()));
+            edgeSets.push_back(std::move(edges));
+        }
+        o.edges = _PyCumulative(edgeCounts);
+
+        const _PyValue edgeVertexIndices = _SafeGet("edge:vertexIndices");
+        const _PyValue wireVertexIndices = _SafeGet("wireEdge:vertexIndices");
+        const _PyValue loopVertexIndices = _SafeGet("loop:vertexIndex");
+        const _PyValue loopEdgeCounts = _Get("loop:edgeuseCount").OrEmpty();
+        const auto addPair = [](const _PyValue &pairs, size_t i,
+                                std::set<double> *out) {
+            if (pairs.IsTuples() && pairs.Dim() == 2) {
+                out->insert(pairs.Tup(i, 0));
+                out->insert(pairs.Tup(i, 1));
+            }
+        };
+        std::vector<long long> vertexCounts;
+        for (size_t b = 0; b < numBreps; ++b) {
+            std::set<double> vertices;
+            for (const double e : edgeSets[b]) {
+                if (e < static_cast<double>(edgeVertexIndices.Len())
+                    && e == std::trunc(e)) {
+                    size_t i = 0;
+                    if (_PyIndex(static_cast<long long>(e),
+                                 edgeVertexIndices.Len(), &i)) {
+                        addPair(edgeVertexIndices, i, &vertices);
+                    }
+                }
+            }
+            // Python walks the Brep's shells but indexes the per-Brep wire-edge
+            // partition with the shell index; kept as is.
+            for (long long s = o.shells[b]; s < o.shells[b + 1]; ++s) {
+                if (s < static_cast<long long>(o.wireedges.size()) - 1) {
+                    size_t si = 0;
+                    if (!_PyIndex(s, o.wireedges.size(), &si)
+                        || si + 1 >= o.wireedges.size()) {
+                        continue;
+                    }
+                    const long long end = std::min(
+                        o.wireedges[si + 1],
+                        static_cast<long long>(wireVertexIndices.Len()));
+                    for (long long w = o.wireedges[si]; w < end; ++w) {
+                        size_t i = 0;
+                        if (_PyIndex(w, wireVertexIndices.Len(), &i)) {
+                            addPair(wireVertexIndices, i, &vertices);
+                        }
+                    }
+                }
+            }
+            const long long loopEnd = std::min(
+                { o.loops[b + 1],
+                  static_cast<long long>(loopVertexIndices.Len()),
+                  static_cast<long long>(loopEdgeCounts.Len()) });
+            for (long long lp = o.loops[b]; lp < loopEnd; ++lp) {
+                size_t i = 0, j = 0;
+                if (_PyIndex(lp, loopEdgeCounts.Len(), &i)
+                    && _PyIndex(lp, loopVertexIndices.Len(), &j)
+                    && loopEdgeCounts.IsNumbers() && loopEdgeCounts.Num(i) == 0
+                    && loopVertexIndices.IsNumbers()) {
+                    vertices.insert(loopVertexIndices.Num(j));
+                }
+            }
+            vertexCounts.push_back(static_cast<long long>(vertices.size()));
+        }
+        o.vertices = _PyCumulative(vertexCounts);
+    } else {
+        totalEdges = static_cast<long long>(_SafeGet("edge:vertexIndices").Len());
+        const long long totalVertices
+            = static_cast<long long>(_SafeGet("vertex:pointType").Len());
+        totalEdgeuses
+            = static_cast<long long>(_SafeGet("edgeuse:edgeIndex").Len());
+        o.edges = { 0, totalEdges };
+        o.vertices = { 0, totalVertices };
+        o.edgeuses = { 0, totalEdgeuses };
+    }
+
+    const long long totalFaces
+        = faces.empty() ? 0 : std::accumulate(faces.begin(), faces.end(), 0LL);
+    const std::vector<long long> edgeRange
+        = numBreps > 1 ? o.edges : std::vector<long long>{ 0, totalEdges };
+    const std::vector<long long> faceRange
+        = numBreps > 1 ? o.faces : std::vector<long long>{ 0, totalFaces };
+    o.edgeControlVertices = _NurbsControlVertexOffsets(true, edgeRange);
+    o.surfaceControlVertices = _NurbsControlVertexOffsets(false, faceRange);
+    o.edge3dNurbsCurves = _TypeCountOffsets("edge:curveType",
+                                            "BrepCurve3dNurbAPI", edgeRange);
+    o.surfaceNurbs = _TypeCountOffsets("face:surfaceType",
+                                       "BrepSurfaceNurbAPI", faceRange);
+    o.curveUv = numBreps > 1 ? o.edgeuses
+                             : std::vector<long long>{ 0, totalEdgeuses };
+    return o;
+}
+
+// brep_validator.py's isFloatLessThan / isFloatGreaterThan: an ordering that
+// ignores single-precision noise (math.isclose with rel_tol 1e-5, abs_tol
+// 1e-6), for comparisons against the float3 prim extent.
+bool
+_PyIsClose(double a, double b)
+{
+    return std::abs(a - b)
+        <= std::max(1e-5 * std::max(std::abs(a), std::abs(b)), 1e-6);
+}
+
+bool
+_PyIsFloatLessThan(double p, double e)
+{
+    return p < e && !_PyIsClose(p, e);
+}
+
+bool
+_PyIsFloatGreaterThan(double p, double e)
+{
+    return p > e && !_PyIsClose(p, e);
+}
+
+// _validate_brep_extent: brep:extent holds one (min, max) corner pair per
+// Brep, each pair ordered on every axis (BA.025 X, BA.030 Y, BA.035 Z), and
+// each box inside the prim's own extent (BA.040 X, BA.045 Y, BA.050 Z). A
+// wrong number of corners is BA.020 and ends the rule.
+void
+_BrepChecker::ValidateBrepExtent()
+{
+    const _PyValue &primExtent = _Get("extent");
+    const bool havePrimExtent = primExtent.Truthy() && primExtent.IsTuples()
+        && primExtent.Len() >= 2 && primExtent.Dim() >= 3;
+
+    const _PyValue brepExtents = _SafeGet("brep:extent");
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    const size_t expected = numBreps * 2;
+    if (brepExtents.Len() != expected) {
+        _Fail("BA.020", TfStringPrintf("Invalid brep:extent structure. "
+                                       "Expected %zu elements (2 * %zu Breps), "
+                                       "but got %zu.",
+                                       expected, numBreps, brepExtents.Len()));
+        return;
+    }
+    static const char *const axes[3] = { "X", "Y", "Z" };
+    static const char *const orderRules[3] = { "BA.025", "BA.030", "BA.035" };
+    static const char *const containRules[3] = { "BA.040", "BA.045", "BA.050" };
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (!brepExtents.IsTuples() || brepExtents.Dim() != 3) {
+            // len(point) raises for a scalar element (caught by the rule) and
+            // differs from 3 for a 2- or 4-tuple.
+            _Fail("BA.020",
+                  brepExtents.IsTuples()
+                      ? TfStringPrintf("Invalid brep:extent structure for Brep "
+                                       "#%zu. Each point must have exactly 3 "
+                                       "coordinates (XYZ).",
+                                       b)
+                      : TfStringPrintf("Invalid brep:extent data type or "
+                                       "structure for Brep #%zu. Cannot access "
+                                       "extent points.",
+                                       b));
+            continue;
+        }
+        const size_t lo = 2 * b, hi = 2 * b + 1;
+        for (int a = 0; a < 3; ++a) {
+            const double mn = brepExtents.Tup(lo, a);
+            const double mx = brepExtents.Tup(hi, a);
+            if (mx < mn - _PyNumericalTolerance) {
+                _Fail(orderRules[a],
+                      TfStringPrintf("Invalid brep:extent %s order for Brep "
+                                     "#%zu. %smin (%s) must be <= %smax (%s).",
+                                     axes[a], b, axes[a],
+                                     _PyValue::NumRepr(mn, false).c_str(),
+                                     axes[a],
+                                     _PyValue::NumRepr(mx, false).c_str()));
+            }
+        }
+        if (!havePrimExtent) {
+            continue;
+        }
+        for (int a = 0; a < 3; ++a) {
+            const double mn = brepExtents.Tup(lo, a);
+            const double mx = brepExtents.Tup(hi, a);
+            const double pmn = primExtent.Tup(0, a);
+            const double pmx = primExtent.Tup(1, a);
+            if (_PyIsFloatLessThan(mn, pmn) || _PyIsFloatGreaterThan(mx, pmx)) {
+                _Fail(containRules[a],
+                      TfStringPrintf("brep:extent for Brep #%zu is outside the "
+                                     "prim's %s extent. Brep range: (%g, %g), "
+                                     "Prim range: (%g, %g).",
+                                     b, axes[a], mn, mx, pmn, pmx));
+            }
+        }
+    }
+}
+
+// _validate_brep_tols: every brep:intersectTol3d value is at least
+// NUMERICAL_TOLERANCE. A NaN compares false and passes, as in Python.
+void
+_BrepChecker::ValidateBrepTols()
+{
+    const _PyValue tol = _Get("brep:intersectTol3d").NoneToEmpty();
+    if (!tol.IsNumbers()) {
+        return;
+    }
+    for (size_t i = 0; i < tol.Len(); ++i) {
+        if (tol.Num(i) < _PyNumericalTolerance) {
+            _Fail("BA.010", TfStringPrintf("brep:intersectTol3d[%zu] must be a "
+                                           "positive value.",
+                                           i));
+        }
+    }
+}
+
+// _validate_brep_array: the three Brep attributes are authored (BA.005), the
+// two per-Brep ones agree in size, and brep:extent holds two corners per Brep
+// (BA.000).
+void
+_BrepChecker::ValidateBrepArray()
+{
+    _ValidateAuthorshipOnly(
+        { "brep:intersectTol3d", "brep:extent", "brep:regionCount" }, "BA.005");
+    _ValidateArraySizesAndAuthored({ "brep:intersectTol3d", "brep:regionCount" },
+                                   "BA.000", nullptr, false);
+    const _PyValue &extent = _Get("brep:extent");
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (!extent.IsNone() && numBreps > 0 && extent.IsSequence()
+        && extent.Len() != numBreps * 2) {
+        _Fail("BA.000", TfStringPrintf("brep:extent size (%zu) does not match "
+                                       "expected size (%zu) for %zu Breps.",
+                                       extent.Len(), numBreps * 2, numBreps));
+    }
+}
+
+// _validate_region_arrays: BA.070 authorship, BA.065 sizes against
+// sum(brep:regionCount), BA.075 region:type tokens.
+void
+_BrepChecker::ValidateRegionArrays()
+{
+    const double regionCount = _SumIfAny("brep:regionCount");
+    const std::vector<std::string> attrs = { "region:shellCount",
+                                             "region:type" };
+    _ValidateAuthorshipOnly(attrs, "BA.070");
+    _ValidateArraySizesAndAuthored(attrs, "BA.065", &regionCount, false);
+    _ValidateAllowedTokens("region:type", { "solidRegion", "voidRegion" },
+                           "BA.075", "region");
+}
+
+// _validate_shell_arrays: BA.085 authorship, BA.080 sizes against
+// sum(region:shellCount), BA.090 shell:pointType tokens.
+void
+_BrepChecker::ValidateShellArrays()
+{
+    const double shellCount = _SumIfAny("region:shellCount");
+    const std::vector<std::string> attrs
+        = { "shell:faceuseCount", "shell:wireEdgeCount", "shell:pointType" };
+    _ValidateAuthorshipOnly(attrs, "BA.085");
+    _ValidateArraySizesAndAuthored(attrs, "BA.080", &shellCount, false);
+    _ValidateAllowedTokens("shell:pointType", { "BrepPointAPI", "none" },
+                           "BA.090", "shell");
+}
+
+// _validate_faceuse_arrays: shell:faceuseCount must coerce to integers
+// (BA.091), BA.105 authorship, BA.100 sizes against sum(shell:faceuseCount),
+// BA.110 orientation tokens, and BA.115 faceuse:faceIndex inside each Brep's
+// face partition. One Brep's faceuse total is the sum over every shell; with
+// several Breps it is accumulated region by region.
+void
+_BrepChecker::ValidateFaceuseArrays()
+{
+    std::vector<long long> faceuseCounts;
+    if (!_IntList(_Get("shell:faceuseCount").OrEmpty(), &faceuseCounts)) {
+        _Fail("BA.091", "shell:faceuseCount has invalid data type; expected "
+                        "integers.");
+        faceuseCounts.clear();
+    }
+    const double faceuseCount = static_cast<double>(
+        std::accumulate(faceuseCounts.begin(), faceuseCounts.end(), 0LL));
+    const std::vector<std::string> attrs = { "faceuse:faceIndex",
+                                             "faceuse:orientationType" };
+    _ValidateAuthorshipOnly(attrs, "BA.105");
+    _ValidateArraySizesAndAuthored(attrs, "BA.100", &faceuseCount, false);
+    _ValidateAllowedTokens("faceuse:orientationType", { "same", "opposite" },
+                           "BA.110", "faceuse");
+
+    const _PyValue regionCounts = _Get("brep:regionCount").OrEmpty();
+    std::vector<double> brepFaceuseCounts;
+    if (regionCounts.Len() == 1) {
+        brepFaceuseCounts.push_back(faceuseCount);
+    } else if (regionCounts.IsNumbers()) {
+        const _PyValue shellsPerRegion = _Get("region:shellCount").OrEmpty();
+        size_t shellIdx = 0;
+        long long regionIdx = 0;
+        for (size_t b = 0; b < regionCounts.Len(); ++b) {
+            long long total = 0;
+            const long long regionEnd
+                = regionIdx + static_cast<long long>(regionCounts.Num(b));
+            for (long long r = regionIdx; r < regionEnd; ++r) {
+                size_t ri = 0;
+                if (r < static_cast<long long>(shellsPerRegion.Len())
+                    && _PyIndex(r, shellsPerRegion.Len(), &ri)
+                    && shellsPerRegion.IsNumbers()) {
+                    const long long shellsInRegion
+                        = static_cast<long long>(shellsPerRegion.Num(ri));
+                    for (long long s = 0; s < shellsInRegion; ++s) {
+                        if (shellIdx < faceuseCounts.size()) {
+                            total += faceuseCounts[shellIdx];
+                            ++shellIdx;
+                        }
+                    }
+                }
+            }
+            brepFaceuseCounts.push_back(static_cast<double>(total));
+            regionIdx = regionEnd;
+        }
+    }
+    _ValidateIndexingRelationships(
+        brepFaceuseCounts, { { "faceuse:faceIndex", _Get("faceuse:faceIndex") } },
+        _Offsets().faces, "BA.115");
+}
+
+// _validate_face_arrays: BA.125 authorship; with faces present (counted as
+// len(faceuse:faceIndex) // 2), BA.120 sizes of the per-face arrays and
+// BA.150 face:range holding two entries per face; with none, every face array
+// empty (BA.120). BA.130 / BA.135 tokens either way.
+void
+_BrepChecker::ValidateFaceArrays()
+{
+    const std::vector<std::string> standard
+        = { "face:loopCount", "face:trimType", "face:surfaceType" };
+    const _PyValue faceuseFaceIndices = _Get("faceuse:faceIndex").OrEmpty();
+    const double expectedFaces = static_cast<double>(
+        faceuseFaceIndices.Truthy() ? faceuseFaceIndices.Len() / 2 : 0);
+
+    std::vector<std::string> all = standard;
+    all.push_back("face:range");
+    _ValidateAuthorshipOnly(all, "BA.125");
+    if (expectedFaces > 0) {
+        _ValidateArraySizesAndAuthored(standard, "BA.120", &expectedFaces,
+                                       false);
+        const size_t ranges = _Get("face:range").OrEmpty().Len();
+        if (static_cast<double>(ranges) != expectedFaces * 2) {
+            _Fail("BA.150", TfStringPrintf("face:range size mismatch. Expected "
+                                           "%zu elements (2 UV pairs per "
+                                           "face), but got %zu.",
+                                           static_cast<size_t>(expectedFaces) * 2,
+                                           ranges));
+        }
+    } else {
+        _ValidateArraySizesAndAuthored(all, "BA.120", &expectedFaces, false);
+    }
+    _ValidateAllowedTokens(
+        "face:surfaceType",
+        { "BrepSurfaceNurbAPI", "BrepSurfaceSphereAPI", "BrepSurfacePlaneAPI",
+          "BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI",
+          "BrepSurfaceTorusAPI" },
+        "BA.130", "face");
+    _ValidateAllowedTokens("face:trimType", { "rectangular", "general" },
+                           "BA.135", "face");
+}
+
+// _validate_face_loop_count_minimum (BA.140): every face inside a Brep's face
+// partition has at least one loop. Faces past the partition are not checked.
+void
+_BrepChecker::ValidateFaceLoopCountMinimum()
+{
+    const _PyValue loopCounts = _Get("face:loopCount").OrEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (!loopCounts.Truthy() || numBreps == 0 || !loopCounts.IsNumbers()) {
+        return;
+    }
+    const std::vector<long long> &faceOffsets = _Offsets().faces;
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= faceOffsets.size()) {
+            break;
+        }
+        const long long end = std::min(
+            faceOffsets[b + 1], static_cast<long long>(loopCounts.Len()));
+        for (long long f = faceOffsets[b]; f < end; ++f) {
+            size_t i = 0;
+            if (!_PyIndex(f, loopCounts.Len(), &i)) {
+                continue;
+            }
+            if (loopCounts.Num(i) < 1) {
+                _Fail("BA.140", TfStringPrintf("Face #%lld in brep #%zu has "
+                                               "loopCount = %s, but each face "
+                                               "must have at least one loop.",
+                                               f, b,
+                                               loopCounts.Repr(i).c_str()));
+            }
+        }
+    }
+}
+
+// _validate_faceuse_pairing (BA.580): within each Brep, every face of its face
+// partition is named by exactly two of its faceuses.
+void
+_BrepChecker::ValidateFaceusePairing()
+{
+    const _PyValue faceIndices = _Get("faceuse:faceIndex").OrEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (!faceIndices.Truthy() || numBreps == 0) {
+        return;
+    }
+    const _PyOffsets &o = _Offsets();
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= o.faceuses.size() || b + 1 >= o.faces.size()) {
+            break;
+        }
+        std::map<double, long long> refCounts;
+        const long long fuEnd = std::min(
+            o.faceuses[b + 1], static_cast<long long>(faceIndices.Len()));
+        for (long long fu = o.faceuses[b]; fu < fuEnd; ++fu) {
+            size_t i = 0;
+            if (_PyIndex(fu, faceIndices.Len(), &i) && faceIndices.IsNumbers()) {
+                ++refCounts[faceIndices.Num(i)];
+            }
+        }
+        for (long long f = o.faces[b]; f < o.faces[b + 1]; ++f) {
+            const auto it = refCounts.find(static_cast<double>(f));
+            const long long count = it == refCounts.end() ? 0 : it->second;
+            if (count != 2) {
+                _Fail("BA.580", TfStringPrintf("Face #%lld in brep #%zu is "
+                                               "referenced by %lld faceuse(s), "
+                                               "expected exactly 2.",
+                                               f, b, count));
+            }
+        }
+    }
+}
+
+// _validate_face_ranges: BA.145 face:range is double2[] with finite pairs (an
+// unregistered type ends the rule), then BA.155 / BA.160 each face's U and V
+// intervals are non-degenerate (max >= min + NUMERICAL_TOLERANCE).
+//
+// The type test reads the attribute's type name, which for this schema
+// attribute is always the declared double2[] whatever was authored -- a
+// float2[] face:range passes it here as in Python; BA.161 reports the
+// authored type.
+void
+_BrepChecker::ValidateFaceRanges()
+{
+    const _PyValue &raw = _Get("face:range");
+    if (raw.IsUnregistered()) {
+        _Fail("BA.145", "face:range has an unregistered USD type; expected "
+                        "double2[].");
+        return;
+    }
+    const _PyValue ranges = raw.OrEmpty();
+    const std::vector<long long> &faceOffsets = _Offsets().faces;
+
+    const UsdAttribute attr = _Attr("face:range");
+    if (attr) {
+        const std::string type = attr.GetTypeName().GetAsToken().GetString();
+        if (type != "double2[]") {
+            _Fail("BA.145", TfStringPrintf(
+                "Invalid face:range type. Expected 'double2[]' but got '%s'. "
+                "face:range must be double2[] to ensure exactly 2 elements per "
+                "range (UV min and max pairs).",
+                type.c_str()));
+        } else if (ranges.IsTuples()) {
+            for (size_t i = 0; i < ranges.Len(); ++i) {
+                if (ranges.Dim() != 2) {
+                    _Fail("BA.145", TfStringPrintf(
+                        "Invalid face:range structure at index %zu. Expected "
+                        "exactly 2 elements per range (UV pair) but got %zu "
+                        "elements.",
+                        i, ranges.Dim()));
+                    continue;
+                }
+                const double u = ranges.Tup(i, 0), v = ranges.Tup(i, 1);
+                if (std::isnan(u) || std::isnan(v)) {
+                    _Fail("BA.145", TfStringPrintf(
+                        "Invalid face:range structure at index %zu. Contains "
+                        "NaN values (%s, %s). face:range must contain valid "
+                        "numeric UV pairs.",
+                        i, _PyValue::NumRepr(u, false).c_str(),
+                        _PyValue::NumRepr(v, false).c_str()));
+                } else if (std::isinf(u) || std::isinf(v)) {
+                    _Fail("BA.145", TfStringPrintf(
+                        "Invalid face:range structure at index %zu. Contains "
+                        "infinite values (%s, %s). face:range must contain "
+                        "finite numeric UV pairs.",
+                        i, _PyValue::NumRepr(u, false).c_str(),
+                        _PyValue::NumRepr(v, false).c_str()));
+                }
+            }
+        }
+    }
+
+    if (!ranges.IsTuples() || ranges.Dim() < 2) {
+        return;
+    }
+    for (size_t i = 0; i + 1 < ranges.Len(); i += 2) {
+        const size_t face = i / 2;
+        // Python's loop variable keeps the last Brep it tried when no
+        // partition holds the face.
+        size_t brep = 0;
+        size_t local = face;
+        if (!_FindBrep(faceOffsets, static_cast<double>(face), &brep)) {
+            brep = faceOffsets.size() >= 2 ? faceOffsets.size() - 2 : 0;
+        } else {
+            local = face - static_cast<size_t>(faceOffsets[brep]);
+        }
+        const double uMin = ranges.Tup(i, 0), vMin = ranges.Tup(i, 1);
+        const double uMax = ranges.Tup(i + 1, 0), vMax = ranges.Tup(i + 1, 1);
+        if (uMax < uMin + _PyNumericalTolerance) {
+            _Fail("BA.155", TfStringPrintf(
+                "Invalid face:range U values (%s, %s) for face #%zu in brep "
+                "#%zu. Ensure U range is specified as (Umin, Umax) where Umax "
+                "> Umin.",
+                _PyValue::NumRepr(uMin, false).c_str(),
+                _PyValue::NumRepr(uMax, false).c_str(), local, brep));
+        }
+        if (vMax < vMin + _PyNumericalTolerance) {
+            _Fail("BA.160", TfStringPrintf(
+                "Invalid face:range V values (%s, %s) for face #%zu in brep "
+                "#%zu. Ensure V range is specified as (Vmin, Vmax) where Vmax "
+                "> Vmin.",
+                _PyValue::NumRepr(vMin, false).c_str(),
+                _PyValue::NumRepr(vMax, false).c_str(), local, brep));
+        }
+    }
+}
+
+// _validate_loop_arrays: BA.170 authorship, BA.165 sizes against
+// sum(face:loopCount).
+void
+_BrepChecker::ValidateLoopArrays()
+{
+    const double expected = _SumIfAny("face:loopCount");
+    const std::vector<std::string> attrs = { "loop:edgeuseCount",
+                                             "loop:vertexIndex" };
+    _ValidateAuthorshipOnly(attrs, "BA.170");
+    _ValidateArraySizesAndAuthored(attrs, "BA.165", &expected, false);
+}
+
+// _validate_loop_vertex_index (BA.175): a loop with no edgeuses names a vertex
+// inside its Brep's vertex partition, and the loop arrays reach the end of
+// each Brep's loop partition.
+void
+_BrepChecker::ValidateLoopVertexIndex()
+{
+    const _PyValue loopVertexIndices = _Get("loop:vertexIndex").OrEmpty();
+    const _PyValue loopEdgeuseCounts = _Get("loop:edgeuseCount").OrEmpty();
+    const long long numVertices
+        = static_cast<long long>(_SafeGet("vertex:pointType").Len());
+    const _PyOffsets &o = _Offsets();
+    const size_t n = std::min(o.loops.size(), o.vertices.size());
+    for (size_t b = 0; b + 1 < n; ++b) {
+        const long long loopStart = o.loops[b], loopEnd = o.loops[b + 1];
+        const long long vStart = o.vertices[b], vEnd = o.vertices[b + 1];
+        const long long safeVStart = std::min(vStart, numVertices);
+        const long long safeVEnd = std::min(vEnd, numVertices);
+        const long long maxLoop = std::min(
+            { loopEnd, static_cast<long long>(loopEdgeuseCounts.Len()),
+              static_cast<long long>(loopVertexIndices.Len()) });
+        if (maxLoop < loopEnd) {
+            _Fail("BA.175", TfStringPrintf(
+                "loop:edgeuseCount/loop:vertexIndex missing data for Brep[%zu] "
+                "(expected loops up to %lld, but only %lld entries are "
+                "available).",
+                b, loopEnd, maxLoop));
+        }
+        if (!loopEdgeuseCounts.IsNumbers() || !loopVertexIndices.IsNumbers()) {
+            continue;
+        }
+        for (long long lp = loopStart; lp < maxLoop; ++lp) {
+            size_t i = 0, j = 0;
+            if (!_PyIndex(lp, loopEdgeuseCounts.Len(), &i)
+                || !_PyIndex(lp, loopVertexIndices.Len(), &j)) {
+                continue;
+            }
+            if (loopEdgeuseCounts.Num(i) != 0) {
+                continue;
+            }
+            const double v = loopVertexIndices.Num(j);
+            if (v < static_cast<double>(safeVStart)
+                || v >= static_cast<double>(safeVEnd)) {
+                _Fail("BA.175", TfStringPrintf(
+                    "Invalid loop:vertexIndex `%s` for Brep[%zu] when "
+                    "loop:edgeuseCount == 0. Expected to be in the vertex "
+                    "range [%lld, %lld).",
+                    loopVertexIndices.Repr(j).c_str(), b, vStart, vEnd));
+            }
+        }
+    }
+}
+
+// CheckPrim's own BA.215 / BA.185 authorship checks for the edge and edgeuse
+// families.
+void
+_BrepChecker::ValidateEdgeAndEdgeuseAuthorship()
+{
+    _ValidateAuthorshipOnly(
+        { "edge:curveType", "edge:vertexIndices", "edge:range" }, "BA.215");
+    _ValidateAuthorshipOnly({ "edgeuse:edgeIndex", "edgeuse:orientationType",
+                              "edgeuse:nextRadialEUIndex",
+                              "edgeuse:thisRadialEntryType" },
+                            "BA.185");
+}
+
+// _validate_edge_arrays. BA.237 for an unreadable edge:vertexIndices or
+// edge:range; BA.210 edge array sizes (with edges present, curveType against
+// vertexIndices only) and BA.230 two edge:range entries per edge; BA.245
+// curve-type tokens; BA.225 each vertexIndices pair inside its Brep's vertex
+// partition -- a malformed pair is reported once and ends the rule, skipping
+// the BA.235 check after it; BA.235 each edge:range pair ordered.
+void
+_BrepChecker::ValidateEdgeArrays()
+{
+    const std::vector<std::string> standard = { "edge:curveType",
+                                                "edge:vertexIndices" };
+    const auto vertexIndicesSeq
+        = _GetAttrSequence("edge:vertexIndices", "BA.237", "int2[]");
+    const _PyValue &edgeVertexIndices = vertexIndicesSeq.first;
+    const size_t expectedEdges = vertexIndicesSeq.second;
+    const auto rangeSeq = _GetAttrSequence("edge:range", "BA.237", "double[]");
+    const _PyValue &edgeRanges = rangeSeq.first;
+
+    if (expectedEdges > 0) {
+        _ValidateArraySizesAndAuthored(standard, "BA.210", nullptr, false);
+        if (rangeSeq.second != expectedEdges * 2) {
+            _Fail("BA.230", TfStringPrintf(
+                "Invalid edge:range per-edge structure. Expected exactly 2 "
+                "elements per edge (%zu edges x 2 = %zu elements), but got %zu "
+                "elements.",
+                expectedEdges, expectedEdges * 2, rangeSeq.second));
+        }
+    } else {
+        std::vector<std::string> all = standard;
+        all.push_back("edge:range");
+        _ValidateArraySizesAndAuthored(all, "BA.210", nullptr, false);
+    }
+    _ValidateAllowedTokens("edge:curveType",
+                           { "BrepCurve3dNurbAPI", "BrepCurve3dCircleAPI",
+                             "BrepCurve3dLineAPI", "BrepCurve3dEllipseAPI" },
+                           "BA.245", "edge");
+
+    const _PyOffsets &o = _Offsets();
+    const auto edgeContext = [&](size_t edge) {
+        size_t brep = 0;
+        if (o.edges.size() > 1
+            && _FindBrep(o.edges, static_cast<double>(edge), &brep)) {
+            return TfStringPrintf(" (edge #%zu in brep #%zu)", edge, brep);
+        }
+        return TfStringPrintf(" (edge #%zu)", edge);
+    };
+
+    if (edgeVertexIndices.Truthy()) {
+        if (!edgeVertexIndices.IsTuples()) {
+            _Fail("BA.225", TfStringPrintf("edge:vertexIndices entry is not a "
+                                           "2-element index pair%s.",
+                                           edgeContext(0).c_str()));
+            return;
+        }
+        if (edgeVertexIndices.Dim() != 2) {
+            _Fail("BA.225", TfStringPrintf("Each entry in edge:vertexIndices "
+                                           "must contain exactly two vertex "
+                                           "indices%s.",
+                                           edgeContext(0).c_str()));
+            return;
+        }
+        _GetAttrSequence("vertex:pointType", "BA.316", "int[]");
+        std::vector<double> first, second;
+        for (size_t e = 0; e < edgeVertexIndices.Len(); ++e) {
+            first.push_back(edgeVertexIndices.Tup(e, 0));
+            second.push_back(edgeVertexIndices.Tup(e, 1));
+        }
+        std::vector<double> edgeCounts;
+        for (size_t b = 0; b + 1 < o.edges.size(); ++b) {
+            edgeCounts.push_back(
+                static_cast<double>(o.edges[b + 1] - o.edges[b]));
+        }
+        if (edgeCounts.empty()) {
+            edgeCounts.push_back(static_cast<double>(edgeVertexIndices.Len()));
+        }
+        const bool integral = edgeVertexIndices.Integral();
+        _ValidateIndexingRelationships(
+            edgeCounts,
+            { { "first_vertex", _PyValue::Numbers(first, integral) },
+              { "second_vertex", _PyValue::Numbers(second, integral) } },
+            o.vertices, "BA.225");
+    }
+
+    for (size_t i = 0; i + 1 < edgeRanges.Len(); i += 2) {
+        double mn = 0.0, mx = 0.0;
+        if (!edgeRanges.ToFloat(i, &mn) || !edgeRanges.ToFloat(i + 1, &mx)) {
+            _Fail("BA.235", TfStringPrintf("edge:range contains non-numeric "
+                                           "values at indices %zu and %zu.",
+                                           i, i + 1));
+            continue;
+        }
+        if (mx < mn - _PyNumericalTolerance) {
+            size_t brep = 0;
+            const std::string ctx
+                = (o.edges.size() > 1
+                   && _FindBrep(o.edges, static_cast<double>(i / 2), &brep))
+                ? TfStringPrintf(" in brep #%zu", brep)
+                : std::string();
+            _Fail("BA.235", TfStringPrintf(
+                "Invalid edge:range order ([%s, %s]) for edge #%zu%s. Ensure "
+                "the range is specified as (min, max) where min <= max.",
+                edgeRanges.Repr(i).c_str(), edgeRanges.Repr(i + 1).c_str(),
+                i / 2, ctx.c_str()));
+        }
+    }
+}
+
+// CheckPrim runs _validate_edgeuse_arrays only when the edgeuse partition is
+// non-empty: BA.180 edgeuse array sizes against sum(loop:edgeuseCount),
+// BA.190 / BA.195 tokens, BA.205 edgeuse:edgeIndex inside each Brep's edge
+// partition and BA.200 edgeuse:nextRadialEUIndex inside its edgeuse partition.
+// An unreadable edgeuse:edgeIndex or nextRadialEUIndex is BA.185, an
+// unreadable edge:curveType BA.215.
+void
+_BrepChecker::ValidateEdgeuseArraysIfAny()
+{
+    const _PyOffsets &o = _Offsets();
+    if (o.edgeuses.size() <= 1 || o.edgeuses.back() <= 0) {
+        return;
+    }
+    const double expected = _SumIfAny("loop:edgeuseCount");
+    _ValidateArraySizesAndAuthored(
+        { "edgeuse:edgeIndex", "edgeuse:orientationType",
+          "edgeuse:nextRadialEUIndex", "edgeuse:thisRadialEntryType" },
+        "BA.180", &expected, false);
+    _ValidateAllowedTokens("edgeuse:orientationType", { "same", "opposite" },
+                           "BA.190", "edgeuse");
+    _ValidateAllowedTokens("edgeuse:thisRadialEntryType",
+                           { "topEntry", "bottomEntry" }, "BA.195", "edgeuse");
+
+    const _PyValue edgeIndex
+        = _GetAttrSequence("edgeuse:edgeIndex", "BA.185", "uint[]").first;
+    _GetAttrSequence("edge:curveType", "BA.215", "token[]");
+
+    std::vector<double> brepEdgeuseCounts;
+    for (size_t b = 0; b + 1 < o.edgeuses.size(); ++b) {
+        brepEdgeuseCounts.push_back(
+            static_cast<double>(o.edgeuses[b + 1] - o.edgeuses[b]));
+    }
+    _ValidateIndexingRelationships(brepEdgeuseCounts,
+                                   { { "edgeuse:edgeIndex", edgeIndex } },
+                                   o.edges, "BA.205");
+
+    const _PyValue nextRadial
+        = _GetAttrSequence("edgeuse:nextRadialEUIndex", "BA.185", "uint[]").first;
+    _GetAttrSequence("edgeuse:edgeIndex", "BA.185", "uint[]");
+    _ValidateIndexingRelationships(
+        brepEdgeuseCounts, { { "edgeuse:nextRadialEUIndex", nextRadial } },
+        o.edgeuses, "BA.200");
+}
+
+// _validate_wireEdge_arrays. With no wire edges declared, every wire-edge
+// array must be empty (BA.250). BA.255 all-or-none authorship. With wire
+// edges: BA.250 sizes, BA.270 two wireEdge:range entries per wire edge,
+// BA.260 tokens, BA.265 wireEdge:vertexIndices per shell block inside the
+// vertex partition, and BA.275 each wireEdge:range pair ordered.
+//
+// BA.265 takes its blocks from shell:wireEdgeCount, one per shell, and
+// measures block s against vertex partition s -- a per-Brep partition indexed
+// by shell. Python does exactly that, so a shell past the last Brep reports
+// "insufficient offsets" here too.
+void
+_BrepChecker::ValidateWireEdgeArrays()
+{
+    const double totalWireEdges = _SumIfAny("shell:wireEdgeCount");
+    if (totalWireEdges == 0) {
+        for (const char *name :
+             { "wireEdge:curveType", "wireEdge:range", "wireEdge:vertexIndices" }) {
+            const _PyValue values = _Get(name).OrEmpty();
+            if (values.Truthy()) {
+                std::vector<std::string> parts;
+                for (size_t i = 0; i < values.Len(); ++i) {
+                    parts.push_back(values.GetElem() == _PyValue::Elem::String
+                                        ? "'" + values.Repr(i) + "'"
+                                        : values.Repr(i));
+                }
+                _Fail("BA.250", TfStringPrintf(
+                    "Wire edge attribute %s should be empty given "
+                    "shell:wireEdgeCount, but contains data: [%s].",
+                    name, TfStringJoin(parts, ", ").c_str()));
+            }
+        }
+    }
+
+    const std::vector<std::string> all
+        = { "wireEdge:curveType", "wireEdge:vertexIndices", "wireEdge:range" };
+    std::vector<std::string> authored, missing;
+    for (const std::string &name : all) {
+        (_IsAuthored(name) ? authored : missing).push_back(name);
+    }
+    if (!authored.empty() && !missing.empty()) {
+        _Fail("BA.255", TfStringPrintf(
+            "Wire edge topology attributes must be authored together or all "
+            "omitted. Authored: %s; not authored: %s.",
+            _PyNameList(authored).c_str(), _PyNameList(missing).c_str()));
+    } else if (totalWireEdges > 0 && !missing.empty()) {
+        for (const std::string &name : missing) {
+            _Fail("BA.255", TfStringPrintf(
+                "%s is not authored in BrepArray but shell:wireEdgeCount "
+                "requires %s wire edge(s).",
+                name.c_str(),
+                _PyValue::NumRepr(totalWireEdges, true).c_str()));
+        }
+    }
+
+    if (totalWireEdges <= 0) {
+        return;
+    }
+    _ValidateArraySizesAndAuthored({ "wireEdge:curveType",
+                                     "wireEdge:vertexIndices" },
+                                   "BA.250", &totalWireEdges, false);
+    const _PyValue ranges = _Get("wireEdge:range").OrEmpty();
+    if (static_cast<double>(ranges.Len()) != totalWireEdges * 2) {
+        _Fail("BA.270", TfStringPrintf(
+            "Invalid wireEdge:range per-edge structure. Expected exactly 2 "
+            "elements per wire edge (%s wire edges x 2 = %s elements), but got "
+            "%zu elements.",
+            _PyValue::NumRepr(totalWireEdges, true).c_str(),
+            _PyValue::NumRepr(totalWireEdges * 2, true).c_str(), ranges.Len()));
+    }
+    _ValidateAllowedTokens("wireEdge:curveType",
+                           { "BrepCurve3dNurbAPI", "BrepCurve3dCircleAPI",
+                             "BrepCurve3dLineAPI", "BrepCurve3dEllipseAPI" },
+                           "BA.260", "wireEdge");
+
+    std::vector<double> shellCounts;
+    const _PyValue wireCounts = _Get("shell:wireEdgeCount");
+    if (wireCounts.IsNumbers()) {
+        for (size_t i = 0; i < wireCounts.Len(); ++i) {
+            shellCounts.push_back(std::trunc(wireCounts.Num(i)));
+        }
+    }
+    const _PyOffsets &o = _Offsets();
+    _ValidateIndexingRelationships(
+        shellCounts,
+        { { "wireEdge:vertexIndices", _Get("wireEdge:vertexIndices") } },
+        o.vertices, "BA.265");
+
+    if (!ranges.IsNumbers()) {
+        return;
+    }
+    for (size_t i = 0; i + 1 < ranges.Len(); i += 2) {
+        const double mn = ranges.Num(i), mx = ranges.Num(i + 1);
+        if (mx < mn - _PyNumericalTolerance) {
+            size_t brep = 0;
+            const std::string ctx
+                = (o.wireedges.size() > 1
+                   && _FindBrep(o.wireedges, static_cast<double>(i / 2), &brep))
+                ? TfStringPrintf(" in brep #%zu", brep)
+                : std::string();
+            _Fail("BA.275", TfStringPrintf(
+                "Invalid wireEdge:range order ([%s, %s]) for wireEdge #%zu%s. "
+                "Ensure the range is specified as (min, max) where min <= max.",
+                ranges.Repr(i).c_str(), ranges.Repr(i + 1).c_str(), i / 2,
+                ctx.c_str()));
+        }
+    }
+}
+
+// _validate_radial_edgeuse_closure (BA.581): following
+// edgeuse:nextRadialEUIndex from each edgeuse of a Brep returns to it within
+// as many steps as the Brep has edgeuses.
+void
+_BrepChecker::ValidateRadialEdgeuseClosure()
+{
+    const _PyValue nextRadial = _Get("edgeuse:nextRadialEUIndex").OrEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (!nextRadial.Truthy() || numBreps == 0 || !nextRadial.IsNumbers()) {
+        return;
+    }
+    const std::vector<long long> &offsets = _Offsets().edgeuses;
+    const long long total = static_cast<long long>(nextRadial.Len());
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= offsets.size()) {
+            break;
+        }
+        const long long euStart = offsets[b], euEnd = offsets[b + 1];
+        const long long maxSteps = euEnd - euStart;
+        for (long long start = euStart; start < std::min(euEnd, total);
+             ++start) {
+            long long current = start;
+            bool closed = false;
+            for (long long step = 0; step < maxSteps; ++step) {
+                size_t i = 0;
+                if (!_PyIndex(current, nextRadial.Len(), &i)) {
+                    break;
+                }
+                const double next = nextRadial.Num(i);
+                if (next >= static_cast<double>(total)) {
+                    break;
+                }
+                if (next == static_cast<double>(start)) {
+                    closed = true;
+                    break;
+                }
+                current = static_cast<long long>(next);
+            }
+            if (!closed) {
+                _Fail("BA.581", TfStringPrintf(
+                    "Radial chain starting at edgeuse #%lld in brep #%zu does "
+                    "not close within %lld steps.",
+                    start, b, maxSteps));
+            }
+        }
+    }
+}
+
+// _validate_orphan_edges (BA.582): every edge is named by some edgeuse.
+void
+_BrepChecker::ValidateOrphanEdges()
+{
+    const _PyValue edgeIndex = _Get("edgeuse:edgeIndex").OrEmpty();
+    const size_t totalEdges = _SafeGet("edge:curveType").Len();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (totalEdges == 0 || numBreps == 0) {
+        return;
+    }
+    std::set<double> referenced;
+    if (edgeIndex.IsNumbers()) {
+        for (size_t i = 0; i < edgeIndex.Len(); ++i) {
+            referenced.insert(edgeIndex.Num(i));
+        }
+    }
+    const std::vector<long long> &edgeOffsets = _Offsets().edges;
+    for (size_t e = 0; e < totalEdges; ++e) {
+        if (referenced.count(static_cast<double>(e))) {
+            continue;
+        }
+        size_t brep = 0;
+        const std::string ctx
+            = _FindBrep(edgeOffsets, static_cast<double>(e), &brep)
+            ? TfStringPrintf(" in brep #%zu", brep)
+            : std::string();
+        _Fail("BA.582", TfStringPrintf("Edge #%zu%s is not referenced by any "
+                                       "edgeuse (orphan edge).",
+                                       e, ctx.c_str()));
+    }
+}
+
+// _validate_vertex_arrays: BA.300 authorship; BA.295 vertex:pointType sized
+// one past the highest vertex index edge:vertexIndices names; BA.315 tokens.
+void
+_BrepChecker::ValidateVertexArrays()
+{
+    _ValidateAuthorshipOnly({ "vertex:pointType" }, "BA.300");
+    const _PyValue pairs = _SafeGet("edge:vertexIndices");
+    bool any = false;
+    double maxIndex = 0.0;
+    if (pairs.IsTuples() && pairs.Dim() >= 2) {
+        for (size_t e = 0; e < pairs.Len(); ++e) {
+            for (size_t c = 0; c < 2; ++c) {
+                const double v = std::trunc(pairs.Tup(e, c));
+                if (!any || v > maxIndex) {
+                    maxIndex = v;
+                    any = true;
+                }
+            }
+        }
+    }
+    const double expected = any ? maxIndex + 1 : 0.0;
+    if (expected > 0) {
+        _ValidateArraySizesAndAuthored({ "vertex:pointType" }, "BA.295",
+                                       &expected, false);
+    } else {
+        _ValidateArraySizesAndAuthored({ "vertex:pointType" }, "BA.295",
+                                       nullptr, false);
+    }
+    _ValidateAllowedTokens("vertex:pointType", { "BrepPointAPI" }, "BA.315",
+                           "vertex");
+}
+
+// _validate_point_position: brep:vertexPoint:point:position holds one point
+// per BrepPointAPI vertex (BA.320) and brep:shellPoint:point:position one per
+// point shell (BA.325), each checked only when a point is expected or
+// positions are authored.
+void
+_BrepChecker::ValidatePointPosition()
+{
+    const _PyValue pointTypes = _Get("vertex:pointType").OrEmpty();
+    double vertexPoints = 0.0;
+    for (size_t i = 0; i < pointTypes.Len(); ++i) {
+        vertexPoints += pointTypes.Equals(i, "BrepPointAPI") ? 1 : 0;
+    }
+    if (vertexPoints > 0
+        || _Get("brep:vertexPoint:point:position").OrEmpty().Len() > 0) {
+        _ValidateArraySizesAndAuthored({ "brep:vertexPoint:point:position" },
+                                       "BA.320", &vertexPoints, true);
+    }
+
+    const _PyValue shellPointTypes = _Get("shell:pointType").OrEmpty();
+    const _PyValue faceuseCounts = _SafeGet("shell:faceuseCount");
+    const _PyValue wireEdgeCounts = _SafeGet("shell:wireEdgeCount");
+    double shellPoints = 0.0;
+    for (size_t i = 0; i < shellPointTypes.Len(); ++i) {
+        long long fu = 0, we = 0;
+        if (shellPointTypes.Equals(i, "BrepPointAPI") && i < faceuseCounts.Len()
+            && i < wireEdgeCounts.Len() && faceuseCounts.ToInt(i, &fu)
+            && wireEdgeCounts.ToInt(i, &we) && fu == 0 && we == 0) {
+            shellPoints += 1;
+        }
+    }
+    if (shellPoints > 0
+        || _Get("brep:shellPoint:point:position").OrEmpty().Len() > 0) {
+        _ValidateArraySizesAndAuthored({ "brep:shellPoint:point:position" },
+                                       "BA.325", &shellPoints, true);
+    }
+}
+
+// _validate_topology_geometry_correspondence: BA.320 each Brep's BrepPointAPI
+// vertices have positions left to take, and BA.225 each edge of a Brep's edge
+// partition names vertices inside the Brep's vertex partition. An unreadable
+// vertex:pointType is BA.316, positions BA.326, edge:vertexIndices BA.237
+// (which ends the rule).
+void
+_BrepChecker::ValidateTopologyGeometryCorrespondence()
+{
+    const _PyOffsets &o = _Offsets();
+    _GetAttrSequence("vertex:pointType", "BA.316", "int[]");
+    const _PyValue positions = _GetAttrSequence(
+        "brep:vertexPoint:point:position", "BA.326", "point3d[]").first;
+    const _PyValue pointTypes = _Get("vertex:pointType").OrEmpty();
+
+    size_t positionIdx = 0;
+    for (size_t b = 0; b + 1 < o.vertices.size(); ++b) {
+        size_t expected = 0;
+        for (long long v = o.vertices[b]; v < o.vertices[b + 1]; ++v) {
+            if (v >= 0 && v < static_cast<long long>(pointTypes.Len())
+                && pointTypes.Equals(static_cast<size_t>(v), "BrepPointAPI")) {
+                ++expected;
+            }
+        }
+        if (expected > 0 && positions.Truthy()) {
+            const long long available = static_cast<long long>(positions.Len())
+                - static_cast<long long>(positionIdx);
+            if (available < static_cast<long long>(expected)) {
+                _Fail("BA.320", TfStringPrintf(
+                    "Mismatch between vertex topology (%zu BrepPointAPI "
+                    "vertices) and geometry (%lld remaining positions) for "
+                    "brep #%zu.",
+                    expected, available, b));
+            }
+            positionIdx += expected;
+        }
+    }
+
+    const _PyValue &rawPairs = _Get("edge:vertexIndices");
+    if (rawPairs.IsUnregistered()) {
+        _Fail("BA.237", "edge:vertexIndices has an unregistered USD type; "
+                        "expected int2[].");
+        return;
+    }
+    const _PyValue pairs = rawPairs.OrEmpty();
+    if (!pairs.Truthy() || !pointTypes.Truthy() || !pairs.IsTuples()) {
+        return;
+    }
+    const size_t n = o.edges.size();
+    for (size_t b = 0; b + 1 < n; ++b) {
+        const long long vStart = b < o.vertices.size() ? o.vertices[b] : 0;
+        const long long vEnd = b + 1 < o.vertices.size()
+            ? o.vertices[b + 1]
+            : static_cast<long long>(pointTypes.Len());
+        const double minIndex = static_cast<double>(vStart);
+        const double maxIndex = static_cast<double>(vEnd - 1);
+        for (long long e = o.edges[b]; e < o.edges[b + 1]; ++e) {
+            if (e < 0 || e >= static_cast<long long>(pairs.Len())) {
+                continue;
+            }
+            for (size_t c = 0; c < pairs.Dim(); ++c) {
+                const double v = pairs.Tup(static_cast<size_t>(e), c);
+                if (v < minIndex || v > maxIndex) {
+                    _Fail("BA.225", TfStringPrintf(
+                        "Edge #%lld in brep #%zu references invalid vertex "
+                        "index %s. Valid range for this brep: [%lld, %lld].",
+                        e - o.edges[b], b,
+                        _PyValue::NumRepr(v, pairs.Integral()).c_str(), vStart,
+                        vEnd - 1));
+                }
+            }
+        }
+    }
+}
+
+// _validate_attribute_data_types: the authored type of each topology and
+// point attribute (BA.061 ... BA.327) and of each NURBS attribute (BA.371,
+// BA.416, BA.471).
+void
+_BrepChecker::ValidateAttributeDataTypes()
+{
+    _ValidateStratumDataTypes({ { "brep:intersectTol3d", "double[]" },
+                                { "brep:extent", "double3[]" },
+                                { "brep:regionCount", "uint[]" } },
+                              "BA.061");
+    _ValidateStratumDataTypes({ { "region:shellCount", "uint[]" },
+                                { "region:type", "token[]" } },
+                              "BA.076");
+    _ValidateStratumDataTypes({ { "shell:faceuseCount", "uint[]" },
+                                { "shell:wireEdgeCount", "uint[]" },
+                                { "shell:pointType", "token[]" } },
+                              "BA.091");
+    _ValidateStratumDataTypes({ { "faceuse:faceIndex", "uint[]" },
+                                { "faceuse:orientationType", "token[]" } },
+                              "BA.116");
+    _ValidateStratumDataTypes({ { "face:loopCount", "uint[]" },
+                                { "face:trimType", "token[]" },
+                                { "face:surfaceType", "token[]" },
+                                { "face:range", "double2[]" } },
+                              "BA.161");
+    _ValidateStratumDataTypes({ { "loop:edgeuseCount", "uint[]" },
+                                { "loop:vertexIndex", "uint[]" } },
+                              "BA.176");
+    _ValidateStratumDataTypes({ { "edgeuse:edgeIndex", "uint[]" },
+                                { "edgeuse:orientationType", "token[]" },
+                                { "edgeuse:nextRadialEUIndex", "uint[]" },
+                                { "edgeuse:thisRadialEntryType", "token[]" } },
+                              "BA.196");
+    _ValidateStratumDataTypes({ { "edge:curveType", "token[]" },
+                                { "edge:vertexIndices", "int2[]" },
+                                { "edge:range", "double[]" } },
+                              "BA.237");
+    _ValidateStratumDataTypes({ { "wireEdge:curveType", "token[]" },
+                                { "wireEdge:vertexIndices", "int2[]" },
+                                { "wireEdge:range", "double[]" } },
+                              "BA.291");
+    _ValidateStratumDataTypes({ { "vertex:pointType", "token[]" } }, "BA.316");
+    _ValidateStratumDataTypes(
+        { { "brep:vertexPoint:point:position", "point3d[]" } }, "BA.326");
+    _ValidateStratumDataTypes(
+        { { "brep:shellPoint:point:position", "point3d[]" } }, "BA.327");
+    _ValidateStratumDataTypes(
+        { { "brep:edge3dNurb:curve3d:nurb:order", "uint[]" },
+          { "brep:edge3dNurb:curve3d:nurb:vertexCount", "uint[]" },
+          { "brep:edge3dNurb:curve3d:nurb:controlVertices", "point3d[]" },
+          { "brep:edge3dNurb:curve3d:nurb:weights", "double[]" },
+          { "brep:edge3dNurb:curve3d:nurb:knots", "double[]" } },
+        "BA.371");
+    _ValidateStratumDataTypes(
+        { { "brep:curveUv:nurb:order", "uint[]" },
+          { "brep:curveUv:nurb:vertexCount", "uint[]" },
+          { "brep:curveUv:nurb:controlVertices", "double2[]" },
+          { "brep:curveUv:nurb:weights", "double[]" },
+          { "brep:curveUv:nurb:knots", "double[]" } },
+        "BA.416");
+    _ValidateStratumDataTypes(
+        { { "brep:surface:nurb:uOrder", "uint[]" },
+          { "brep:surface:nurb:vOrder", "uint[]" },
+          { "brep:surface:nurb:uVertexCount", "uint[]" },
+          { "brep:surface:nurb:vVertexCount", "uint[]" },
+          { "brep:surface:nurb:controlVertices", "point3d[]" },
+          { "brep:surface:nurb:weights", "double[]" },
+          { "brep:surface:nurb:uKnots", "double[]" },
+          { "brep:surface:nurb:vKnots", "double[]" } },
+        "BA.471");
+}
+
+// _validate_minimum_topology_counts: BA.700 every brep:regionCount entry is at
+// least 1, BA.701 every region:shellCount entry, and BA.702 (a warning) every
+// shell has faceuses, wire edges, or a BrepPointAPI point. Entries that do
+// not coerce to integers are skipped (BA.091 reports them).
+void
+_BrepChecker::ValidateMinimumTopologyCounts()
+{
+    const _PyValue regionCounts = _SafeGet("brep:regionCount");
+    for (size_t i = 0; i < regionCounts.Len(); ++i) {
+        long long v = 0;
+        if (regionCounts.ToInt(i, &v) && v < 1) {
+            _Fail("BA.700", TfStringPrintf("brep:regionCount[%zu] = %s is less "
+                                           "than 1.",
+                                           i, regionCounts.Repr(i).c_str()));
+        }
+    }
+    const _PyValue shellCounts = _SafeGet("region:shellCount");
+    for (size_t i = 0; i < shellCounts.Len(); ++i) {
+        long long v = 0;
+        if (shellCounts.ToInt(i, &v) && v < 1) {
+            _Fail("BA.701", TfStringPrintf("region:shellCount[%zu] = %s is less "
+                                           "than 1.",
+                                           i, shellCounts.Repr(i).c_str()));
+        }
+    }
+    const _PyValue faceuseCounts = _SafeGet("shell:faceuseCount");
+    const _PyValue wireEdgeCounts = _SafeGet("shell:wireEdgeCount");
+    const _PyValue pointTypes = _SafeGet("shell:pointType");
+    if (faceuseCounts.Len() == 0 || wireEdgeCounts.Len() == 0) {
+        return;
+    }
+    const size_t numShells
+        = std::min(faceuseCounts.Len(), wireEdgeCounts.Len());
+    for (size_t s = 0; s < numShells; ++s) {
+        long long fu = 0, we = 0;
+        if (!faceuseCounts.ToInt(s, &fu) || !wireEdgeCounts.ToInt(s, &we)) {
+            continue;
+        }
+        const std::string pt
+            = s < pointTypes.Len() ? pointTypes.Repr(s) : std::string("none");
+        if (fu == 0 && we == 0 && pt != "BrepPointAPI") {
+            _Warn("BA.702", TfStringPrintf("shell #%zu has no content: "
+                                           "faceuseCount=0, wireEdgeCount=0, "
+                                           "pointType='%s'.",
+                                           s, pt.c_str()));
+        }
+    }
+}
+
+// _validate_type_count_exhaustive: every edge:curveType (BA.720),
+// wireEdge:curveType (BA.721) and face:surfaceType (BA.722) entry names a
+// recognized type.
+void
+_BrepChecker::ValidateTypeCountExhaustive()
+{
+    const std::vector<std::string> curveTypes
+        = { "BrepCurve3dNurbAPI", "BrepCurve3dCircleAPI", "BrepCurve3dLineAPI",
+            "BrepCurve3dEllipseAPI" };
+    const std::vector<std::string> surfaceTypes
+        = { "BrepSurfaceNurbAPI", "BrepSurfaceSphereAPI", "BrepSurfacePlaneAPI",
+            "BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI",
+            "BrepSurfaceTorusAPI" };
+    struct Item
+    {
+        const char *attr;
+        const std::vector<std::string> *types;
+        const char *rule;
+        const char *label;
+        const char *plural;
+    };
+    for (const Item &it :
+         { Item{ "edge:curveType", &curveTypes, "BA.720", "Edge curveType",
+                 "edge" },
+           Item{ "wireEdge:curveType", &curveTypes, "BA.721",
+                 "WireEdge curveType", "wireEdge" },
+           Item{ "face:surfaceType", &surfaceTypes, "BA.722",
+                 "Face surfaceType", "face" } }) {
+        const _PyValue values = _SafeGet(it.attr);
+        if (values.Len() == 0) {
+            continue;
+        }
+        size_t recognized = 0;
+        for (size_t i = 0; i < values.Len(); ++i) {
+            for (const std::string &t : *it.types) {
+                if (values.Repr(i) == t) {
+                    ++recognized;
+                    break;
+                }
+            }
+        }
+        if (recognized != values.Len()) {
+            _Fail(it.rule, TfStringPrintf(
+                "%s recognized count (%zu) != total %s count (%zu). %zu %ss "
+                "have unrecognized types.",
+                it.label, recognized, it.plural, values.Len(),
+                values.Len() - recognized, it.plural));
+        }
+    }
+}
+
+// _validate_radial_chain_consistency (BA.670): within each Brep,
+// edgeuse:nextRadialEUIndex stays inside the Brep's edgeuse partition, every
+// radial chain names one edge, and every edge's edgeuses fall in one chain.
+// The first violation ends the rule.
+void
+_BrepChecker::ValidateRadialChainConsistency()
+{
+    const _PyValue nextRadial = _SafeGet("edgeuse:nextRadialEUIndex");
+    const _PyValue edgeIndex = _SafeGet("edgeuse:edgeIndex");
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (nextRadial.Len() == 0 || edgeIndex.Len() == 0 || numBreps == 0) {
+        return;
+    }
+    const size_t total = nextRadial.Len();
+    if (edgeIndex.Len() != total) {
+        return;
+    }
+    const std::vector<long long> &offsets = _Offsets().edgeuses;
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b + 1 >= offsets.size()) {
+            break;
+        }
+        const long long euStart = offsets[b], euEnd = offsets[b + 1];
+        if (euStart >= euEnd) {
+            continue;
+        }
+        const long long scanEnd = std::min(euEnd, static_cast<long long>(total));
+        for (long long eu = euStart; eu < scanEnd; ++eu) {
+            size_t i = 0;
+            if (!_PyIndex(eu, total, &i)) {
+                continue;
+            }
+            long long next = 0;
+            if (!nextRadial.ToInt(i, &next)) {
+                _Fail("BA.670", TfStringPrintf(
+                    "edgeuse:nextRadialEUIndex at edgeuse #%lld in brep #%zu "
+                    "is not a numeric index: '%s'.",
+                    eu, b, nextRadial.Repr(i).c_str()));
+                return;
+            }
+            if (next < euStart || next >= euEnd) {
+                _Fail("BA.670", TfStringPrintf(
+                    "edgeuse:nextRadialEUIndex at edgeuse #%lld in brep #%zu "
+                    "references edgeuse #%lld, which is outside this brep's "
+                    "edgeuse range [%lld, %lld).",
+                    eu, b, next, euStart, euEnd));
+                return;
+            }
+        }
+
+        // _decompose_radial_cycles: walk from each unassigned edgeuse until
+        // the walk reaches an assigned one.
+        std::vector<std::vector<long long>> cycles;
+        std::unordered_map<long long, size_t> cycleOf;
+        for (long long start = euStart; start < scanEnd; ++start) {
+            if (cycleOf.count(start)) {
+                continue;
+            }
+            std::vector<long long> cycle;
+            long long current = start;
+            while (!cycleOf.count(current)) {
+                if (current < 0 || current >= static_cast<long long>(total)) {
+                    break;
+                }
+                cycle.push_back(current);
+                cycleOf[current] = cycles.size();
+                long long next = 0;
+                if (!nextRadial.ToInt(static_cast<size_t>(current), &next)) {
+                    break;
+                }
+                current = next;
+            }
+            cycles.push_back(std::move(cycle));
+        }
+
+        const auto edgeOf = [&](long long eu) {
+            long long e = 0;
+            edgeIndex.ToInt(static_cast<size_t>(eu), &e);
+            return e;
+        };
+        const auto listRepr = [](const std::vector<long long> &values) {
+            std::vector<std::string> parts;
+            for (const long long v : values) {
+                parts.push_back(TfStringPrintf("%lld", v));
+            }
+            return "[" + TfStringJoin(parts, ", ") + "]";
+        };
+        for (const std::vector<long long> &cycle : cycles) {
+            std::set<long long> edges;
+            for (const long long eu : cycle) {
+                edges.insert(edgeOf(eu));
+            }
+            if (edges.size() != 1) {
+                _Fail("BA.670", TfStringPrintf(
+                    "Radial chain %s in brep #%zu references multiple edges "
+                    "via edgeuse:edgeIndex (%s); all edgeuses in a radial "
+                    "chain must share the same edge.",
+                    listRepr(cycle).c_str(), b,
+                    listRepr(std::vector<long long>(edges.begin(), edges.end()))
+                        .c_str()));
+                return;
+            }
+        }
+
+        // First-seen edge order, as Python's dict keeps insertion order.
+        std::vector<long long> edgeOrder;
+        std::unordered_map<long long, std::set<size_t>> cyclesOfEdge;
+        for (long long eu = euStart; eu < scanEnd; ++eu) {
+            const long long e = edgeOf(eu);
+            auto it = cyclesOfEdge.find(e);
+            if (it == cyclesOfEdge.end()) {
+                edgeOrder.push_back(e);
+                it = cyclesOfEdge.emplace(e, std::set<size_t>()).first;
+            }
+            it->second.insert(cycleOf[eu]);
+        }
+        for (const long long e : edgeOrder) {
+            const std::set<size_t> &ids = cyclesOfEdge[e];
+            if (ids.size() <= 1) {
+                continue;
+            }
+            std::vector<long long> edgeuses;
+            for (long long eu = euStart; eu < scanEnd; ++eu) {
+                if (edgeOf(eu) == e) {
+                    edgeuses.push_back(eu);
+                }
+            }
+            _Fail("BA.670", TfStringPrintf(
+                "Edge #%lld in brep #%zu is referenced by edgeuses %s, but they "
+                "fall into %zu separate radial chains "
+                "(edgeuse:nextRadialEUIndex). All edgeuses of an edge must "
+                "belong to one closed radial chain.",
+                e, b, listRepr(edgeuses).c_str(), ids.size()));
+            return;
+        }
     }
 }
 
 // -------------------------------------------------------------------------- //
 // BrepArrayStructure                                                         //
 // -------------------------------------------------------------------------- //
+// Brep-level attributes and minimum counts: BA.000 / BA.005 / BA.010, the
+// brep:extent structure and ordering (BA.020 / BA.025 / BA.030 / BA.035), the
+// point position sizes (BA.320 / BA.325) and the minimum topology counts
+// (BA.700 / BA.701 / BA.702).
 UsdValidationErrorVector
 _BrepArrayStructure(const UsdPrim &usdPrim,
                     const UsdValidationTimeRange & /*timeRange*/)
@@ -270,312 +2898,173 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
     if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
         return {};
     }
-    const UsdSolidBrepArray brep(usdPrim);
+    _BrepChecker c(usdPrim, { "BA.000", "BA.005", "BA.010", "BA.020", "BA.025",
+                              "BA.030", "BA.035", "BA.320", "BA.325", "BA.700",
+                              "BA.701", "BA.702" });
+    c.ValidateBrepExtent();
+    c.ValidateBrepTols();
+    c.ValidateBrepArray();
+    c.ValidatePointPosition();
+    c.ValidateTopologyGeometryCorrespondence();
+    c.ValidateMinimumTopologyCounts();
+    return c.TakeErrors();
+}
 
-    const UsdAttribute tolAttr = brep.GetBrepIntersectTol3dAttr();
-    const UsdAttribute extentAttr = brep.GetBrepExtentAttr();
-    const UsdAttribute regionCountAttr = brep.GetBrepRegionCountAttr();
+// -------------------------------------------------------------------------- //
+// BrepArrayTopology                                                          //
+// -------------------------------------------------------------------------- //
+// The sizes of the flat-packed topology arrays, each stratum against the
+// counts above it (BA.065, 080, 100, 120, 150, 165, 180, 210, 230, 250, 270,
+// 295), and the radial chain structure (BA.670).
+UsdValidationErrorVector
+_BrepArrayTopology(const UsdPrim &usdPrim,
+                   const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
+    }
+    _BrepChecker c(usdPrim, { "BA.065", "BA.080", "BA.100", "BA.120", "BA.150",
+                              "BA.165", "BA.180", "BA.210", "BA.230", "BA.250",
+                              "BA.270", "BA.295", "BA.670" });
+    c.ValidateRegionArrays();
+    c.ValidateShellArrays();
+    c.ValidateFaceuseArrays();
+    c.ValidateFaceArrays();
+    c.ValidateLoopArrays();
+    c.ValidateEdgeArrays();
+    c.ValidateEdgeuseArraysIfAny();
+    c.ValidateWireEdgeArrays();
+    c.ValidateVertexArrays();
+    c.ValidateRadialChainConsistency();
+    return c.TakeErrors();
+}
 
-    UsdValidationErrorVector errors;
+// -------------------------------------------------------------------------- //
+// BrepArrayTokenValues                                                       //
+// -------------------------------------------------------------------------- //
+// Every token[] topology attribute draws its entries from its allowed set
+// (BA.075, 090, 110, 130, 135, 190, 195, 245, 260, 315), one finding per
+// attribute naming every offending index.
+UsdValidationErrorVector
+_BrepArrayTokenValues(const UsdPrim &usdPrim,
+                      const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
+    }
+    _BrepChecker c(usdPrim, { "BA.075", "BA.090", "BA.110", "BA.130", "BA.135",
+                              "BA.190", "BA.195", "BA.245", "BA.260",
+                              "BA.315" });
+    c.ValidateRegionArrays();
+    c.ValidateShellArrays();
+    c.ValidateFaceuseArrays();
+    c.ValidateFaceArrays();
+    c.ValidateEdgeArrays();
+    c.ValidateEdgeuseArraysIfAny();
+    c.ValidateWireEdgeArrays();
+    c.ValidateVertexArrays();
+    return c.TakeErrors();
+}
 
-    // BA.005: the three Brep schema attributes must be authored, each reported
-    // on its own. Authored means any opinion (UsdAttribute::IsAuthored), as in
-    // brep_validator.py's _validate_authorship_only: a declaration with no
-    // value is present, and BA.000 then reads it as an empty array.
-    for (const UsdAttribute &attr : { tolAttr, extentAttr, regionCountAttr }) {
-        if (!attr.IsAuthored()) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->missingBrepAttributes,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.005] BrepArray <%s>: %s is not authored in "
-                    "BrepArray.",
-                    usdPrim.GetPath().GetText(),
-                    attr.GetName().GetText()));
-        }
+// -------------------------------------------------------------------------- //
+// BrepArrayAuthorship                                                        //
+// -------------------------------------------------------------------------- //
+// Every topology attribute is authored -- any opinion counts, a declaration
+// with no value included -- whether or not its family has members (BA.070,
+// 085, 105, 125, 170, 185, 215, 300); the wire-edge family is all-or-none
+// (BA.255). BA.185 / BA.215 also report an edgeuse:edgeIndex,
+// edgeuse:nextRadialEUIndex or edge:curveType that cannot be read as an
+// array, as Python does.
+UsdValidationErrorVector
+_BrepArrayAuthorship(const UsdPrim &usdPrim,
+                     const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
     }
+    _BrepChecker c(usdPrim, { "BA.070", "BA.085", "BA.105", "BA.125", "BA.170",
+                              "BA.185", "BA.215", "BA.255", "BA.300" });
+    c.ValidateRegionArrays();
+    c.ValidateShellArrays();
+    c.ValidateFaceuseArrays();
+    c.ValidateFaceArrays();
+    c.ValidateLoopArrays();
+    c.ValidateEdgeAndEdgeuseAuthorship();
+    c.ValidateEdgeuseArraysIfAny();
+    c.ValidateWireEdgeArrays();
+    c.ValidateVertexArrays();
+    return c.TakeErrors();
+}
 
-    const VtArray<double> tol = _Read<double>(tolAttr);
-    const VtArray<GfVec3d> extent = _Read<GfVec3d>(extentAttr);
-    const VtArray<unsigned int> regionCount
-        = _Read<unsigned int>(regionCountAttr);
+// -------------------------------------------------------------------------- //
+// BrepArrayDataTypes                                                         //
+// -------------------------------------------------------------------------- //
+// Each topology attribute and point position is authored with its schema
+// type (BA.061, 076, 091, 116, 161, 176, 196, 237, 291, 316, 326, 327).
+// BA.091 also reports count arrays that do not coerce to integers, and BA.237
+// / BA.316 / BA.326 values Python cannot read as arrays.
+UsdValidationErrorVector
+_BrepArrayDataTypes(const UsdPrim &usdPrim,
+                    const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
+    }
+    _BrepChecker c(usdPrim, { "BA.061", "BA.076", "BA.091", "BA.116", "BA.161",
+                              "BA.176", "BA.196", "BA.237", "BA.291", "BA.316",
+                              "BA.326", "BA.327" });
+    c.ComputeBrepOffsets();
+    c.ValidateFaceuseArrays();
+    c.ValidateEdgeArrays();
+    c.ValidateTopologyGeometryCorrespondence();
+    c.ValidateAttributeDataTypes();
+    return c.TakeErrors();
+}
 
-    // BA.000 / BA.020: array sizes must be consistent with the number of
-    // Breps. brep:regionCount and brep:intersectTol3d have one entry per Brep;
-    // brep:extent has two (min, max corner) entries per Brep.
-    // BA.000 covers array sizes against the Brep count, for the per-Brep
-    // attributes and for brep:extent alike -- brep_validator.py reports both
-    // under BA.000, the second from its own brep:extent branch. BA.020 covers
-    // brep:extent's structure and reports the same size mismatch again.
-    //
-    // An attribute that is not authored at all is BA.005's to report, not
-    // this rule's: the Python size check runs with require_authored=False and
-    // skips it, so an unauthored brep:intersectTol3d must not read as a size
-    // of zero here.
-    const size_t numBreps = regionCount.size();
-    if (tolAttr.HasAuthoredValue() && tol.size() != numBreps) {
-        errors.emplace_back(
-            UsdSolidValidationErrorNameTokens->inconsistentBrepArraySizes,
-            UsdValidationErrorType::Error, _PrimSites(usdPrim),
-            TfStringPrintf(
-                "[BA.000] BrepArray <%s>: for %zu Brep(s) (brep:regionCount "
-                "size), expected brep:intersectTol3d size %zu but got %zu.",
-                usdPrim.GetPath().GetText(), numBreps, numBreps, tol.size()));
+// -------------------------------------------------------------------------- //
+// BrepArrayReferences                                                        //
+// -------------------------------------------------------------------------- //
+// Cross-reference indices land inside the owning Brep's partition:
+// faceuse->face (BA.115), loop->vertex (BA.175), edgeuse->edge (BA.205),
+// edgeuse->edgeuse radial (BA.200), edge->vertex (BA.225) and
+// wireEdge->vertex (BA.265).
+UsdValidationErrorVector
+_BrepArrayReferences(const UsdPrim &usdPrim,
+                     const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
     }
-    if (extentAttr.HasAuthoredValue() && !regionCount.empty()
-        && extent.size() != 2 * numBreps) {
-        errors.emplace_back(
-            UsdSolidValidationErrorNameTokens->inconsistentBrepArraySizes,
-            UsdValidationErrorType::Error, _PrimSites(usdPrim),
-            TfStringPrintf(
-                "[BA.000] BrepArray <%s>: brep:extent size (%zu) does not "
-                "match expected size (%zu) for %zu Breps.",
-                usdPrim.GetPath().GetText(), extent.size(), 2 * numBreps,
-                numBreps));
-    }
-    if (extent.size() != 2 * numBreps) {
-        errors.emplace_back(
-            UsdSolidValidationErrorNameTokens->inconsistentBrepArraySizes,
-            UsdValidationErrorType::Error, _PrimSites(usdPrim),
-            TfStringPrintf(
-                "[BA.020] BrepArray <%s>: for %zu Brep(s) (brep:regionCount "
-                "size), expected brep:extent size %zu (two corners per Brep) "
-                "but got %zu.",
-                usdPrim.GetPath().GetText(), numBreps, 2 * numBreps,
-                extent.size()));
-    }
+    _BrepChecker c(usdPrim, { "BA.115", "BA.175", "BA.200", "BA.205", "BA.225",
+                              "BA.265" });
+    c.ValidateFaceuseArrays();
+    c.ValidateLoopVertexIndex();
+    c.ValidateEdgeArrays();
+    c.ValidateEdgeuseArraysIfAny();
+    c.ValidateWireEdgeArrays();
+    c.ValidateTopologyGeometryCorrespondence();
+    return c.TakeErrors();
+}
 
-    // BA.010: brep:intersectTol3d values must be positive and finite. A
-    // non-finite tolerance (NaN/Inf) silently breaks every tolerance-based rule
-    // downstream: NaN fails every comparison (so an authored NaN slips past the
-    // <= 0.0 test here), and the shared tolerance resolution
-    // (_FirstAuthoredIntersectTol3d) requires std::isfinite before accepting
-    // the authored value for the same reason. Flag the finiteness violation
-    // explicitly and separately from the non-positive case (a NaN is neither
-    // "positive" nor "<= 0.0", so the ordering test alone cannot catch it).
-    for (size_t i = 0; i < tol.size(); ++i) {
-        if (!std::isfinite(tol[i])) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->nonFiniteIntersectTol3d,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.010] BrepArray <%s>: brep:intersectTol3d[%zu] = %g "
-                    "is not finite; the intersection tolerance must be a finite "
-                    "positive number.",
-                    usdPrim.GetPath().GetText(), i, tol[i]));
-        } else if (tol[i] <= 0.0) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->nonPositiveIntersectTol3d,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.010] BrepArray <%s>: brep:intersectTol3d[%zu] = %g "
-                    "is not positive.",
-                    usdPrim.GetPath().GetText(), i, tol[i]));
-        }
+// -------------------------------------------------------------------------- //
+// BrepArrayCompleteness                                                      //
+// -------------------------------------------------------------------------- //
+// Faceuse pairing (BA.580), radial chain closure (BA.581), orphan edges
+// (BA.582) and exhaustive curve / surface types (BA.720, BA.721, BA.722).
+UsdValidationErrorVector
+_BrepArrayCompleteness(const UsdPrim &usdPrim,
+                       const UsdValidationTimeRange & /*timeRange*/)
+{
+    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
+        return {};
     }
-
-    // BA.025 / BA.030 / BA.035: each brep:extent bounding box corner pair must
-    // be ordered min <= max on every axis. One requirement per axis:
-    // X is BA.025, Y is BA.030, Z is BA.035.
-    const char *const axisNames[3] = { "X", "Y", "Z" };
-    const char *const axisRules[3] = { "BA.025", "BA.030", "BA.035" };
-    for (size_t box = 0; 2 * box + 1 < extent.size(); ++box) {
-        const GfVec3d &mn = extent[2 * box];
-        const GfVec3d &mx = extent[2 * box + 1];
-        for (int a = 0; a < 3; ++a) {
-            if (mn[a] > mx[a]) {
-                errors.emplace_back(
-                    UsdSolidValidationErrorNameTokens->invalidExtentOrder,
-                    UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                    TfStringPrintf(
-                        "[%s] BrepArray <%s>: brep:extent for Brep %zu has "
-                        "%smin (%g) > %smax (%g).",
-                        axisRules[a], usdPrim.GetPath().GetText(), box,
-                        axisNames[a],
-                        mn[a], axisNames[a], mx[a]));
-            }
-        }
-    }
-
-    // BA.270: wireEdge:range holds one consecutive (min, max) pair per wire
-    // edge, so its size is exactly twice the wire-edge total taken from
-    // shell:wireEdgeCount. Python gates the whole wire-edge stratum on that
-    // total being non-zero, so a BrepArray with no wire edges is not checked
-    // here at all -- a populated wireEdge:range on such a prim is BA.250's
-    // finding ("should be empty given shell:wireEdgeCount"), not this rule's.
-    const VtArray<unsigned int> shellWireEdgeCount
-        = _Read<unsigned int>(brep.GetShellWireEdgeCountAttr());
-    const size_t totalWireEdges = _Sum(shellWireEdgeCount);
-    if (totalWireEdges > 0) {
-        const VtArray<double> wireEdgeRange
-            = _Read<double>(brep.GetWireEdgeRangeAttr());
-        if (wireEdgeRange.size() != 2 * totalWireEdges) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens
-                    ->invalidWireEdgeRangeStructure,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.270] BrepArray <%s>: Invalid wireEdge:range per-edge "
-                    "structure. Expected exactly 2 elements per wire edge "
-                    "(%zu wire edges x 2 = %zu elements), but got %zu "
-                    "elements.",
-                    usdPrim.GetPath().GetText(), totalWireEdges,
-                    2 * totalWireEdges, wireEdgeRange.size()));
-        }
-    }
-
-    // BA.295: vertex:pointType has one entry per vertex. Nothing in the schema
-    // states how many vertices a BrepArray has, so the expected size is the
-    // highest vertex index any edge references, plus one; when no edge
-    // references a vertex there is no expectation to test against and the rule
-    // is skipped.
-    const VtArray<GfVec2i> edgeVertexIndices
-        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr());
-    int maxVertexIndex = 0;
-    bool haveVertexIndex = false;
-    for (const GfVec2i &pair : edgeVertexIndices) {
-        for (int end = 0; end < 2; ++end) {
-            if (!haveVertexIndex || pair[end] > maxVertexIndex) {
-                maxVertexIndex = pair[end];
-                haveVertexIndex = true;
-            }
-        }
-    }
-    const size_t expectedVertices
-        = (haveVertexIndex && maxVertexIndex >= 0)
-        ? static_cast<size_t>(maxVertexIndex) + 1
-        : 0;
-    const UsdAttribute vertexPointTypeAttr = brep.GetVertexPointTypeAttr();
-    const VtArray<TfToken> vertexPointType
-        = _Read<TfToken>(vertexPointTypeAttr);
-    if (expectedVertices > 0 && vertexPointTypeAttr
-        && vertexPointTypeAttr.IsAuthored()) {
-        _CheckExpectedArraySize(usdPrim, vertexPointTypeAttr,
-                                "vertex:pointType",
-                                _ArraySize(vertexPointTypeAttr),
-                                expectedVertices, "BA.295",
-                                UsdSolidValidationErrorNameTokens
-                                    ->vertexArraySizeMismatch,
-                                &errors);
-    }
-
-    // BA.320 / BA.325: BrepPointAPI is the only vertex:pointType and
-    // shell:pointType value that carries a position, so the position arrays
-    // hold exactly one point per BrepPointAPI vertex and one per point shell
-    // (_IsBrepPointShell: a shell:pointType token counts only on a shell with
-    // no faceuses and no wire edges). Python only runs each rule when there is
-    // something to compare -- either the point type asks for positions or
-    // positions are authored -- which keeps a BrepArray whose vertices are all
-    // "none" and whose position array is absent out of both rules.
-    static const TfToken brepPointApi("BrepPointAPI");
-    static const TfToken vertexPointPositionName(
-        "brep:vertexPoint:point:position");
-    static const TfToken shellPointPositionName(
-        "brep:shellPoint:point:position");
-
-    size_t brepPointVertexCount = 0;
-    for (const TfToken &pointType : vertexPointType) {
-        if (pointType == brepPointApi) {
-            ++brepPointVertexCount;
-        }
-    }
-    const UsdAttribute vertexPointPositionAttr
-        = usdPrim.GetAttribute(vertexPointPositionName);
-    const size_t vertexPointPositionCount
-        = _ArraySize(vertexPointPositionAttr);
-    if (brepPointVertexCount > 0 || vertexPointPositionCount > 0) {
-        _CheckExpectedArraySize(usdPrim, vertexPointPositionAttr,
-                                "brep:vertexPoint:point:position",
-                                vertexPointPositionCount, brepPointVertexCount,
-                                "BA.320",
-                                UsdSolidValidationErrorNameTokens
-                                    ->vertexPointPositionSizeMismatch,
-                                &errors);
-    }
-
-    const VtArray<TfToken> shellPointType
-        = _Read<TfToken>(brep.GetShellPointTypeAttr());
-    const VtArray<unsigned int> shellFaceuseCount
-        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
-    size_t brepPointShellCount = 0;
-    for (size_t i = 0; i < shellPointType.size(); ++i) {
-        if (_IsBrepPointShell(i, shellPointType, shellFaceuseCount,
-                              shellWireEdgeCount)) {
-            ++brepPointShellCount;
-        }
-    }
-    const UsdAttribute shellPointPositionAttr
-        = usdPrim.GetAttribute(shellPointPositionName);
-    const size_t shellPointPositionCount
-        = _ArraySize(shellPointPositionAttr);
-    if (brepPointShellCount > 0 || shellPointPositionCount > 0) {
-        _CheckExpectedArraySize(usdPrim, shellPointPositionAttr,
-                                "brep:shellPoint:point:position",
-                                shellPointPositionCount, brepPointShellCount,
-                                "BA.325",
-                                UsdSolidValidationErrorNameTokens
-                                    ->shellPointPositionSizeMismatch,
-                                &errors);
-    }
-
-    // BA.700: every Brep has at least one region. The schema counts the
-    // unbounded exterior void alongside the solid interior, so a closed
-    // manifold solid authors brep:regionCount 2; the floor the rule enforces
-    // is nevertheless one, and 20 of the 39 staged fixtures author a
-    // regionCount of 1.
-    for (size_t i = 0; i < regionCount.size(); ++i) {
-        if (regionCount[i] < 1u) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->regionCountBelowMinimum,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.700] BrepArray <%s>: brep:regionCount[%zu] = %u is "
-                    "less than 1.",
-                    usdPrim.GetPath().GetText(), i, regionCount[i]));
-        }
-    }
-
-    // BA.701: every region is bounded by at least one shell.
-    const VtArray<unsigned int> regionShellCount
-        = _Read<unsigned int>(brep.GetRegionShellCountAttr());
-    for (size_t i = 0; i < regionShellCount.size(); ++i) {
-        if (regionShellCount[i] < 1u) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens
-                    ->regionShellCountBelowMinimum,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.701] BrepArray <%s>: region:shellCount[%zu] = %u is "
-                    "less than 1.",
-                    usdPrim.GetPath().GetText(), i, regionShellCount[i]));
-        }
-    }
-
-    // BA.702: a shell bounds its region with faceuses, with wire edges, or as
-    // a single BrepPointAPI point. A shell with none of the three contributes
-    // no boundary. Python reports this at warning severity, not as a failed
-    // check, and compares only the shells both count arrays cover.
-    if (!shellFaceuseCount.empty() && !shellWireEdgeCount.empty()) {
-        const size_t numShells
-            = std::min(shellFaceuseCount.size(), shellWireEdgeCount.size());
-        for (size_t i = 0; i < numShells; ++i) {
-            const TfToken pointType = i < shellPointType.size()
-                ? shellPointType[i]
-                : TfToken("none");
-            if (shellFaceuseCount[i] == 0u && shellWireEdgeCount[i] == 0u
-                && pointType != brepPointApi) {
-                errors.emplace_back(
-                    UsdSolidValidationErrorNameTokens->shellWithoutContent,
-                    UsdValidationErrorType::Warn, _PrimSites(usdPrim),
-                    TfStringPrintf(
-                        "[BA.702] BrepArray <%s>: shell #%zu has no content: "
-                        "faceuseCount=0, wireEdgeCount=0, pointType='%s'.",
-                        usdPrim.GetPath().GetText(), i, pointType.GetText()));
-            }
-        }
-    }
-
-    return errors;
+    _BrepChecker c(usdPrim, { "BA.580", "BA.581", "BA.582", "BA.720", "BA.721",
+                              "BA.722" });
+    c.ValidateFaceusePairing();
+    c.ValidateRadialEdgeuseClosure();
+    c.ValidateOrphanEdges();
+    c.ValidateTypeCountExhaustive();
+    return c.TakeErrors();
 }
 
 // -------------------------------------------------------------------------- //
@@ -727,9 +3216,6 @@ _BrepArrayGeomSubsets(const UsdPrim &usdPrim,
 // implementations sit further down the file, next to the per-Brep offset
 // partition and the tolerance helpers they need. BrepArrayTopology,
 // BrepArrayRanges and BrepArrayEdgeCurveVertices, defined below, report them.
-void _CheckRadialChainSameEdge(const UsdPrim &usdPrim,
-                               const UsdSolidBrepArray &brep,
-                               UsdValidationErrorVector *errors);
 void _CheckAngularRangePrimaryPeriod(const UsdPrim &usdPrim,
                                      const UsdSolidBrepArray &brep,
                                      UsdValidationErrorVector *errors);
@@ -743,325 +3229,6 @@ void _CheckNurbsEdgeEndpointVertices(const UsdPrim &usdPrim,
                                      UsdValidationErrorVector *errors);
 
 // -------------------------------------------------------------------------- //
-// BrepArrayTopology                                                          //
-// -------------------------------------------------------------------------- //
-UsdValidationErrorVector
-_BrepArrayTopology(const UsdPrim &usdPrim,
-                   const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    const UsdSolidBrepArray brep(usdPrim);
-
-    const UsdAttribute regionCountAttr = brep.GetBrepRegionCountAttr();
-    if (!regionCountAttr.HasAuthoredValue()) {
-        // The BrepArrayStructure validator reports the missing attribute; we
-        // cannot derive the topology sizes without it.
-        return {};
-    }
-
-    UsdValidationErrorVector errors;
-
-    const VtArray<unsigned int> regionCount
-        = _Read<unsigned int>(regionCountAttr);
-
-    // Region (BA.065): sized by sum(brep:regionCount).
-    const size_t numRegions = _Sum(regionCount);
-    const VtArray<unsigned int> regionShellCount
-        = _Read<unsigned int>(brep.GetRegionShellCountAttr());
-    const VtArray<TfToken> regionType
-        = _Read<TfToken>(brep.GetRegionTypeAttr());
-    const std::string regionsDesc
-        = TfStringPrintf("sum of brep:regionCount = %zu", numRegions);
-    _CheckSize(usdPrim, "BA.065", "region:shellCount", regionShellCount.size(),
-               numRegions, regionsDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentRegionArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.065", "region:type", regionType.size(), numRegions,
-               regionsDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentRegionArraySizes,
-               &errors);
-
-    // Shell (BA.080): sized by sum(region:shellCount).
-    const size_t numShells = _Sum(regionShellCount);
-    const VtArray<unsigned int> shellFaceuseCount
-        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
-    const VtArray<unsigned int> shellWireEdgeCount
-        = _Read<unsigned int>(brep.GetShellWireEdgeCountAttr());
-    const VtArray<TfToken> shellPointType
-        = _Read<TfToken>(brep.GetShellPointTypeAttr());
-    const std::string shellsDesc
-        = TfStringPrintf("sum of region:shellCount = %zu", numShells);
-    _CheckSize(usdPrim, "BA.080", "shell:faceuseCount", shellFaceuseCount.size(),
-               numShells, shellsDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentShellArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.080", "shell:wireEdgeCount", shellWireEdgeCount.size(),
-               numShells, shellsDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentShellArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.080", "shell:pointType", shellPointType.size(), numShells,
-               shellsDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentShellArraySizes,
-               &errors);
-
-    // Faceuse (BA.100): sized by sum(shell:faceuseCount).
-    const size_t numFaceuses = _Sum(shellFaceuseCount);
-    const VtArray<unsigned int> faceuseFaceIndex
-        = _Read<unsigned int>(brep.GetFaceuseFaceIndexAttr());
-    const VtArray<TfToken> faceuseOrientationType
-        = _Read<TfToken>(brep.GetFaceuseOrientationTypeAttr());
-    const std::string faceusesDesc
-        = TfStringPrintf("sum of shell:faceuseCount = %zu", numFaceuses);
-    _CheckSize(usdPrim, "BA.100", "faceuse:faceIndex", faceuseFaceIndex.size(),
-               numFaceuses, faceusesDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentFaceuseArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.100", "faceuse:orientationType",
-               faceuseOrientationType.size(), numFaceuses, faceusesDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentFaceuseArraySizes,
-               &errors);
-
-    // Face (BA.120 / BA.150): faceuses come in pairs, so there are half as many
-    // faces. face:range has two (UVmin, UVmax) entries per face.
-    //
-    // The count comes from the authored faceuse:faceIndex, not from
-    // sum(shell:faceuseCount), because that is where brep_validator.py takes it
-    // from. A shell declaring no faceuses beside a populated faceuse:faceIndex
-    // gives a derived count of zero, and every face array then reads as
-    // oversized against a file Python measures against the array itself.
-    const size_t numFaces = faceuseFaceIndex.size() / 2;
-    const VtArray<unsigned int> faceLoopCount
-        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
-    const VtArray<TfToken> faceSurfaceType
-        = _Read<TfToken>(brep.GetFaceSurfaceTypeAttr());
-    const VtArray<TfToken> faceTrimType
-        = _Read<TfToken>(brep.GetFaceTrimTypeAttr());
-    const VtArray<GfVec2d> faceRange = _Read<GfVec2d>(brep.GetFaceRangeAttr());
-    const std::string facesDesc
-        = TfStringPrintf("faceuse count / 2 = %zu", numFaces);
-    _CheckSize(usdPrim, "BA.120", "face:loopCount", faceLoopCount.size(), numFaces,
-               facesDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentFaceArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.120", "face:surfaceType", faceSurfaceType.size(), numFaces,
-               facesDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentFaceArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.120", "face:trimType", faceTrimType.size(), numFaces,
-               facesDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentFaceArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.150", "face:range", faceRange.size(), 2 * numFaces,
-               TfStringPrintf("2 * number of faces = %zu", 2 * numFaces),
-               UsdSolidValidationErrorNameTokens->inconsistentFaceArraySizes,
-               &errors);
-
-    // Loop (BA.165): sized by sum(face:loopCount).
-    const size_t numLoops = _Sum(faceLoopCount);
-    const VtArray<unsigned int> loopEdgeuseCount
-        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
-    const VtArray<unsigned int> loopVertexIndex
-        = _Read<unsigned int>(brep.GetLoopVertexIndexAttr());
-    const std::string loopsDesc
-        = TfStringPrintf("sum of face:loopCount = %zu", numLoops);
-    _CheckSize(usdPrim, "BA.165", "loop:edgeuseCount", loopEdgeuseCount.size(), numLoops,
-               loopsDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentLoopArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.165", "loop:vertexIndex", loopVertexIndex.size(), numLoops,
-               loopsDesc,
-               UsdSolidValidationErrorNameTokens->inconsistentLoopArraySizes,
-               &errors);
-
-    // Edgeuse (BA.180): sized by sum(loop:edgeuseCount).
-    const size_t numEdgeuses = _Sum(loopEdgeuseCount);
-    const std::string edgeusesDesc
-        = TfStringPrintf("sum of loop:edgeuseCount = %zu", numEdgeuses);
-    _CheckSize(usdPrim, "BA.180", "edgeuse:edgeIndex",
-               _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr()).size(),
-               numEdgeuses, edgeusesDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentEdgeuseArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.180", "edgeuse:orientationType",
-               _Read<TfToken>(brep.GetEdgeuseOrientationTypeAttr()).size(),
-               numEdgeuses, edgeusesDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentEdgeuseArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.180", "edgeuse:nextRadialEUIndex",
-               _Read<unsigned int>(
-                   brep.GetEdgeuseNextRadialEUIndexAttr()).size(),
-               numEdgeuses, edgeusesDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentEdgeuseArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.180", "edgeuse:thisRadialEntryType",
-               _Read<TfToken>(
-                   brep.GetEdgeuseThisRadialEntryTypeAttr()).size(),
-               numEdgeuses, edgeusesDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentEdgeuseArraySizes,
-               &errors);
-
-    // Edge (BA.210): the remaining edge arrays must match the edge count, and
-    // edge:range has two entries per edge.
-    //
-    // brep_validator.py takes the edge count from edge:vertexIndices, not from
-    // edge:curveType. The two agree on well-formed data; where they do not, the
-    // count Python validates against is the one this has to use, or BA.230
-    // measures edge:range against a different number of edges and stays silent
-    // on a file Python reports.
-    const VtArray<TfToken> edgeCurveType
-        = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
-    const size_t numEdges
-        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()).size();
-    _CheckSize(usdPrim, "BA.210", "edge:vertexIndices",
-               _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()).size(),
-               edgeCurveType.size(),
-               TfStringPrintf("number of edges = %zu", edgeCurveType.size()),
-               UsdSolidValidationErrorNameTokens->inconsistentEdgeArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.230", "edge:range",
-               _Read<double>(brep.GetEdgeRangeAttr()).size(), 2 * numEdges,
-               TfStringPrintf("2 * number of edges = %zu", 2 * numEdges),
-               UsdSolidValidationErrorNameTokens->inconsistentEdgeArraySizes,
-               &errors);
-
-    // WireEdge (BA.250): sized by sum(shell:wireEdgeCount).
-    const size_t numWireEdges = _Sum(shellWireEdgeCount);
-    const std::string wireEdgesDesc
-        = TfStringPrintf("sum of shell:wireEdgeCount = %zu", numWireEdges);
-    _CheckSize(usdPrim, "BA.250", "wireEdge:curveType",
-               _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr()).size(),
-               numWireEdges, wireEdgesDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentWireEdgeArraySizes,
-               &errors);
-    _CheckSize(usdPrim, "BA.250", "wireEdge:vertexIndices",
-               _Read<GfVec2i>(brep.GetWireEdgeVertexIndicesAttr()).size(),
-               numWireEdges, wireEdgesDesc,
-               UsdSolidValidationErrorNameTokens
-                   ->inconsistentWireEdgeArraySizes,
-               &errors);
-    // wireEdge:range's two-per-edge structure is BA.270, reported by
-    // BrepArrayStructure; checking it again here would double-report.
-
-    // BA.670: edgeuse:nextRadialEUIndex must form per-Brep radial chains whose
-    // members all name one edge, and each edge's edgeuses must share one chain.
-    _CheckRadialChainSameEdge(usdPrim, brep, &errors);
-
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
-// BrepArrayTokenValues                                                       //
-// -------------------------------------------------------------------------- //
-UsdValidationErrorVector
-_BrepArrayTokenValues(const UsdPrim &usdPrim,
-                      const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    const UsdSolidBrepArray brep(usdPrim);
-
-    // Each set is listed in the order the Python brep_validator declares it.
-    // The membership of all ten sets is taken from the Python implementation
-    // and agrees entry-for-entry with the allowedTokens metadata on
-    // pxr/usd/usdSolid/schema.usda.
-    static const std::vector<TfToken> regionTypes
-        = { TfToken("solidRegion"), TfToken("voidRegion") };
-    static const std::vector<TfToken> shellPointTypes
-        = { TfToken("BrepPointAPI"), TfToken("none") };
-    static const std::vector<TfToken> orientationTypes
-        = { TfToken("same"), TfToken("opposite") };
-    static const std::vector<TfToken> surfaceTypes
-        = { TfToken("BrepSurfaceNurbAPI"), TfToken("BrepSurfaceSphereAPI"),
-            TfToken("BrepSurfacePlaneAPI"), TfToken("BrepSurfaceCylinderAPI"),
-            TfToken("BrepSurfaceConeAPI"), TfToken("BrepSurfaceTorusAPI") };
-    static const std::vector<TfToken> trimTypes
-        = { TfToken("rectangular"), TfToken("general") };
-    static const std::vector<TfToken> radialEntryTypes
-        = { TfToken("topEntry"), TfToken("bottomEntry") };
-    static const std::vector<TfToken> curveTypes
-        = { TfToken("BrepCurve3dNurbAPI"), TfToken("BrepCurve3dCircleAPI"),
-            TfToken("BrepCurve3dLineAPI"),
-            TfToken("BrepCurve3dEllipseAPI") };
-    static const std::vector<TfToken> vertexPointTypes
-        = { TfToken("BrepPointAPI") };
-
-    UsdValidationErrorVector errors;
-
-    // BA.075: region:type.
-    _CheckAllowedTokens(usdPrim, _Read<TfToken>(brep.GetRegionTypeAttr()),
-                        regionTypes, "BA.075", "region:type", "region",
-                        UsdSolidValidationErrorNameTokens->invalidRegionType,
-                        &errors);
-    // BA.090: shell:pointType. 'none' is allowed: a shell that carries no
-    // representative point authors the token rather than omitting the entry,
-    // so the array stays parallel to the other shell arrays.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetShellPointTypeAttr()), shellPointTypes,
-        "BA.090", "shell:pointType", "shell",
-        UsdSolidValidationErrorNameTokens->invalidShellPointType, &errors);
-    // BA.110: faceuse:orientationType.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetFaceuseOrientationTypeAttr()),
-        orientationTypes, "BA.110", "faceuse:orientationType", "faceuse",
-        UsdSolidValidationErrorNameTokens->invalidFaceuseOrientationType,
-        &errors);
-    // BA.130: face:surfaceType.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetFaceSurfaceTypeAttr()), surfaceTypes,
-        "BA.130", "face:surfaceType", "face",
-        UsdSolidValidationErrorNameTokens->invalidFaceSurfaceType, &errors);
-    // BA.135: face:trimType.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetFaceTrimTypeAttr()), trimTypes,
-        "BA.135", "face:trimType", "face",
-        UsdSolidValidationErrorNameTokens->invalidFaceTrimType, &errors);
-    // BA.190: edgeuse:orientationType.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetEdgeuseOrientationTypeAttr()),
-        orientationTypes, "BA.190", "edgeuse:orientationType", "edgeuse",
-        UsdSolidValidationErrorNameTokens->invalidEdgeuseOrientationType,
-        &errors);
-    // BA.195: edgeuse:thisRadialEntryType.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetEdgeuseThisRadialEntryTypeAttr()),
-        radialEntryTypes, "BA.195", "edgeuse:thisRadialEntryType", "edgeuse",
-        UsdSolidValidationErrorNameTokens->invalidEdgeuseRadialEntryType,
-        &errors);
-    // BA.245: edge:curveType.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetEdgeCurveTypeAttr()), curveTypes,
-        "BA.245", "edge:curveType", "edge",
-        UsdSolidValidationErrorNameTokens->invalidEdgeCurveType, &errors);
-    // BA.260: wireEdge:curveType. Python reaches this check only when
-    // sum(shell:wireEdgeCount) > 0; the guard makes no difference here because
-    // an empty wireEdge:curveType has nothing to reject, and a BrepArray that
-    // authors wire-edge curve types while declaring no wire edges is exactly
-    // the case worth reporting.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr()), curveTypes,
-        "BA.260", "wireEdge:curveType", "wireEdge",
-        UsdSolidValidationErrorNameTokens->invalidWireEdgeCurveType, &errors);
-    // BA.315: vertex:pointType. Unlike shell:pointType there is no 'none':
-    // every vertex has a point.
-    _CheckAllowedTokens(
-        usdPrim, _Read<TfToken>(brep.GetVertexPointTypeAttr()),
-        vertexPointTypes, "BA.315", "vertex:pointType", "vertex",
-        UsdSolidValidationErrorNameTokens->invalidVertexPointType, &errors);
-
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
 // BrepArrayRanges                                                            //
 // -------------------------------------------------------------------------- //
 UsdValidationErrorVector
@@ -1073,111 +3240,15 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
     }
     const UsdSolidBrepArray brep(usdPrim);
 
-    UsdValidationErrorVector errors;
-
-    // BA.140: every face must have at least one loop.
-    const VtArray<unsigned int> faceLoopCount
-        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
-    for (size_t i = 0; i < faceLoopCount.size(); ++i) {
-        if (faceLoopCount[i] < 1) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->invalidFaceLoopCount,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.140] BrepArray <%s>: face:loopCount[%zu] = 0; each face must "
-                    "have at least one loop.",
-                    usdPrim.GetPath().GetText(), i));
-        }
-    }
-
-    // BA.145: every face:range component must be a finite number. NaN defeats
-    // every ordering test downstream -- each comparison against it is false --
-    // so the degeneracy and domain rules below pass a face whose window is not
-    // a number at all.
-    {
-        const VtArray<GfVec2d> fr = _Read<GfVec2d>(brep.GetFaceRangeAttr());
-        for (size_t i = 0; i < fr.size(); ++i) {
-            const double u = fr[i][0], v = fr[i][1];
-            if (std::isnan(u) || std::isnan(v)) {
-                errors.emplace_back(
-                    UsdSolidValidationErrorNameTokens->invalidFaceRangeStructure,
-                    UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                    TfStringPrintf(
-                        "[BA.145] BrepArray <%s>: face:range at index %zu "
-                        "contains NaN (%g, %g); face:range must hold finite "
-                        "numeric UV pairs.",
-                        usdPrim.GetPath().GetText(), i, u, v));
-            } else if (std::isinf(u) || std::isinf(v)) {
-                errors.emplace_back(
-                    UsdSolidValidationErrorNameTokens->invalidFaceRangeStructure,
-                    UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                    TfStringPrintf(
-                        "[BA.145] BrepArray <%s>: face:range at index %zu "
-                        "contains an infinite value (%g, %g); face:range must "
-                        "hold finite numeric UV pairs.",
-                        usdPrim.GetPath().GetText(), i, u, v));
-            }
-        }
-    }
-
-    // BA.155 / BA.160: face:range is stored as (UVmin, UVmax) pairs; the U and
-    // V intervals must each be non-degenerate (max > min).
-    const VtArray<GfVec2d> faceRange = _Read<GfVec2d>(brep.GetFaceRangeAttr());
-    for (size_t face = 0; 2 * face + 1 < faceRange.size(); ++face) {
-        const GfVec2d &uvMin = faceRange[2 * face];
-        const GfVec2d &uvMax = faceRange[2 * face + 1];
-        if (uvMax[0] <= uvMin[0]) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->degenerateFaceURange,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.155] BrepArray <%s>: face:range for face %zu has "
-                    "degenerate U "
-                    "interval (Umin %g >= Umax %g).",
-                    usdPrim.GetPath().GetText(), face, uvMin[0], uvMax[0]));
-        }
-        if (uvMax[1] <= uvMin[1]) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->degenerateFaceVRange,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.160] BrepArray <%s>: face:range for face %zu has "
-                    "degenerate V "
-                    "interval (Vmin %g >= Vmax %g).",
-                    usdPrim.GetPath().GetText(), face, uvMin[1], uvMax[1]));
-        }
-    }
-
-    // BA.235: each edge:range (min, max) pair must be ordered.
-    const VtArray<double> edgeRange = _Read<double>(brep.GetEdgeRangeAttr());
-    for (size_t edge = 0; 2 * edge + 1 < edgeRange.size(); ++edge) {
-        if (edgeRange[2 * edge] > edgeRange[2 * edge + 1]) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->invalidEdgeRangeOrder,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.235] BrepArray <%s>: edge:range for edge %zu is not ordered "
-                    "(min %g > max %g).",
-                    usdPrim.GetPath().GetText(), edge, edgeRange[2 * edge],
-                    edgeRange[2 * edge + 1]));
-        }
-    }
-
-    // BA.275: each wireEdge:range (min, max) pair must be ordered.
-    const VtArray<double> wireEdgeRange
-        = _Read<double>(brep.GetWireEdgeRangeAttr());
-    for (size_t edge = 0; 2 * edge + 1 < wireEdgeRange.size(); ++edge) {
-        if (wireEdgeRange[2 * edge] > wireEdgeRange[2 * edge + 1]) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->invalidWireEdgeRangeOrder,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.275] BrepArray <%s>: wireEdge:range for wireEdge %zu is not "
-                    "ordered (min %g > max %g).",
-                    usdPrim.GetPath().GetText(), edge,
-                    wireEdgeRange[2 * edge], wireEdgeRange[2 * edge + 1]));
-        }
-    }
+    // BA.140 face loop counts, BA.145 / BA.155 / BA.160 face:range structure
+    // and intervals, BA.235 / BA.275 edge and wire-edge range ordering.
+    _BrepChecker c(usdPrim,
+                   { "BA.140", "BA.145", "BA.155", "BA.160", "BA.235", "BA.275" });
+    c.ValidateFaceLoopCountMinimum();
+    c.ValidateFaceRanges();
+    c.ValidateEdgeArrays();
+    c.ValidateWireEdgeArrays();
+    UsdValidationErrorVector errors = c.TakeErrors();
 
     // BA.630 / BA.631: angular parameter maxima stay in the primary period.
     _CheckAngularRangePrimaryPeriod(usdPrim, brep, &errors);
@@ -2008,186 +4079,6 @@ _CheckEllipseInstance(const UsdPrim &prim, const char *inst, size_t count,
 }
 
 // -------------------------------------------------------------------------- //
-// BrepArrayAuthorship                                                        //
-// -------------------------------------------------------------------------- //
-// Whether an attribute counts as present the way brep_validator.py's
-// authorship rules count it: UsdAttribute::IsAuthored, i.e. any authored
-// opinion at all. A declaration with no value ("uniform uint[] loop:vertexIndex"
-// and nothing after it) is present; HasAuthoredValue would call it missing.
-bool
-_IsAuthoredOpinion(const UsdPrim &prim, const char *name)
-{
-    const UsdAttribute a = prim.GetAttribute(TfToken(name));
-    return a && a.IsAuthored();
-}
-
-// BA.070 / BA.085 / BA.105 / BA.125 / BA.170 / BA.185 / BA.215 / BA.300 /
-// BA.255. Every topology family's attributes must be authored, on every
-// BrepArray, whether or not the counts above it say the family has members:
-// Python's _validate_authorship_only runs unconditionally and reports each
-// missing attribute on its own. A BrepArray with no faces still authors
-// face:loopCount, as an empty array.
-//
-// The wire-edge family is the exception, as in Python's
-// _validate_wireEdge_arrays: its three attributes are all-or-none (BA.255).
-// Authoring some but not all is one finding naming both lists; authoring none
-// is a finding per attribute only when shell:wireEdgeCount declares wire
-// edges.
-UsdValidationErrorVector
-_BrepArrayAuthorship(const UsdPrim &usdPrim,
-                     const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    struct Item {
-        const char *attr;
-        const char *ba;
-    };
-    // In the order brep_validator.py checks them (CheckPrim runs the face
-    // family before the loop family, and edges before edgeuses).
-    static const std::vector<Item> items = {
-        { "region:shellCount", "BA.070" },
-        { "region:type", "BA.070" },
-        { "shell:faceuseCount", "BA.085" },
-        { "shell:wireEdgeCount", "BA.085" },
-        { "shell:pointType", "BA.085" },
-        { "faceuse:faceIndex", "BA.105" },
-        { "faceuse:orientationType", "BA.105" },
-        { "face:loopCount", "BA.125" },
-        { "face:trimType", "BA.125" },
-        { "face:surfaceType", "BA.125" },
-        { "face:range", "BA.125" },
-        { "loop:edgeuseCount", "BA.170" },
-        { "loop:vertexIndex", "BA.170" },
-        { "edge:curveType", "BA.215" },
-        { "edge:vertexIndices", "BA.215" },
-        { "edge:range", "BA.215" },
-        { "edgeuse:edgeIndex", "BA.185" },
-        { "edgeuse:orientationType", "BA.185" },
-        { "edgeuse:nextRadialEUIndex", "BA.185" },
-        { "edgeuse:thisRadialEntryType", "BA.185" },
-        { "vertex:pointType", "BA.300" },
-    };
-    UsdValidationErrorVector errors;
-    for (const Item &it : items) {
-        if (!_IsAuthoredOpinion(usdPrim, it.attr)) {
-            _Err(&errors, UsdSolidValidationErrorNameTokens->attributeNotAuthored,
-                 usdPrim,
-                 TfStringPrintf("[%s] BrepArray <%s>: %s is not authored in "
-                                "BrepArray.",
-                                it.ba, usdPrim.GetPath().GetText(), it.attr));
-        }
-    }
-
-    // BA.255: the wire-edge family, all or none.
-    static const char *const wireAttrs[3]
-        = { "wireEdge:curveType", "wireEdge:vertexIndices", "wireEdge:range" };
-    std::vector<std::string> authored, notAuthored;
-    for (const char *name : wireAttrs) {
-        (_IsAuthoredOpinion(usdPrim, name) ? authored : notAuthored)
-            .push_back(TfStringPrintf("'%s'", name));
-    }
-    if (!authored.empty() && !notAuthored.empty()) {
-        _Err(&errors, UsdSolidValidationErrorNameTokens->attributeNotAuthored,
-             usdPrim,
-             TfStringPrintf("[BA.255] BrepArray <%s>: Wire edge topology "
-                            "attributes must be authored together or all "
-                            "omitted. Authored: [%s]; not authored: [%s].",
-                            usdPrim.GetPath().GetText(),
-                            TfStringJoin(authored, ", ").c_str(),
-                            TfStringJoin(notAuthored, ", ").c_str()));
-    } else if (authored.empty()) {
-        const UsdSolidBrepArray brep(usdPrim);
-        const size_t totalWireEdges
-            = _Sum(_Read<unsigned int>(brep.GetShellWireEdgeCountAttr()));
-        if (totalWireEdges > 0) {
-            for (const char *name : wireAttrs) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->attributeNotAuthored,
-                     usdPrim,
-                     TfStringPrintf("[BA.255] BrepArray <%s>: %s is not "
-                                    "authored in BrepArray but "
-                                    "shell:wireEdgeCount requires %zu wire "
-                                    "edge(s).",
-                                    usdPrim.GetPath().GetText(), name,
-                                    totalWireEdges));
-            }
-        }
-    }
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
-// BrepArrayDataTypes                                                         //
-// -------------------------------------------------------------------------- //
-UsdValidationErrorVector
-_BrepArrayDataTypes(const UsdPrim &usdPrim,
-                    const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    struct Item {
-        const char *attr;
-        SdfValueTypeName type;
-        const char *ba;
-    };
-    const std::vector<Item> items = {
-        { "brep:intersectTol3d", SdfValueTypeNames->DoubleArray, "BA.061" },
-        { "brep:extent", SdfValueTypeNames->Double3Array, "BA.061" },
-        { "brep:regionCount", SdfValueTypeNames->UIntArray, "BA.061" },
-        { "region:shellCount", SdfValueTypeNames->UIntArray, "BA.076" },
-        { "region:type", SdfValueTypeNames->TokenArray, "BA.076" },
-        { "shell:faceuseCount", SdfValueTypeNames->UIntArray, "BA.091" },
-        { "shell:wireEdgeCount", SdfValueTypeNames->UIntArray, "BA.091" },
-        { "shell:pointType", SdfValueTypeNames->TokenArray, "BA.091" },
-        { "faceuse:faceIndex", SdfValueTypeNames->UIntArray, "BA.116" },
-        { "faceuse:orientationType", SdfValueTypeNames->TokenArray, "BA.116" },
-        { "face:loopCount", SdfValueTypeNames->UIntArray, "BA.161" },
-        { "face:surfaceType", SdfValueTypeNames->TokenArray, "BA.161" },
-        { "face:trimType", SdfValueTypeNames->TokenArray, "BA.161" },
-        { "face:range", SdfValueTypeNames->Double2Array, "BA.161" },
-        { "loop:edgeuseCount", SdfValueTypeNames->UIntArray, "BA.176" },
-        { "loop:vertexIndex", SdfValueTypeNames->UIntArray, "BA.176" },
-        { "edgeuse:edgeIndex", SdfValueTypeNames->UIntArray, "BA.196" },
-        { "edgeuse:orientationType", SdfValueTypeNames->TokenArray, "BA.196" },
-        { "edgeuse:nextRadialEUIndex", SdfValueTypeNames->UIntArray, "BA.196" },
-        { "edgeuse:thisRadialEntryType", SdfValueTypeNames->TokenArray,
-          "BA.196" },
-        { "edge:curveType", SdfValueTypeNames->TokenArray, "BA.237" },
-        { "edge:vertexIndices", SdfValueTypeNames->Int2Array, "BA.237" },
-        { "edge:range", SdfValueTypeNames->DoubleArray, "BA.237" },
-        { "wireEdge:curveType", SdfValueTypeNames->TokenArray, "BA.291" },
-        { "wireEdge:vertexIndices", SdfValueTypeNames->Int2Array, "BA.291" },
-        { "wireEdge:range", SdfValueTypeNames->DoubleArray, "BA.291" },
-        { "vertex:pointType", SdfValueTypeNames->TokenArray, "BA.316" },
-        // The positions must be exactly point3d[], the type BrepPointAPI
-        // declares: brep_validator.py compares the authored type name against
-        // the schema's, so the other GfVec3d roles (vector3d[], double3[]) fail
-        // BA.326 / BA.327 even though they hold the same values.
-        { "brep:vertexPoint:point:position", SdfValueTypeNames->Point3dArray,
-          "BA.326" },
-        { "brep:shellPoint:point:position", SdfValueTypeNames->Point3dArray,
-          "BA.327" },
-    };
-    UsdValidationErrorVector errors;
-    for (const Item &it : items) {
-        std::string got;
-        if (_AuthoredTypeMismatch(usdPrim, it.attr, it.type, &got)) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->invalidAttributeDataType,
-                 usdPrim,
-                 TfStringPrintf("[%s] BrepArray <%s>: attribute %s has type '%s' "
-                                "but expected '%s'.",
-                                it.ba, usdPrim.GetPath().GetText(), it.attr,
-                                got.c_str(), it.type.GetAsToken().GetText()));
-        }
-    }
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
 // BrepArraySchemaUsage                                                       //
 // -------------------------------------------------------------------------- //
 UsdValidationErrorVector
@@ -2365,384 +4256,6 @@ _BrepArraySchemaUsage(const UsdPrim &usdPrim,
 }
 
 // -------------------------------------------------------------------------- //
-// BrepArrayReferences                                                        //
-// -------------------------------------------------------------------------- //
-// The block of an authored index array belonging to Brep b.
-//
-// brep_validator.py takes a shortcut for a single-Brep prim: it ignores the
-// count-derived partition and treats the whole authored array as that Brep's
-// block. On well-formed data the two agree. On data whose counts disagree with
-// its arrays they do not, and the count-derived partition can come out empty --
-// a prim authoring brep:regionCount = [0] alongside a populated
-// faceuse:faceIndex has no faceuse partition at all, so a partition-driven loop
-// checks nothing while Python checks every entry.
-//
-// Returns [lo, hi) into the authored array.
-std::pair<size_t, size_t>
-_IndexBlock(const std::vector<size_t> &partition, size_t b, size_t numBreps,
-            size_t authoredSize)
-{
-    if (numBreps == 1) {
-        return { 0, authoredSize };
-    }
-    const size_t lo = std::min(partition[b], authoredSize);
-    const size_t hi = std::min(partition[b + 1], authoredSize);
-    return { lo, std::max(lo, hi) };
-}
-
-UsdValidationErrorVector
-_BrepArrayReferences(const UsdPrim &usdPrim,
-                     const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    const UsdSolidBrepArray brep(usdPrim);
-    const _BrepOffsets off = _ComputeOffsets(brep);
-    if (!off.ok) {
-        return {};
-    }
-    const size_t n = off.numBreps;
-    UsdValidationErrorVector errors;
-
-    // BA.115: faceuse:faceIndex within owning Brep's face partition.
-    const VtArray<unsigned int> faceIndex
-        = _Read<unsigned int>(brep.GetFaceuseFaceIndexAttr());
-    for (size_t b = 0; b < n; ++b) {
-        const auto blk = _IndexBlock(off.faceuse, b, n, faceIndex.size());
-        for (size_t fu = blk.first; fu < blk.second; ++fu) {
-            if (faceIndex[fu] < off.face[b] || faceIndex[fu] >= off.face[b + 1]) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->faceuseFaceIndexOutOfRange,
-                     usdPrim,
-                     TfStringPrintf("[BA.115] BrepArray <%s>: faceuse:faceIndex"
-                                    "[%zu] = %u is outside Brep %zu's face range "
-                                    "[%zu, %zu).",
-                                    usdPrim.GetPath().GetText(), fu,
-                                    faceIndex[fu], b, off.face[b],
-                                    off.face[b + 1]));
-            }
-        }
-    }
-
-    // BA.205: edgeuse:edgeIndex must reference a valid edge. Edges have no
-    // per-Brep count array, so validate against the global edge range; for a
-    // single Brep this is exactly that Brep's range.
-    const VtArray<unsigned int> edgeIndex
-        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
-    // Same edge count as BA.210/BA.230 above: edge:vertexIndices, which is what
-    // brep_validator.py bounds edgeuse:edgeIndex against.
-    const size_t numEdges
-        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()).size();
-    for (size_t eu = 0; eu < edgeIndex.size(); ++eu) {
-        if (edgeIndex[eu] >= numEdges) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->edgeuseEdgeIndexOutOfRange,
-                 usdPrim,
-                 TfStringPrintf("[BA.205] BrepArray <%s>: edgeuse:edgeIndex[%zu] "
-                                "= %u is out of range [0, %zu).",
-                                usdPrim.GetPath().GetText(), eu, edgeIndex[eu],
-                                numEdges));
-        }
-    }
-
-    // BA.200: edgeuse:nextRadialEUIndex within owning Brep's edgeuse partition.
-    const VtArray<unsigned int> nextRadial
-        = _Read<unsigned int>(brep.GetEdgeuseNextRadialEUIndexAttr());
-    const size_t totalEu = nextRadial.size();
-    // No single-Brep shortcut here: brep_validator.py bounds this one by the
-    // count-derived edgeuse partition, so taking the whole authored array would
-    // report a radial index as out of range on exactly the malformed prims
-    // where Python reports nothing.
-    for (size_t b = 0; b < n; ++b) {
-        for (size_t eu = off.edgeuse[b];
-             eu < off.edgeuse[b + 1] && eu < nextRadial.size(); ++eu) {
-            if (nextRadial[eu] >= totalEu || nextRadial[eu] < off.edgeuse[b]
-                || nextRadial[eu] >= off.edgeuse[b + 1]) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens
-                         ->edgeuseNextRadialIndexOutOfRange,
-                     usdPrim,
-                     TfStringPrintf("[BA.200] BrepArray <%s>: "
-                                    "edgeuse:nextRadialEUIndex[%zu] = %u is "
-                                    "outside Brep %zu's edgeuse range [%zu, %zu).",
-                                    usdPrim.GetPath().GetText(), eu,
-                                    nextRadial[eu], b, off.edgeuse[b],
-                                    off.edgeuse[b + 1]));
-            }
-        }
-    }
-
-    // Vertices also have no per-Brep count array; validate vertex-index
-    // references against the global vertex range (exact for a single Brep).
-    const size_t vSize
-        = _Read<TfToken>(brep.GetVertexPointTypeAttr()).size();
-
-    // BA.175: a loop with no edgeuses must reference a valid vertex.
-    const VtArray<unsigned int> loopEdgeuseCount
-        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
-    const VtArray<unsigned int> loopVertexIndex
-        = _Read<unsigned int>(brep.GetLoopVertexIndexAttr());
-
-    // A loop array shorter than the derived loop count is itself the finding.
-    // Iterating the shorter of the two silently skips the loops with no data,
-    // which is exactly where the missing entries are; brep_validator.py reports
-    // the shortfall instead.
-    {
-        const size_t expectedLoops = off.loop[n];
-        const size_t available
-            = std::min(loopEdgeuseCount.size(), loopVertexIndex.size());
-        if (available < expectedLoops) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->loopVertexIndexOutOfRange,
-                 usdPrim,
-                 TfStringPrintf(
-                     "[BA.175] BrepArray <%s>: loop:edgeuseCount / "
-                     "loop:vertexIndex missing data (expected loops up to %zu, "
-                     "but only %zu entries are available).",
-                     usdPrim.GetPath().GetText(), expectedLoops, available));
-        }
-    }
-    for (size_t lp = 0;
-         lp < loopEdgeuseCount.size() && lp < loopVertexIndex.size(); ++lp) {
-        if (loopEdgeuseCount[lp] == 0u && loopVertexIndex[lp] >= vSize) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->loopVertexIndexOutOfRange,
-                 usdPrim,
-                 TfStringPrintf("[BA.175] BrepArray <%s>: loop:vertexIndex[%zu] = "
-                                "%u (loop with no edgeuses) is out of range "
-                                "[0, %zu).",
-                                usdPrim.GetPath().GetText(), lp,
-                                loopVertexIndex[lp], vSize));
-        }
-    }
-
-    // BA.225: both components of each edge:vertexIndices pair must be valid.
-    const VtArray<GfVec2i> edgeVtx
-        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr());
-    for (size_t e = 0; e < edgeVtx.size(); ++e) {
-        for (int k = 0; k < 2; ++k) {
-            const long long c = edgeVtx[e][k];
-            if (c < 0 || c >= static_cast<long long>(vSize)) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->edgeVertexIndexOutOfRange,
-                     usdPrim,
-                     TfStringPrintf("[BA.225] BrepArray <%s>: edge:vertexIndices"
-                                    "[%zu][%d] = %lld is out of range [0, %zu).",
-                                    usdPrim.GetPath().GetText(), e, k, c, vSize));
-            }
-        }
-    }
-
-    // BA.265: both components of each wireEdge:vertexIndices pair must be valid.
-    const VtArray<GfVec2i> wireVtx
-        = _Read<GfVec2i>(brep.GetWireEdgeVertexIndicesAttr());
-
-    // An array the shell counts say should exist, but which reads back empty --
-    // unauthored, or authored at a length the int2[] type cannot hold -- is the
-    // finding. Reading it as empty and iterating nothing reports a file with no
-    // wire-edge indexing at all as clean.
-    if (wireVtx.empty() && off.wireEdge[n] > 0) {
-        _Err(&errors,
-             UsdSolidValidationErrorNameTokens->wireEdgeVertexIndexOutOfRange,
-             usdPrim,
-             TfStringPrintf(
-                 "[BA.265] BrepArray <%s>: wireEdge:vertexIndices is missing or "
-                 "not authored for %zu wire edge(s), so the indexing cannot be "
-                 "validated.",
-                 usdPrim.GetPath().GetText(), off.wireEdge[n]));
-    }
-    for (size_t w = 0; w < wireVtx.size(); ++w) {
-        for (int k = 0; k < 2; ++k) {
-            const long long c = wireVtx[w][k];
-            if (c < 0 || c >= static_cast<long long>(vSize)) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens
-                         ->wireEdgeVertexIndexOutOfRange,
-                     usdPrim,
-                     TfStringPrintf("[BA.265] BrepArray <%s>: wireEdge:"
-                                    "vertexIndices[%zu][%d] = %lld is out of "
-                                    "range [0, %zu).",
-                                    usdPrim.GetPath().GetText(), w, k, c, vSize));
-            }
-        }
-    }
-
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
-// BrepArrayCompleteness                                                      //
-// -------------------------------------------------------------------------- //
-UsdValidationErrorVector
-_BrepArrayCompleteness(const UsdPrim &usdPrim,
-                       const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    const UsdSolidBrepArray brep(usdPrim);
-    UsdValidationErrorVector errors;
-
-    // BA.720 / BA.721 / BA.722: every edge:curveType, wireEdge:curveType and
-    // face:surfaceType entry names one of the recognized categories, so the
-    // per-category counts add up to the array length. The geometry strata are
-    // sized per category -- a face whose surfaceType names nothing recognized
-    // has no surface data anywhere -- so the total is checked here in addition
-    // to the token validity BA.130 / BA.245 / BA.260 check in
-    // BrepArrayTokenValues, whose allowed-token sets are the same three sets.
-    // These run ahead of the offset computation below: they need no per-Brep
-    // partition, and a BrepArray with no brep:regionCount is exactly the kind
-    // of file whose types are worth counting.
-    {
-        static const std::vector<TfToken> recognizedCurveTypes
-            = { TfToken("BrepCurve3dNurbAPI"), TfToken("BrepCurve3dCircleAPI"),
-                TfToken("BrepCurve3dLineAPI"),
-                TfToken("BrepCurve3dEllipseAPI") };
-        static const std::vector<TfToken> recognizedSurfaceTypes
-            = { TfToken("BrepSurfaceNurbAPI"), TfToken("BrepSurfaceSphereAPI"),
-                TfToken("BrepSurfacePlaneAPI"),
-                TfToken("BrepSurfaceCylinderAPI"), TfToken("BrepSurfaceConeAPI"),
-                TfToken("BrepSurfaceTorusAPI") };
-
-        const auto checkExhaustive
-            = [&](const VtArray<TfToken> &values,
-                  const std::vector<TfToken> &recognized, const char *ba,
-                  const char *attrName, const char *plural,
-                  const TfToken &errorName) {
-                  if (values.empty()) {
-                      return;
-                  }
-                  size_t known = 0;
-                  for (const TfToken &t : values) {
-                      if (std::find(recognized.begin(), recognized.end(), t)
-                          != recognized.end()) {
-                          ++known;
-                      }
-                  }
-                  if (known == values.size()) {
-                      return;
-                  }
-                  _Err(&errors, errorName, usdPrim,
-                       TfStringPrintf(
-                           "[%s] BrepArray <%s>: %s names a recognized type for "
-                           "%zu of %zu %s; %zu unrecognized.",
-                           ba, usdPrim.GetPath().GetText(), attrName, known,
-                           values.size(), plural, values.size() - known));
-              };
-
-        checkExhaustive(
-            _Read<TfToken>(brep.GetEdgeCurveTypeAttr()), recognizedCurveTypes,
-            "BA.720", "edge:curveType", "edges",
-            UsdSolidValidationErrorNameTokens->edgeCurveTypeNotExhaustive);
-        checkExhaustive(
-            _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr()),
-            recognizedCurveTypes, "BA.721", "wireEdge:curveType", "wireEdges",
-            UsdSolidValidationErrorNameTokens->wireEdgeCurveTypeNotExhaustive);
-        checkExhaustive(
-            _Read<TfToken>(brep.GetFaceSurfaceTypeAttr()),
-            recognizedSurfaceTypes, "BA.722", "face:surfaceType", "faces",
-            UsdSolidValidationErrorNameTokens->faceSurfaceTypeNotExhaustive);
-    }
-
-    const _BrepOffsets off = _ComputeOffsets(brep);
-    if (!off.ok) {
-        return errors;
-    }
-    const size_t n = off.numBreps;
-
-    // BA.580: each face referenced by exactly two faceuses within its Brep.
-    const VtArray<unsigned int> faceIndex
-        = _Read<unsigned int>(brep.GetFaceuseFaceIndexAttr());
-    if (!faceIndex.empty()) {
-        for (size_t b = 0; b < n; ++b) {
-            std::unordered_map<unsigned int, int> refCount;
-            for (size_t fu = off.faceuse[b];
-                 fu < off.faceuse[b + 1] && fu < faceIndex.size(); ++fu) {
-                ++refCount[faceIndex[fu]];
-            }
-            for (size_t f = off.face[b]; f < off.face[b + 1]; ++f) {
-                const auto it = refCount.find(static_cast<unsigned int>(f));
-                const int c = it == refCount.end() ? 0 : it->second;
-                if (c != 2) {
-                    _Err(&errors,
-                         UsdSolidValidationErrorNameTokens
-                             ->faceusePairingViolation,
-                         usdPrim,
-                         TfStringPrintf("[BA.580] BrepArray <%s>: face %zu in "
-                                        "Brep %zu is referenced by %d faceuses "
-                                        "(expected exactly 2).",
-                                        usdPrim.GetPath().GetText(), f, b, c));
-                }
-            }
-        }
-    }
-
-    // BA.581: radial edgeuse chains must close into cycles.
-    const VtArray<unsigned int> nextRadial
-        = _Read<unsigned int>(brep.GetEdgeuseNextRadialEUIndexAttr());
-    const size_t totalEu = nextRadial.size();
-    if (totalEu > 0) {
-        for (size_t b = 0; b < n; ++b) {
-            const size_t euEnd = std::min(off.edgeuse[b + 1], totalEu);
-            for (size_t start = std::min(off.edgeuse[b], totalEu);
-                 start < euEnd; ++start) {
-                const size_t maxSteps = off.edgeuse[b + 1] - off.edgeuse[b];
-                size_t cur = start;
-                bool closed = false;
-                for (size_t step = 0; step < maxSteps; ++step) {
-                    if (cur >= totalEu) {
-                        break;
-                    }
-                    const unsigned int nxt = nextRadial[cur];
-                    if (nxt >= totalEu) {
-                        break;
-                    }
-                    if (nxt == start) {
-                        closed = true;
-                        break;
-                    }
-                    cur = nxt;
-                }
-                if (!closed) {
-                    _Err(&errors,
-                         UsdSolidValidationErrorNameTokens
-                             ->radialEdgeuseChainNotClosed,
-                         usdPrim,
-                         TfStringPrintf("[BA.581] BrepArray <%s>: radial edgeuse "
-                                        "chain starting at edgeuse %zu does not "
-                                        "close.",
-                                        usdPrim.GetPath().GetText(), start));
-                }
-            }
-        }
-    }
-
-    // BA.582: every edge must be referenced by at least one edgeuse. Iterate the
-    // authored edge array directly (the per-Brep offsets undercount orphans).
-    const VtArray<TfToken> edgeCurveType
-        = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
-    const VtArray<unsigned int> edgeIndex
-        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
-    if (!edgeCurveType.empty()) {
-        std::unordered_set<unsigned int> referenced(edgeIndex.begin(),
-                                                    edgeIndex.end());
-        for (size_t e = 0; e < edgeCurveType.size(); ++e) {
-            if (referenced.find(static_cast<unsigned int>(e))
-                == referenced.end()) {
-                _Err(&errors, UsdSolidValidationErrorNameTokens->orphanEdge,
-                     usdPrim,
-                     TfStringPrintf("[BA.582] BrepArray <%s>: edge %zu is not "
-                                    "referenced by any edgeuse (orphan edge).",
-                                    usdPrim.GetPath().GetText(), e));
-            }
-        }
-    }
-
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
 // BrepArrayEdgeCurveVertices                                                 //
 // -------------------------------------------------------------------------- //
 // BA.730: a NURBS edge evaluated at its authored edge:range endpoints must land
@@ -2806,168 +4319,6 @@ _ShortShapeName(const TfToken &token, const char *prefix)
 {
     return TfStringReplace(TfStringReplace(token.GetString(), prefix, ""),
                            "API", "");
-}
-
-// -------------------------------------------------------------------------- //
-// BA.670  brep-radial-chain-same-edge                                        //
-// -------------------------------------------------------------------------- //
-// edgeuse:nextRadialEUIndex partitions a Brep's edgeuses into radial chains.
-// Every edgeuse in one chain must name the same edge through
-// edgeuse:edgeIndex, and every edgeuse that names one edge must fall in a
-// single chain. Either failure is non-manifold topology: the radial ring around
-// an edge is the walk from one faceuse to the next that shares that edge, so a
-// chain that changes edge halfway, or an edge whose edgeuses sit in two
-// disjoint chains, leaves faceuses that share an edge unreachable from one
-// another.
-//
-// The chain decomposition mirrors _decompose_radial_cycles in
-// brep_validator.py: walk from each not-yet-assigned edgeuse and stop when the
-// walk reaches an edgeuse that is already assigned -- either to this walk (a
-// closed cycle) or to an earlier one (a tail running into an earlier cycle). A
-// chain may therefore carry a tail, and the two checks below are stated against
-// that decomposition. Whether a chain closes on itself is BA.581
-// (BrepArrayCompleteness), a separate rule.
-//
-// Python also has a branch for a non-numeric nextRadialEUIndex entry; the
-// native side reads a typed uint array, so that branch has no analogue here.
-void
-_CheckRadialChainSameEdge(const UsdPrim &usdPrim,
-                          const UsdSolidBrepArray &brep,
-                          UsdValidationErrorVector *errors)
-{
-    const VtArray<unsigned int> nextRadial
-        = _Read<unsigned int>(brep.GetEdgeuseNextRadialEUIndexAttr());
-    const VtArray<unsigned int> edgeIndex
-        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
-    const VtArray<unsigned int> regionCount
-        = _Read<unsigned int>(brep.GetBrepRegionCountAttr());
-    if (nextRadial.empty() || edgeIndex.empty() || regionCount.empty()) {
-        return;
-    }
-    const size_t totalEu = nextRadial.size();
-    if (edgeIndex.size() != totalEu) {
-        // The two edgeuse arrays disagree on how many edgeuses there are;
-        // BA.180 (BrepArrayTopology) reports that, and the chains cannot be
-        // decomposed meaningfully until it is fixed.
-        return;
-    }
-    const _BrepOffsets off = _ComputeOffsets(brep);
-    if (!off.ok) {
-        return;
-    }
-
-    for (size_t b = 0; b < regionCount.size(); ++b) {
-        if (b + 1 >= off.edgeuse.size()) {
-            break;
-        }
-        const size_t euStart = off.edgeuse[b];
-        const size_t euEnd = off.edgeuse[b + 1];
-        if (euStart >= euEnd) {
-            continue;
-        }
-        const size_t scanEnd = std::min(euEnd, totalEu);
-
-        // A radial pointer that leaves this Brep's edgeuse range links two
-        // Breps' rings together. Report it and stop: the chain decomposition
-        // below is only meaningful once every pointer is in range.
-        for (size_t eu = euStart; eu < scanEnd; ++eu) {
-            const size_t nxt = nextRadial[eu];
-            if (nxt < euStart || nxt >= euEnd) {
-                _Err(errors,
-                     UsdSolidValidationErrorNameTokens
-                         ->radialChainEdgeInconsistent,
-                     usdPrim,
-                     TfStringPrintf(
-                         "[BA.670] BrepArray <%s>: edgeuse:nextRadialEUIndex "
-                         "at edgeuse #%zu in brep #%zu references edgeuse "
-                         "#%zu, which is outside this brep's edgeuse range "
-                         "[%zu, %zu).",
-                         usdPrim.GetPath().GetText(), eu, b, nxt, euStart,
-                         euEnd));
-                return;
-            }
-        }
-
-        std::vector<std::vector<size_t>> chains;
-        std::unordered_map<size_t, size_t> chainOfEdgeuse;
-        for (size_t start = euStart; start < scanEnd; ++start) {
-            if (chainOfEdgeuse.count(start) != 0) {
-                continue;
-            }
-            std::vector<size_t> chain;
-            size_t cur = start;
-            while (chainOfEdgeuse.count(cur) == 0) {
-                if (cur >= totalEu) {
-                    break;
-                }
-                chain.push_back(cur);
-                chainOfEdgeuse[cur] = chains.size();
-                cur = nextRadial[cur];
-            }
-            chains.push_back(std::move(chain));
-        }
-
-        for (const std::vector<size_t> &chain : chains) {
-            std::set<unsigned int> chainEdges;
-            for (const size_t eu : chain) {
-                chainEdges.insert(edgeIndex[eu]);
-            }
-            if (chainEdges.size() == 1) {
-                continue;
-            }
-            const std::vector<unsigned int> sortedEdges(chainEdges.begin(),
-                                                        chainEdges.end());
-            _Err(errors,
-                 UsdSolidValidationErrorNameTokens->radialChainEdgeInconsistent,
-                 usdPrim,
-                 TfStringPrintf(
-                     "[BA.670] BrepArray <%s>: Radial chain %s in brep #%zu "
-                     "references multiple edges via edgeuse:edgeIndex (%s); "
-                     "all edgeuses in a radial chain must share the same edge.",
-                     usdPrim.GetPath().GetText(),
-                     _FormatIndexList(chain).c_str(), b,
-                     _FormatIndexList(sortedEdges).c_str()));
-            return;
-        }
-
-        // First-seen edge order, so the edge reported first is the one Python
-        // reports first (its dict preserves insertion order).
-        std::vector<unsigned int> edgeOrder;
-        std::unordered_map<unsigned int, std::set<size_t>> chainsOfEdge;
-        for (size_t eu = euStart; eu < scanEnd; ++eu) {
-            const unsigned int e = edgeIndex[eu];
-            auto it = chainsOfEdge.find(e);
-            if (it == chainsOfEdge.end()) {
-                edgeOrder.push_back(e);
-                it = chainsOfEdge.emplace(e, std::set<size_t>()).first;
-            }
-            it->second.insert(chainOfEdgeuse[eu]);
-        }
-        for (const unsigned int e : edgeOrder) {
-            const std::set<size_t> &ids = chainsOfEdge[e];
-            if (ids.size() <= 1) {
-                continue;
-            }
-            std::vector<size_t> edgeuses;
-            for (size_t eu = euStart; eu < scanEnd; ++eu) {
-                if (edgeIndex[eu] == e) {
-                    edgeuses.push_back(eu);
-                }
-            }
-            _Err(errors,
-                 UsdSolidValidationErrorNameTokens->radialChainEdgeInconsistent,
-                 usdPrim,
-                 TfStringPrintf(
-                     "[BA.670] BrepArray <%s>: Edge #%u in brep #%zu is "
-                     "referenced by edgeuses %s, but they fall into %zu "
-                     "separate radial chains (edgeuse:nextRadialEUIndex). All "
-                     "edgeuses of an edge must belong to one closed radial "
-                     "chain.",
-                     usdPrim.GetPath().GetText(), e, b,
-                     _FormatIndexList(edgeuses).c_str(), ids.size()));
-            return;
-        }
-    }
 }
 
 // -------------------------------------------------------------------------- //
@@ -3825,31 +5176,12 @@ _BrepArrayContainment(const UsdPrim &usdPrim,
     const double baseSlop = std::max(tol3d, _DomainTol);
     const double floatRel = _ExtentFloatRel;
 
-    // BA.040/045/050: each brep:extent box within the prim's extent.
-    const VtArray<GfVec3f> primExtent = _ReadName<GfVec3f>(usdPrim, "extent");
-    if (primExtent.size() >= 2) {
-        const char *const axisNames[3] = { "X", "Y", "Z" };
-        const char *const baCodes[3] = { "BA.040", "BA.045", "BA.050" };
-        for (size_t b = 0; b < numBoxes; ++b) {
-            const GfVec3d &mn = extent[2 * b];
-            const GfVec3d &mx = extent[2 * b + 1];
-            for (int a = 0; a < 3; ++a) {
-                const double pmn = primExtent[0][a];
-                const double pmx = primExtent[1][a];
-                if ((mn[a] < pmn && !_FloatClose(mn[a], pmn))
-                    || (mx[a] > pmx && !_FloatClose(mx[a], pmx))) {
-                    _Err(&errors,
-                         UsdSolidValidationErrorNameTokens
-                             ->brepExtentOutsidePrimExtent,
-                         usdPrim,
-                         TfStringPrintf("[%s] BrepArray <%s>: brep:extent for "
-                                        "Brep %zu exceeds the prim's %s extent "
-                                        "[%g, %g] (box [%g, %g]).",
-                                        baCodes[a], usdPrim.GetPath().GetText(),
-                                        b, axisNames[a], pmn, pmx, mn[a], mx[a]));
-                }
-            }
-        }
+    // BA.040 / BA.045 / BA.050: each brep:extent box within the prim's own
+    // extent (_validate_brep_extent).
+    {
+        _BrepChecker c(usdPrim, { "BA.040", "BA.045", "BA.050" });
+        c.ValidateBrepExtent();
+        errors = c.TakeErrors();
     }
 
     if (numBoxes == 0) {

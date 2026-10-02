@@ -47,7 +47,6 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((missingBrepAttributes, "MissingBrepAttributes"))                         \
     ((inconsistentBrepArraySizes, "InconsistentBrepArraySizes"))               \
     ((nonPositiveIntersectTol3d, "NonPositiveIntersectTol3d"))                 \
-    ((nonFiniteIntersectTol3d, "NonFiniteIntersectTol3d"))                     \
     ((invalidExtentOrder, "InvalidExtentOrder"))                               \
     ((invalidWireEdgeRangeStructure, "InvalidWireEdgeRangeStructure"))         \
     ((vertexArraySizeMismatch, "VertexArraySizeMismatch"))                     \
