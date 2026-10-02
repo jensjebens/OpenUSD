@@ -50,6 +50,7 @@
 #include <numeric>
 #include <set>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -103,24 +104,6 @@ _FirstAuthoredIntersectTol3d(const UsdSolidBrepArray &brep)
     return (!tol.empty() && tol[0] > 0.0 && std::isfinite(tol[0]))
         ? tol[0]
         : _FallbackIntersectTol3d;
-}
-
-// Whether shell `i` is a point shell: one that contributes a
-// brep:shellPoint:point:position entry. The schema makes shell:pointType
-// meaningful only when the shell has no faceuses and no wire edges, so a
-// "BrepPointAPI" token on a face or wire shell is ignored. A shell index past
-// the end of any of the three arrays is not a point shell; the array sizes are
-// BA.080's to report. Mirrors BrepConstants.is_brep_point_shell in
-// brep_validator.py (OMPE-106532), which BA.325, BA.583 and BA.710 share.
-bool
-_IsBrepPointShell(size_t i, const VtArray<TfToken> &pointTypes,
-                  const VtArray<unsigned int> &faceuseCounts,
-                  const VtArray<unsigned int> &wireEdgeCounts)
-{
-    static const TfToken brepPointApi("BrepPointAPI");
-    return i < pointTypes.size() && i < faceuseCounts.size()
-        && i < wireEdgeCounts.size() && pointTypes[i] == brepPointApi
-        && faceuseCounts[i] == 0u && wireEdgeCounts[i] == 0u;
 }
 
 // ========================================================================== //
@@ -831,9 +814,24 @@ public:
     void ValidateNurbsMathematicalConsistency();
     void ValidateNurbsOrderAndVertexCountValues();
     void ValidateWireEdge3dNurbs();
+    void ValidateVertexPositionContainment();
+    void ValidateEdge3dNurbsControlPointContainment();
+    void ValidateSurfaceNurbsControlPointContainment();
+    void ValidateAnalyticSurfaceOriginContainment();
+    void ValidateShellPointContainment();
+    void ValidateNurbsEdgeEndpointVertex();
 
 private:
     void _ValidateRequiredGeometryApis();
+    void _ValidatePointsInBrepExtent(const char *rule, const _PyValue &points,
+                                     const std::vector<long long> &offsets,
+                                     bool firstOnly, const char *subject);
+    std::unordered_map<long long, size_t> _EdgeBrepIndices();
+    bool _EdgeIntersectTolerance(
+        long long edge, const std::unordered_map<long long, size_t> &edgeBreps,
+        double *tol, size_t *brep);
+    void _ReportUnresolvedEdgeTolerance(const char *rule, long long edge,
+                                        const char *checkLabel);
 
     // --- reporting ---------------------------------------------------------
     bool _Owns(const char *rule) const { return _owned.count(rule) != 0; }
@@ -4207,6 +4205,628 @@ _BrepChecker::ValidateWireEdge3dNurbs()
     }
 }
 
+// _de_boor_evaluate: a rational B-spline curve in 3D evaluated at t with de
+// Boor's algorithm, t clamped into [knots[order - 1], knots[n]]. False where
+// Python returns None: the curve data is too short or the weight sum
+// collapses.
+bool
+_PyDeBoorEvaluate3d(long long order, const std::vector<double> &knots,
+                    const std::vector<GfVec3d> &cvs,
+                    const std::vector<double> &weights, double t, GfVec3d *out)
+{
+    const long long n = static_cast<long long>(cvs.size());
+    const long long p = order - 1;
+    if (order < 1 || n < order
+        || static_cast<long long>(knots.size()) < n + order) {
+        return false;
+    }
+    t = std::max(knots[p], std::min(t, knots[n]));
+    long long k = p;
+    bool found = false;
+    for (long long i = p; i < n; ++i) {
+        if (knots[i] <= t && t < knots[i + 1]) {
+            k = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        // math.isclose(t, knots[n], rel_tol=1e-12, abs_tol=1e-14)
+        const double kn = knots[n];
+        if (std::abs(t - kn)
+            <= std::max(1e-12 * std::max(std::abs(t), std::abs(kn)), 1e-14)) {
+            k = n - 1;
+        }
+    }
+    std::vector<std::array<double, 4>> d(static_cast<size_t>(p + 1));
+    for (long long j = 0; j <= p; ++j) {
+        const long long idx = k - p + j;
+        if (idx < 0 || idx >= n) {
+            return false;
+        }
+        const double w = weights[idx];
+        d[j] = { cvs[idx][0] * w, cvs[idx][1] * w, cvs[idx][2] * w, w };
+    }
+    for (long long r = 1; r <= p; ++r) {
+        for (long long j = p; j >= r; --j) {
+            const long long left = k - p + j;
+            const long long right = left + p - r + 1;
+            if (right >= static_cast<long long>(knots.size())
+                || left >= static_cast<long long>(knots.size())) {
+                return false;
+            }
+            const double denom = knots[right] - knots[left];
+            const double alpha
+                = std::abs(denom) < 1e-30 ? 0.0 : (t - knots[left]) / denom;
+            for (int c = 0; c < 4; ++c) {
+                d[j][c] = (1.0 - alpha) * d[j - 1][c] + alpha * d[j][c];
+            }
+        }
+    }
+    const double w = d[p][3];
+    if (std::abs(w) < 1e-30) {
+        return false;
+    }
+    *out = GfVec3d(d[p][0] / w, d[p][1] / w, d[p][2] / w);
+    return true;
+}
+
+// Python's str() of a 3-vector, for messages.
+std::string
+_PyVec3Repr(double x, double y, double z)
+{
+    return TfStringPrintf("(%g, %g, %g)", x, y, z);
+}
+
+// The control vertices (or positions) of [start, end) that lie outside one
+// Brep's brep:extent box by more than NUMERICAL_TOLERANCE on some axis, as
+// "X: d below min" / "Y: d above max" text for the message.
+std::string
+_PyDistanceOutside(const _PyValue &points, size_t i, const _PyValue &extent,
+                   size_t lo, size_t hi)
+{
+    static const char *const axes[3] = { "X", "Y", "Z" };
+    std::vector<std::string> parts;
+    for (size_t a = 0; a < 3; ++a) {
+        const double p = points.Tup(i, a);
+        const double mn = extent.Tup(lo, a), mx = extent.Tup(hi, a);
+        if (p < mn - _PyNumericalTolerance) {
+            parts.push_back(TfStringPrintf("%s: %.6g below min", axes[a], mn - p));
+        } else if (p > mx + _PyNumericalTolerance) {
+            parts.push_back(TfStringPrintf("%s: %.6g above max", axes[a], p - mx));
+        }
+    }
+    return parts.empty() ? "unknown" : TfStringJoin(parts, ", ");
+}
+
+bool
+_PyOutsideBox(const _PyValue &points, size_t i, const _PyValue &extent,
+              size_t lo, size_t hi)
+{
+    for (size_t a = 0; a < 3; ++a) {
+        const double p = points.Tup(i, a);
+        if (p < extent.Tup(lo, a) - _PyNumericalTolerance
+            || p > extent.Tup(hi, a) + _PyNumericalTolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The rule shared by _validate_vertex_position_containment (BA.310) and the
+// two control-point containment rules (BA.365, BA.465): the points of each
+// Brep's span lie inside that Brep's brep:extent box, within
+// NUMERICAL_TOLERANCE. A Brep with no box (brep:extent shorter than the Brep
+// count) ends the walk; a span past the partition ends at the array's end.
+// `firstOnly` reports the first point outside per Brep, as the control-point
+// rules do.
+void
+_BrepChecker::_ValidatePointsInBrepExtent(const char *rule,
+                                          const _PyValue &points,
+                                          const std::vector<long long> &offsets,
+                                          bool firstOnly,
+                                          const char *subject)
+{
+    const _PyValue extents = _Get("brep:extent").OrEmpty();
+    const size_t numBreps = _SafeGet("brep:regionCount").Len();
+    if (!points.Truthy() || !extents.Truthy() || numBreps == 0
+        || !points.IsTuples() || points.Dim() < 3 || !extents.IsTuples()
+        || extents.Dim() < 3) {
+        return;
+    }
+    for (size_t b = 0; b < numBreps; ++b) {
+        if (b >= extents.Len() / 2) {
+            break;
+        }
+        const size_t lo = 2 * b, hi = 2 * b + 1;
+        const long long start = b < offsets.size() ? offsets[b] : 0;
+        const long long end = b + 1 < offsets.size()
+            ? offsets[b + 1]
+            : static_cast<long long>(points.Len());
+        const long long stop
+            = std::min(end, static_cast<long long>(points.Len()));
+        for (long long p = start; p < stop; ++p) {
+            size_t i = 0;
+            if (!_PyIndex(p, points.Len(), &i)
+                || !_PyOutsideBox(points, i, extents, lo, hi)) {
+                continue;
+            }
+            const std::string pos = _PyVec3Repr(points.Tup(i, 0),
+                                                points.Tup(i, 1),
+                                                points.Tup(i, 2));
+            const std::string box = "["
+                + _PyVec3Repr(extents.Tup(lo, 0), extents.Tup(lo, 1),
+                              extents.Tup(lo, 2))
+                + ", "
+                + _PyVec3Repr(extents.Tup(hi, 0), extents.Tup(hi, 1),
+                              extents.Tup(hi, 2))
+                + "]";
+            const std::string distance
+                = _PyDistanceOutside(points, i, extents, lo, hi);
+            if (firstOnly) {
+                _Fail(rule, TfStringPrintf(
+                    "%s %s at index %lld lies outside reasonable bounds for "
+                    "brep #%zu. Distance outside bounds: %s.",
+                    subject, pos.c_str(), p, b, distance.c_str()));
+                break;
+            }
+            _Fail(rule, TfStringPrintf(
+                "Vertex position %s for vertex #%lld in brep #%zu lies outside "
+                "brep extent bounds %s. Distance outside bounds: %s.",
+                pos.c_str(), p, b, box.c_str(), distance.c_str()));
+        }
+    }
+}
+
+// _validate_vertex_position_containment (BA.310): each Brep's vertex
+// positions -- its span of the vertex partition -- lie inside its box.
+void
+_BrepChecker::ValidateVertexPositionContainment()
+{
+    _ValidatePointsInBrepExtent(
+        "BA.310", _Get("brep:vertexPoint:point:position").OrEmpty(),
+        _Offsets().vertices, false, nullptr);
+}
+
+// _validate_edge3d_nurbs_control_point_containment (BA.365): the first edge3d
+// NURBS control vertex outside each Brep's box. The spans come from
+// _compute_nurbs_control_vertex_offsets.
+void
+_BrepChecker::ValidateEdge3dNurbsControlPointContainment()
+{
+    _ValidatePointsInBrepExtent(
+        "BA.365",
+        _Get("brep:edge3dNurb:curve3d:nurb:controlVertices").OrEmpty(),
+        _Offsets().edgeControlVertices, true, "Edge NURBS control vertex");
+}
+
+// _validate_surface_nurbs_control_point_containment (BA.465): the first
+// surface NURBS control vertex outside each Brep's box.
+void
+_BrepChecker::ValidateSurfaceNurbsControlPointContainment()
+{
+    _ValidatePointsInBrepExtent(
+        "BA.465", _Get("brep:surface:nurb:controlVertices").OrEmpty(),
+        _Offsets().surfaceControlVertices, true,
+        "Surface NURBS control vertex");
+}
+
+// _validate_analytic_surface_origin_containment (BA.620): an analytic
+// surface's origin (a sphere's center) lies inside the union of the
+// brep:extent boxes expanded by twice the union's diagonal -- or, for a plane,
+// cylinder or cone, the face it carries does, evaluated over its face:range.
+void
+_BrepChecker::ValidateAnalyticSurfaceOriginContainment()
+{
+    const _PyValue extents = _Get("brep:extent").OrEmpty();
+    if (extents.Len() < 2 || !extents.IsTuples() || extents.Dim() < 3) {
+        return;
+    }
+    GfVec3d globalMin(std::numeric_limits<double>::infinity());
+    GfVec3d globalMax(-std::numeric_limits<double>::infinity());
+    for (size_t i = 0; i + 1 < extents.Len(); i += 2) {
+        for (int c = 0; c < 3; ++c) {
+            globalMin[c] = std::min(globalMin[c], extents.Tup(i, c));
+            globalMax[c] = std::max(globalMax[c], extents.Tup(i + 1, c));
+        }
+    }
+    const double diag = (globalMax - globalMin).GetLength();
+    if (diag < 1e-12) {
+        return;
+    }
+    const double margin = diag * 2.0;
+
+    const _PyValue surfaceTypes = _SafeGet("face:surfaceType");
+    const _PyValue &rawRanges = _Get("face:range");
+    const _PyValue faceRanges
+        = rawRanges.IsUnregistered() ? _PyValue() : rawRanges;
+
+    struct Family
+    {
+        const char *originAttr, *token, *label, *base;
+    };
+    static const Family families[] = {
+        { "brep:surface:plane:origin", "BrepSurfacePlaneAPI", "Plane",
+          "brep:surface:plane:" },
+        { "brep:surface:cylinder:origin", "BrepSurfaceCylinderAPI", "Cylinder",
+          "brep:surface:cylinder:" },
+        { "brep:surface:cone:origin", "BrepSurfaceConeAPI", "Cone",
+          "brep:surface:cone:" },
+        { "brep:surface:sphere:center", "BrepSurfaceSphereAPI", "Sphere",
+          "brep:surface:sphere:" },
+        { "brep:surface:torus:origin", "BrepSurfaceTorusAPI", "Torus",
+          "brep:surface:torus:" },
+    };
+    const auto vec = [](const _PyValue &v, size_t i) {
+        return GfVec3d(v.Tup(i, 0), v.Tup(i, 1), v.Tup(i, 2));
+    };
+    const auto inside = [&](const GfVec3d &lo, const GfVec3d &hi) {
+        for (int c = 0; c < 3; ++c) {
+            if (hi[c] < globalMin[c] - margin || lo[c] > globalMax[c] + margin) {
+                return false;
+            }
+        }
+        return true;
+    };
+    for (const Family &f : families) {
+        const _PyValue origins = _SafeGet(f.originAttr);
+        if (origins.Len() == 0 || !origins.IsTuples() || origins.Dim() < 3) {
+            continue;
+        }
+        std::vector<size_t> faceIndices;
+        for (size_t fi = 0; fi < surfaceTypes.Len(); ++fi) {
+            if (surfaceTypes.Repr(fi) == f.token) {
+                faceIndices.push_back(fi);
+            }
+        }
+        const std::string label(f.label);
+        const std::string base(f.base);
+        for (size_t i = 0; i < origins.Len(); ++i) {
+            const GfVec3d origin = vec(origins, i);
+            bool originInside = true;
+            for (int c = 0; c < 3; ++c) {
+                if (origin[c] < globalMin[c] - margin
+                    || origin[c] > globalMax[c] + margin) {
+                    originInside = false;
+                }
+            }
+            if (originInside) {
+                continue;
+            }
+            bool faceInside = false;
+            if (faceRanges.Truthy() && faceRanges.IsTuples()
+                && faceRanges.Dim() >= 2 && i < faceIndices.size()
+                && faceIndices[i] * 2 + 1 < faceRanges.Len()) {
+                const size_t fi = faceIndices[i];
+                const double uMin = faceRanges.Tup(2 * fi, 0);
+                const double vMin = faceRanges.Tup(2 * fi, 1);
+                const double uMax = faceRanges.Tup(2 * fi + 1, 0);
+                const double vMax = faceRanges.Tup(2 * fi + 1, 1);
+                const _PyValue axes = _SafeGet(base + "axis");
+                const _PyValue refs = _SafeGet(base + "refDirection");
+                const bool frame = axes.IsTuples() && refs.IsTuples()
+                    && axes.Dim() >= 3 && refs.Dim() >= 3 && i < axes.Len()
+                    && i < refs.Len();
+                GfVec3d lo(std::numeric_limits<double>::infinity());
+                GfVec3d hi(-std::numeric_limits<double>::infinity());
+                const auto grow = [&](const GfVec3d &p) {
+                    for (int c = 0; c < 3; ++c) {
+                        lo[c] = std::min(lo[c], p[c]);
+                        hi[c] = std::max(hi[c], p[c]);
+                    }
+                };
+                if (label == "Plane" && frame) {
+                    const GfVec3d axis = vec(axes, i), ref = vec(refs, i);
+                    const GfVec3d binormal = GfCross(axis, ref);
+                    for (const double u : { uMin, uMax }) {
+                        for (const double v : { vMin, vMax }) {
+                            grow(origin + u * ref + v * binormal);
+                        }
+                    }
+                    faceInside = inside(lo, hi);
+                } else if ((label == "Cylinder" || label == "Cone") && frame) {
+                    const bool cone = label == "Cone";
+                    const _PyValue radii = _SafeGet(base + "radius");
+                    const _PyValue angles = cone ? _SafeGet(base + "semiAngle")
+                                                 : _PyValue::EmptyList();
+                    if (radii.IsNumbers() && i < radii.Len()
+                        && (!cone || (angles.IsNumbers() && i < angles.Len()))) {
+                        const GfVec3d axis = vec(axes, i), ref = vec(refs, i);
+                        const GfVec3d binormal = GfCross(axis, ref);
+                        const double radius = radii.Num(i);
+                        const double tanA = cone ? std::tan(angles.Num(i)) : 0.0;
+                        for (const double v : { vMin, vMax }) {
+                            const double rv = radius + v * tanA;
+                            for (const double u :
+                                 { uMin, uMax, (uMin + uMax) / 2.0 }) {
+                                grow(origin + v * axis
+                                     + rv * (std::cos(u) * ref
+                                             + std::sin(u) * binormal));
+                            }
+                        }
+                        const double maxR = cone
+                            ? std::max(std::abs(radius + vMin * tanA),
+                                       std::abs(radius + vMax * tanA))
+                            : radius;
+                        for (int c = 0; c < 3; ++c) {
+                            lo[c] -= maxR;
+                            hi[c] += maxR;
+                        }
+                        faceInside = inside(lo, hi);
+                    }
+                }
+            }
+            if (faceInside) {
+                continue;
+            }
+            _Fail("BA.620", TfStringPrintf(
+                "%s surface #%zu origin/center (%.6f, %.6f, %.6f) lies outside "
+                "the brep extent expanded by %.4f (extent: [%.4f, %.4f, %.4f] - "
+                "[%.4f, %.4f, %.4f]).",
+                f.label, i, origin[0], origin[1], origin[2], margin,
+                globalMin[0], globalMin[1], globalMin[2], globalMax[0],
+                globalMax[1], globalMax[2]));
+        }
+    }
+}
+
+// _validate_shell_point_containment (BA.710): each point shell's position --
+// positions are packed in shell order over point shells only -- lies inside
+// its own Brep's brep:extent box, by the single-precision comparison.
+void
+_BrepChecker::ValidateShellPointContainment()
+{
+    const _PyValue positions = _SafeGet("brep:shellPoint:point:position");
+    const _PyValue extent = _SafeGet("brep:extent");
+    const _PyValue pointTypes = _SafeGet("shell:pointType");
+    const _PyValue faceuseCounts = _SafeGet("shell:faceuseCount");
+    const _PyValue wireEdgeCounts = _SafeGet("shell:wireEdgeCount");
+    if (positions.Len() == 0 || extent.Len() < 2) {
+        return;
+    }
+    const _PyValue regionCounts = _SafeGet("brep:regionCount");
+    const _PyValue shellCounts = _SafeGet("region:shellCount");
+    if (regionCounts.Len() == 0 || shellCounts.Len() == 0) {
+        return;
+    }
+    const auto isPointShell = [&](size_t s) {
+        long long fu = 0, we = 0;
+        return s < pointTypes.Len() && pointTypes.Equals(s, "BrepPointAPI")
+            && s < faceuseCounts.Len() && s < wireEdgeCounts.Len()
+            && faceuseCounts.ToInt(s, &fu) && wireEdgeCounts.ToInt(s, &we)
+            && fu == 0 && we == 0;
+    };
+    long long shellOffset = 0, regionOffset = 0;
+    size_t spIdx = 0;
+    for (size_t b = 0; b < regionCounts.Len(); ++b) {
+        long long numRegions = 0;
+        regionCounts.ToInt(b, &numRegions);
+        const long long shellStart = shellOffset;
+        for (long long r = 0; r < numRegions; ++r) {
+            const long long ri = regionOffset + r;
+            long long count = 0;
+            if (ri >= 0 && ri < static_cast<long long>(shellCounts.Len())
+                && shellCounts.ToInt(static_cast<size_t>(ri), &count)) {
+                shellOffset += count;
+            }
+        }
+        regionOffset += numRegions;
+        if (2 * b + 1 >= extent.Len() || !extent.IsTuples()
+            || extent.Dim() < 3) {
+            continue;
+        }
+        for (long long s = shellStart; s < shellOffset; ++s) {
+            if (s < 0 || !isPointShell(static_cast<size_t>(s))) {
+                continue;
+            }
+            if (spIdx >= positions.Len()) {
+                continue;
+            }
+            if (!positions.IsTuples() || positions.Dim() < 3) {
+                ++spIdx;
+                continue;
+            }
+            bool outside = false;
+            for (int a = 0; a < 3; ++a) {
+                const double p = positions.Tup(spIdx, a);
+                outside = outside
+                    || _PyIsFloatLessThan(p, extent.Tup(2 * b, a))
+                    || _PyIsFloatGreaterThan(p, extent.Tup(2 * b + 1, a));
+            }
+            if (outside) {
+                _Fail("BA.710", TfStringPrintf(
+                    "shellPoint:position[%zu] = [%s, %s, %s] in brep #%zu is "
+                    "outside brep extent.",
+                    spIdx,
+                    _PyValue::NumRepr(positions.Tup(spIdx, 0), false).c_str(),
+                    _PyValue::NumRepr(positions.Tup(spIdx, 1), false).c_str(),
+                    _PyValue::NumRepr(positions.Tup(spIdx, 2), false).c_str(),
+                    b));
+            }
+            ++spIdx;
+        }
+    }
+}
+
+// _compute_edge_brep_indices: each edge's Brep is the Brep of the first
+// edgeuse (in each Brep's edgeuse partition) that names it.
+std::unordered_map<long long, size_t>
+_BrepChecker::_EdgeBrepIndices()
+{
+    std::unordered_map<long long, size_t> out;
+    const std::vector<long long> &offsets = _Offsets().edgeuses;
+    const _PyValue edgeIndex = _SafeGet("edgeuse:edgeIndex");
+    for (size_t b = 0; b + 1 < offsets.size(); ++b) {
+        const long long end
+            = std::min(offsets[b + 1], static_cast<long long>(edgeIndex.Len()));
+        for (long long eu = offsets[b]; eu < end; ++eu) {
+            size_t i = 0;
+            long long e = 0;
+            if (_PyIndex(eu, edgeIndex.Len(), &i) && edgeIndex.ToInt(i, &e)) {
+                out.emplace(e, b);
+            }
+        }
+    }
+    return out;
+}
+
+// _get_edge_intersect_tolerance: the brep:intersectTol3d of the edge's Brep --
+// or of the only Brep, when a single tolerance is authored and no edgeuse
+// names the edge -- if it is finite and at least NUMERICAL_TOLERANCE.
+bool
+_BrepChecker::_EdgeIntersectTolerance(
+    long long edge, const std::unordered_map<long long, size_t> &edgeBreps,
+    double *tol, size_t *brep)
+{
+    const _PyValue tols = _SafeGet("brep:intersectTol3d");
+    if (tols.Len() == 0) {
+        return false;
+    }
+    const auto it = edgeBreps.find(edge);
+    size_t b = 0;
+    if (it != edgeBreps.end()) {
+        b = it->second;
+    } else if (tols.Len() != 1) {
+        return false;
+    }
+    double t = 0.0;
+    if (b >= tols.Len() || !tols.ToFloat(b, &t) || !std::isfinite(t)
+        || t < _PyNumericalTolerance) {
+        return false;
+    }
+    *tol = t;
+    *brep = b;
+    return true;
+}
+
+// _report_unresolved_edge_tolerance.
+void
+_BrepChecker::_ReportUnresolvedEdgeTolerance(const char *rule, long long edge,
+                                             const char *checkLabel)
+{
+    _Fail(rule, UsdSolidValidationErrorNameTokens->unresolvedEdgeIntersectTol3d,
+          TfStringPrintf(
+              "%s for edge #%lld could not be validated because no positive "
+              "brep:intersectTol3d value could be resolved for the edge. The "
+              "tolerance is missing, invalid, or the edge could not be "
+              "associated with a BRep.",
+              checkLabel, edge));
+}
+
+// _validate_nurbs_edge_endpoint_vertex (BA.730): each NURBS edge, evaluated
+// with de Boor's algorithm at its two edge:range parameters, lands on the
+// vertices its edge:vertexIndices name, within its Brep's tolerance. One
+// finding per edge; an edge whose tolerance does not resolve is reported as
+// unvalidatable.
+void
+_BrepChecker::ValidateNurbsEdgeEndpointVertex()
+{
+    const std::string base = "brep:edge3dNurb:curve3d:nurb:";
+    const _PyValue curveTypes = _SafeGet("edge:curveType");
+    const _PyValue &ranges = _Get("edge:range");
+    const _PyValue pairs = _SafeGet("edge:vertexIndices");
+    const _PyValue positions = _SafeGet("brep:vertexPoint:point:position");
+    const _PyValue orders = _SafeGet(base + "order");
+    const _PyValue counts = _SafeGet(base + "vertexCount");
+    const _PyValue cvs = _SafeGet(base + "controlVertices");
+    const _PyValue weights = _SafeGet(base + "weights");
+    const _PyValue knots = _SafeGet(base + "knots");
+    if (curveTypes.Len() == 0 || !ranges.Truthy() || ranges.IsUnregistered()
+        || !ranges.IsSequence() || pairs.Len() == 0 || positions.Len() == 0
+        || orders.Len() == 0 || counts.Len() == 0 || cvs.Len() == 0
+        || weights.Len() == 0 || knots.Len() == 0) {
+        return;
+    }
+    if (!cvs.IsTuples() || cvs.Dim() < 3 || !positions.IsTuples()
+        || positions.Dim() < 3 || !pairs.IsTuples() || pairs.Dim() < 2) {
+        return;
+    }
+    const std::unordered_map<long long, size_t> edgeBreps = _EdgeBrepIndices();
+    size_t nurbIdx = 0;
+    long long cvOffset = 0, knOffset = 0;
+    for (size_t e = 0; e < curveTypes.Len(); ++e) {
+        if (curveTypes.Repr(e) != "BrepCurve3dNurbAPI") {
+            continue;
+        }
+        if (nurbIdx >= orders.Len() || nurbIdx >= counts.Len()) {
+            break;
+        }
+        long long order = 0, numCvs = 0;
+        orders.ToInt(nurbIdx, &order);
+        counts.ToInt(nurbIdx, &numCvs);
+        const long long numKnots = numCvs + order;
+        const auto advance = [&]() {
+            ++nurbIdx;
+            cvOffset += numCvs;
+            knOffset += numKnots;
+        };
+        if (cvOffset + numCvs > static_cast<long long>(cvs.Len())
+            || cvOffset + numCvs > static_cast<long long>(weights.Len())
+            || knOffset + numKnots > static_cast<long long>(knots.Len())
+            || 2 * e + 1 >= ranges.Len() || e >= pairs.Len()) {
+            advance();
+            continue;
+        }
+        std::vector<double> curveKnots, curveWeights;
+        std::vector<GfVec3d> curveCvs;
+        for (long long k = 0; k < numKnots; ++k) {
+            double x = 0.0;
+            knots.ToFloat(static_cast<size_t>(knOffset + k), &x);
+            curveKnots.push_back(x);
+        }
+        for (long long j = 0; j < numCvs; ++j) {
+            const size_t i = static_cast<size_t>(cvOffset + j);
+            curveCvs.emplace_back(cvs.Tup(i, 0), cvs.Tup(i, 1), cvs.Tup(i, 2));
+            double w = 0.0;
+            weights.ToFloat(i, &w);
+            curveWeights.push_back(w);
+        }
+        double tStart = 0.0, tEnd = 0.0;
+        ranges.ToFloat(2 * e, &tStart);
+        ranges.ToFloat(2 * e + 1, &tEnd);
+        const long long vStart = static_cast<long long>(pairs.Tup(e, 0));
+        const long long vEnd = static_cast<long long>(pairs.Tup(e, 1));
+        double tol = 0.0;
+        size_t brep = 0;
+        if (!_EdgeIntersectTolerance(static_cast<long long>(e), edgeBreps, &tol,
+                                     &brep)) {
+            _ReportUnresolvedEdgeTolerance(
+                "BA.730", static_cast<long long>(e),
+                "NURBS endpoint-to-vertex consistency");
+            advance();
+            continue;
+        }
+        const std::tuple<double, long long, const char *> ends[2]
+            = { { tStart, vStart, "start" }, { tEnd, vEnd, "end" } };
+        for (const auto &end : ends) {
+            size_t vi = 0;
+            if (std::get<1>(end) >= static_cast<long long>(positions.Len())
+                || !_PyIndex(std::get<1>(end), positions.Len(), &vi)) {
+                continue;
+            }
+            GfVec3d evaluated;
+            if (!_PyDeBoorEvaluate3d(order, curveKnots, curveCvs, curveWeights,
+                                     std::get<0>(end), &evaluated)) {
+                continue;
+            }
+            const GfVec3d vertex(positions.Tup(vi, 0), positions.Tup(vi, 1),
+                                 positions.Tup(vi, 2));
+            const double dist = (evaluated - vertex).GetLength();
+            if (dist > tol) {
+                _Fail("BA.730", TfStringPrintf(
+                    "NURBS edge #%zu in brep #%zu %s endpoint evaluated at "
+                    "t=%.6f is %.6f from vertex #%lld "
+                    "(brep:intersectTol3d[%zu] = %s).",
+                    e, brep, std::get<2>(end), std::get<0>(end), dist,
+                    std::get<1>(end), brep,
+                    _PyValue::NumRepr(tol, false).c_str()));
+                break;
+            }
+        }
+        advance();
+    }
+}
+
 // -------------------------------------------------------------------------- //
 // BrepArrayStructure                                                         //
 // -------------------------------------------------------------------------- //
@@ -4547,9 +5167,6 @@ void _CheckFaceVDomainOrdering(const UsdPrim &usdPrim,
                                UsdValidationErrorVector *errors);
 void _CheckFloatArraysFinite(const UsdPrim &usdPrim,
                              UsdValidationErrorVector *errors);
-void _CheckNurbsEdgeEndpointVertices(const UsdPrim &usdPrim,
-                                     const UsdSolidBrepArray &brep,
-                                     UsdValidationErrorVector *errors);
 
 // -------------------------------------------------------------------------- //
 // BrepArrayRanges                                                            //
@@ -5196,20 +5813,9 @@ _BrepArrayEdgeCurveVertices(const UsdPrim &usdPrim,
     if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
         return {};
     }
-    const UsdSolidBrepArray brep(usdPrim);
-    UsdValidationErrorVector errors;
-    _CheckNurbsEdgeEndpointVertices(usdPrim, brep, &errors);
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
-// BrepArrayContainment                                                       //
-// -------------------------------------------------------------------------- //
-bool
-_FloatClose(double a, double b)
-{
-    return std::abs(a - b)
-        <= std::max(1e-5 * std::max(std::abs(a), std::abs(b)), 1e-6);
+    _BrepChecker c(usdPrim, { "BA.730" });
+    c.ValidateNurbsEdgeEndpointVertex();
+    return c.TakeErrors();
 }
 
 // ========================================================================== //
@@ -5548,534 +6154,13 @@ _CheckFloatArraysFinite(const UsdPrim &usdPrim,
 }
 
 // -------------------------------------------------------------------------- //
-// BA.620  brep-analytic-surface-origin-containment                           //
+// BrepArrayContainment                                                       //
 // -------------------------------------------------------------------------- //
-// Grows a running box to include a point.
-void
-_AccumulateBox(const GfVec3d &p, GfVec3d *lo, GfVec3d *hi)
-{
-    for (int c = 0; c < 3; ++c) {
-        (*lo)[c] = std::min((*lo)[c], p[c]);
-        (*hi)[c] = std::max((*hi)[c], p[c]);
-    }
-}
-
-// An analytic surface's origin (a sphere's center) is a placement, not a point
-// on the face, so it may legitimately sit outside brep:extent -- a plane whose
-// origin is the assembly coordinate system is the common case. The rule
-// therefore fires only when the origin sits outside the union of the
-// brep:extent boxes expanded by twice that union's diagonal AND the face the
-// surface carries, evaluated over its authored face:range, also lies outside
-// the expansion. Sphere and torus faces have no evaluation branch in
-// brep_validator.py, so for those the origin test decides alone.
-void
-_CheckAnalyticSurfaceOriginContainment(const UsdPrim &usdPrim,
-                                       const UsdSolidBrepArray &brep,
-                                       UsdValidationErrorVector *errors)
-{
-    const VtArray<GfVec3d> extent = _Read<GfVec3d>(brep.GetBrepExtentAttr());
-    if (extent.size() < 2) {
-        return;
-    }
-
-    GfVec3d globalMin(std::numeric_limits<double>::infinity());
-    GfVec3d globalMax(-std::numeric_limits<double>::infinity());
-    for (size_t i = 0; i + 1 < extent.size(); i += 2) {
-        _AccumulateBox(extent[i], &globalMin, &globalMax);
-        _AccumulateBox(extent[i + 1], &globalMin, &globalMax);
-    }
-    const double diag = (globalMax - globalMin).GetLength();
-    if (diag < 1e-12) {
-        return;
-    }
-    const double margin = diag * 2.0;
-
-    const VtArray<TfToken> surfaceType
-        = _Read<TfToken>(brep.GetFaceSurfaceTypeAttr());
-    const VtArray<GfVec2d> faceRange = _Read<GfVec2d>(brep.GetFaceRangeAttr());
-
-    struct Family {
-        const char *base;          // brep:surface:<family>:
-        const char *originAttr;    // origin, or center for a sphere
-        const char *surfaceToken;
-        const char *label;
-    };
-    static const std::vector<Family> families = {
-        { "brep:surface:plane:", "brep:surface:plane:origin",
-          "BrepSurfacePlaneAPI", "Plane" },
-        { "brep:surface:cylinder:", "brep:surface:cylinder:origin",
-          "BrepSurfaceCylinderAPI", "Cylinder" },
-        { "brep:surface:cone:", "brep:surface:cone:origin",
-          "BrepSurfaceConeAPI", "Cone" },
-        { "brep:surface:sphere:", "brep:surface:sphere:center",
-          "BrepSurfaceSphereAPI", "Sphere" },
-        { "brep:surface:torus:", "brep:surface:torus:origin",
-          "BrepSurfaceTorusAPI", "Torus" },
-    };
-
-    for (const Family &family : families) {
-        const VtArray<GfVec3d> origins
-            = _ReadName<GfVec3d>(usdPrim, family.originAttr);
-        if (origins.empty()) {
-            continue;
-        }
-
-        // Instances of one surface family are packed in face order, so the i-th
-        // origin belongs to the i-th face carrying that surfaceType.
-        std::vector<size_t> faceIndices;
-        const TfToken token(family.surfaceToken);
-        for (size_t f = 0; f < surfaceType.size(); ++f) {
-            if (surfaceType[f] == token) {
-                faceIndices.push_back(f);
-            }
-        }
-        const std::string label(family.label);
-
-        for (size_t i = 0; i < origins.size(); ++i) {
-            const GfVec3d &origin = origins[i];
-            bool originInside = true;
-            for (int c = 0; c < 3; ++c) {
-                if (origin[c] < globalMin[c] - margin
-                    || origin[c] > globalMax[c] + margin) {
-                    originInside = false;
-                    break;
-                }
-            }
-            if (originInside) {
-                continue;
-            }
-
-            // The origin is out; fall back to where the face actually sits.
-            bool faceInside = false;
-            if (!faceRange.empty() && i < faceIndices.size()
-                && 2 * faceIndices[i] + 1 < faceRange.size()) {
-                const size_t fi = faceIndices[i];
-                const double uMin = faceRange[2 * fi][0];
-                const double vMin = faceRange[2 * fi][1];
-                const double uMax = faceRange[2 * fi + 1][0];
-                const double vMax = faceRange[2 * fi + 1][1];
-
-                GfVec3d lo(std::numeric_limits<double>::infinity());
-                GfVec3d hi(-std::numeric_limits<double>::infinity());
-                bool haveBox = false;
-
-                const std::string base(family.base);
-                const VtArray<GfVec3d> axis
-                    = _ReadName<GfVec3d>(usdPrim, base + "axis");
-                const VtArray<GfVec3d> ref
-                    = _ReadName<GfVec3d>(usdPrim, base + "refDirection");
-
-                if (label == "Plane") {
-                    if (i < axis.size() && i < ref.size()) {
-                        const GfVec3d binormal = GfCross(axis[i], ref[i]);
-                        const GfVec2d corners[4]
-                            = { GfVec2d(uMin, vMin), GfVec2d(uMax, vMin),
-                                GfVec2d(uMin, vMax), GfVec2d(uMax, vMax) };
-                        for (const GfVec2d &uv : corners) {
-                            _AccumulateBox(
-                                origin + uv[0] * ref[i] + uv[1] * binormal,
-                                &lo, &hi);
-                        }
-                        haveBox = true;
-                    }
-                } else if (label == "Cylinder" || label == "Cone") {
-                    const bool cone = label == "Cone";
-                    const VtArray<double> radius
-                        = _ReadName<double>(usdPrim, base + "radius");
-                    const VtArray<double> semiAngle = cone
-                        ? _ReadName<double>(usdPrim, base + "semiAngle")
-                        : VtArray<double>();
-                    if (i < axis.size() && i < ref.size() && i < radius.size()
-                        && (!cone || i < semiAngle.size())) {
-                        const GfVec3d binormal = GfCross(axis[i], ref[i]);
-                        const double tanA
-                            = cone ? std::tan(semiAngle[i]) : 0.0;
-                        const double vs[2] = { vMin, vMax };
-                        const double us[3]
-                            = { uMin, uMax, (uMin + uMax) / 2.0 };
-                        for (const double v : vs) {
-                            const double rv = radius[i] + v * tanA;
-                            for (const double u : us) {
-                                _AccumulateBox(
-                                    origin + v * axis[i]
-                                        + rv * (std::cos(u) * ref[i]
-                                                + std::sin(u) * binormal),
-                                    &lo, &hi);
-                            }
-                        }
-                        // Expand by the largest radius so every angular
-                        // position is covered, not only the three sampled.
-                        const double maxR = cone
-                            ? std::max(std::abs(radius[i] + vMin * tanA),
-                                       std::abs(radius[i] + vMax * tanA))
-                            : radius[i];
-                        for (int c = 0; c < 3; ++c) {
-                            lo[c] -= maxR;
-                            hi[c] += maxR;
-                        }
-                        haveBox = true;
-                    }
-                }
-
-                if (haveBox) {
-                    faceInside = true;
-                    for (int c = 0; c < 3; ++c) {
-                        if (hi[c] < globalMin[c] - margin
-                            || lo[c] > globalMax[c] + margin) {
-                            faceInside = false;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (faceInside) {
-                continue;
-            }
-
-            _Err(errors,
-                 UsdSolidValidationErrorNameTokens
-                     ->analyticSurfaceOriginOutsideBrepExtent,
-                 usdPrim,
-                 TfStringPrintf(
-                     "[BA.620] BrepArray <%s>: %s surface #%zu origin/center "
-                     "(%.6f, %.6f, %.6f) lies outside the brep extent expanded "
-                     "by %.4f (extent: [%.4f, %.4f, %.4f] - "
-                     "[%.4f, %.4f, %.4f]).",
-                     usdPrim.GetPath().GetText(), family.label, i, origin[0],
-                     origin[1], origin[2], margin, globalMin[0], globalMin[1],
-                     globalMin[2], globalMax[0], globalMax[1], globalMax[2]));
-        }
-    }
-}
-
-// -------------------------------------------------------------------------- //
-// BA.710  brep-shell-point-position-extent-containment                       //
-// -------------------------------------------------------------------------- //
-// A point shell (_IsBrepPointShell) carries one point, and that point belongs
-// to its own Brep, so it is measured against that Brep's brep:extent box rather
-// than the union of boxes BA.310 uses for vertices. Shell points are packed in
-// shell order across the whole BrepArray, so the walk tracks a running
-// shell-point cursor while it partitions shells per Brep; a BrepPointAPI token
-// on a face or wire shell is ignored and takes no slot in that packing.
-// The comparison carries the single-precision slop of _FloatClose, matching
-// isFloatLessThan / isFloatGreaterThan in brep_validator.py.
-void
-_CheckShellPointContainment(const UsdPrim &usdPrim,
-                            const UsdSolidBrepArray &brep,
-                            UsdValidationErrorVector *errors)
-{
-    const VtArray<GfVec3d> shellPositions
-        = _ReadName<GfVec3d>(usdPrim, "brep:shellPoint:point:position");
-    const VtArray<GfVec3d> extent = _Read<GfVec3d>(brep.GetBrepExtentAttr());
-    if (shellPositions.empty() || extent.size() < 2) {
-        return;
-    }
-    const VtArray<unsigned int> regionCount
-        = _Read<unsigned int>(brep.GetBrepRegionCountAttr());
-    const VtArray<unsigned int> shellCount
-        = _Read<unsigned int>(brep.GetRegionShellCountAttr());
-    if (regionCount.empty() || shellCount.empty()) {
-        return;
-    }
-    const VtArray<TfToken> shellPointType
-        = _Read<TfToken>(brep.GetShellPointTypeAttr());
-    const VtArray<unsigned int> shellFaceuseCount
-        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
-    const VtArray<unsigned int> shellWireEdgeCount
-        = _Read<unsigned int>(brep.GetShellWireEdgeCountAttr());
-
-    size_t shellOffset = 0;
-    size_t regionOffset = 0;
-    size_t pointCursor = 0;
-
-    for (size_t b = 0; b < regionCount.size(); ++b) {
-        const size_t shellStart = shellOffset;
-        for (size_t r = 0; r < regionCount[b]; ++r) {
-            const size_t ri = regionOffset + r;
-            if (ri < shellCount.size()) {
-                shellOffset += shellCount[ri];
-            }
-        }
-        regionOffset += regionCount[b];
-        const size_t shellEnd = shellOffset;
-
-        if (2 * b + 1 >= extent.size()) {
-            continue;
-        }
-        const GfVec3d &extMin = extent[2 * b];
-        const GfVec3d &extMax = extent[2 * b + 1];
-
-        for (size_t s = shellStart; s < shellEnd; ++s) {
-            if (!_IsBrepPointShell(s, shellPointType, shellFaceuseCount,
-                                   shellWireEdgeCount)) {
-                continue;
-            }
-            if (pointCursor >= shellPositions.size()) {
-                continue;
-            }
-            const GfVec3d &p = shellPositions[pointCursor];
-            bool outside = false;
-            for (int c = 0; c < 3; ++c) {
-                if ((p[c] < extMin[c] && !_FloatClose(p[c], extMin[c]))
-                    || (p[c] > extMax[c] && !_FloatClose(p[c], extMax[c]))) {
-                    outside = true;
-                    break;
-                }
-            }
-            if (outside) {
-                _Err(errors,
-                     UsdSolidValidationErrorNameTokens
-                         ->shellPointPositionOutsideBrepExtent,
-                     usdPrim,
-                     TfStringPrintf(
-                         "[BA.710] BrepArray <%s>: shellPoint:position[%zu] = "
-                         "[%g, %g, %g] in brep #%zu is outside brep extent.",
-                         usdPrim.GetPath().GetText(), pointCursor, p[0], p[1],
-                         p[2], b));
-            }
-            ++pointCursor;
-        }
-    }
-}
-
-// -------------------------------------------------------------------------- //
-// BA.730  brep-nurbs-edge-endpoint-vertex-consistency                        //
-// -------------------------------------------------------------------------- //
-// Smallest brep:intersectTol3d BA.730 will measure against. Below it the
-// authored tolerance is treated as absent and the edge is reported as
-// unvalidatable, matching BrepConstants.NUMERICAL_TOLERANCE in
-// brep_validator.py.
-constexpr double _MinResolvableTol3d = 1e-11;
-
-// Evaluate a rational B-spline curve at parameter t with de Boor's algorithm.
-// Returns false when the curve data is too short to evaluate or the weight sum
-// collapses. Ported from _de_boor_evaluate in brep_validator.py, including its
-// clamping of t into [knots[order-1], knots[vertexCount]].
-bool
-_DeBoorEvaluate3d(unsigned int order, const std::vector<double> &knots,
-                  const std::vector<GfVec3d> &cvs,
-                  const std::vector<double> &weights, double t, GfVec3d *out)
-{
-    const size_t n = cvs.size();
-    if (order < 1 || n < order || knots.size() < n + order
-        || weights.size() < n) {
-        return false;
-    }
-    const size_t p = order - 1;
-
-    t = std::max(knots[p], std::min(t, knots[n]));
-
-    size_t k = p;
-    bool found = false;
-    for (size_t i = p; i < n; ++i) {
-        if (knots[i] <= t && t < knots[i + 1]) {
-            k = i;
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        // t sits at (or numerically at) the far end of the knot domain, where
-        // the half-open span test above never matches.
-        const double kn = knots[n];
-        const double closeTol
-            = std::max(1e-12 * std::max(std::abs(t), std::abs(kn)), 1e-14);
-        if (std::abs(t - kn) <= closeTol) {
-            k = n - 1;
-        }
-    }
-
-    // Homogeneous control points (w*x, w*y, w*z, w).
-    std::vector<std::array<double, 4>> d(p + 1);
-    for (size_t j = 0; j <= p; ++j) {
-        const size_t idx = k - p + j;
-        if (idx >= n) {
-            return false;
-        }
-        const double w = weights[idx];
-        d[j] = { cvs[idx][0] * w, cvs[idx][1] * w, cvs[idx][2] * w, w };
-    }
-
-    for (size_t r = 1; r <= p; ++r) {
-        for (size_t j = p; j >= r; --j) {
-            const size_t left = k - p + j;
-            const size_t right = left + p - r + 1;
-            if (right >= knots.size() || left >= knots.size()) {
-                return false;
-            }
-            const double denom = knots[right] - knots[left];
-            const double alpha
-                = std::abs(denom) < 1e-30 ? 0.0 : (t - knots[left]) / denom;
-            for (int c = 0; c < 4; ++c) {
-                d[j][c] = (1.0 - alpha) * d[j - 1][c] + alpha * d[j][c];
-            }
-        }
-    }
-
-    const double w = d[p][3];
-    if (std::abs(w) < 1e-30) {
-        return false;
-    }
-    *out = GfVec3d(d[p][0] / w, d[p][1] / w, d[p][2] / w);
-    return true;
-}
-
-// A NURBS edge evaluated at its authored edge:range endpoints must land on the
-// vertices its edge:vertexIndices name, within the Brep's brep:intersectTol3d.
-//
-// The tolerance is resolved per Brep here rather than through
-// _FirstAuthoredIntersectTol3d: brep_validator.py attributes each edge to a
-// Brep through the edgeuses that reference it and reads that Brep's tolerance,
-// and reports the edge as unvalidatable when no positive tolerance resolves.
-// This rule has no reader-side fallback.
-void
-_CheckNurbsEdgeEndpointVertices(const UsdPrim &usdPrim,
-                                const UsdSolidBrepArray &brep,
-                                UsdValidationErrorVector *errors)
-{
-    static const TfToken nurbTok("BrepCurve3dNurbAPI");
-    const std::string base = "brep:edge3dNurb:curve3d:nurb:";
-
-    const VtArray<TfToken> curveType
-        = _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
-    const VtArray<double> edgeRange = _Read<double>(brep.GetEdgeRangeAttr());
-    const VtArray<GfVec2i> vertexIndices
-        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr());
-    const VtArray<GfVec3d> vertexPos
-        = _ReadName<GfVec3d>(usdPrim, "brep:vertexPoint:point:position");
-    const VtArray<double> intersectTol
-        = _Read<double>(brep.GetBrepIntersectTol3dAttr());
-    const VtArray<unsigned int> order
-        = _ReadName<unsigned int>(usdPrim, base + "order");
-    const VtArray<unsigned int> vtxCount
-        = _ReadName<unsigned int>(usdPrim, base + "vertexCount");
-    const VtArray<GfVec3d> cvs
-        = _ReadName<GfVec3d>(usdPrim, base + "controlVertices");
-    const VtArray<double> weights
-        = _ReadName<double>(usdPrim, base + "weights");
-    const VtArray<double> knots = _ReadName<double>(usdPrim, base + "knots");
-
-    if (curveType.empty() || edgeRange.empty() || vertexIndices.empty()
-        || vertexPos.empty() || order.empty() || vtxCount.empty()
-        || cvs.empty() || weights.empty() || knots.empty()) {
-        return;
-    }
-
-    // Attribute each edge to the first Brep whose edgeuses reference it.
-    const _BrepOffsets off = _ComputeOffsets(brep);
-    const VtArray<unsigned int> edgeuseEdgeIndex
-        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
-    std::unordered_map<unsigned int, size_t> edgeBrepIndex;
-    if (off.ok) {
-        for (size_t b = 0; b + 1 < off.edgeuse.size(); ++b) {
-            const size_t stop
-                = std::min(off.edgeuse[b + 1], edgeuseEdgeIndex.size());
-            for (size_t eu = off.edgeuse[b]; eu < stop; ++eu) {
-                edgeBrepIndex.emplace(edgeuseEdgeIndex[eu], b);
-            }
-        }
-    }
-
-    size_t nurbIdx = 0;
-    size_t cvOffset = 0;
-    size_t knotOffset = 0;
-
-    for (size_t e = 0; e < curveType.size(); ++e) {
-        if (curveType[e] != nurbTok) {
-            continue;
-        }
-        if (nurbIdx >= order.size() || nurbIdx >= vtxCount.size()) {
-            break;
-        }
-        const unsigned int ord = order[nurbIdx];
-        const size_t nCv = vtxCount[nurbIdx];
-        const size_t nKnots = nCv + ord;
-
-        const bool usable = cvOffset + nCv <= cvs.size()
-            && cvOffset + nCv <= weights.size()
-            && knotOffset + nKnots <= knots.size()
-            && 2 * e + 1 < edgeRange.size() && e < vertexIndices.size();
-        if (usable) {
-            const std::vector<double> edgeKnots(
-                knots.begin() + knotOffset,
-                knots.begin() + knotOffset + nKnots);
-            const std::vector<GfVec3d> edgeCvs(cvs.begin() + cvOffset,
-                                               cvs.begin() + cvOffset + nCv);
-            const std::vector<double> edgeWeights(
-                weights.begin() + cvOffset, weights.begin() + cvOffset + nCv);
-
-            // Resolve the tolerance of this edge's Brep.
-            size_t brepIdx = 0;
-            bool haveBrep = false;
-            const auto it = edgeBrepIndex.find(static_cast<unsigned int>(e));
-            if (it != edgeBrepIndex.end()) {
-                brepIdx = it->second;
-                haveBrep = true;
-            } else if (intersectTol.size() == 1) {
-                haveBrep = true;
-            }
-            const bool haveTol = haveBrep && brepIdx < intersectTol.size()
-                && std::isfinite(intersectTol[brepIdx])
-                && intersectTol[brepIdx] >= _MinResolvableTol3d;
-
-            if (!haveTol) {
-                _Err(errors,
-                     UsdSolidValidationErrorNameTokens
-                         ->unresolvedEdgeIntersectTol3d,
-                     usdPrim,
-                     TfStringPrintf(
-                         "[BA.730] BrepArray <%s>: NURBS endpoint-to-vertex "
-                         "consistency for edge #%zu could not be validated "
-                         "because no positive brep:intersectTol3d value could "
-                         "be resolved for the edge. The tolerance is missing, "
-                         "invalid, or the edge could not be associated with a "
-                         "BRep.",
-                         usdPrim.GetPath().GetText(), e));
-            } else {
-                const double tol = intersectTol[brepIdx];
-                const double params[2]
-                    = { edgeRange[2 * e], edgeRange[2 * e + 1] };
-                const int vtxIdx[2]
-                    = { vertexIndices[e][0], vertexIndices[e][1] };
-                const char *labels[2] = { "start", "end" };
-                for (int side = 0; side < 2; ++side) {
-                    if (vtxIdx[side] < 0
-                        || static_cast<size_t>(vtxIdx[side])
-                            >= vertexPos.size()) {
-                        continue;
-                    }
-                    GfVec3d evaluated;
-                    if (!_DeBoorEvaluate3d(ord, edgeKnots, edgeCvs, edgeWeights,
-                                           params[side], &evaluated)) {
-                        continue;
-                    }
-                    const double dist
-                        = (evaluated - vertexPos[vtxIdx[side]]).GetLength();
-                    if (dist > tol) {
-                        _Err(errors,
-                             UsdSolidValidationErrorNameTokens
-                                 ->nurbsEdgeEndpointVertexMismatch,
-                             usdPrim,
-                             TfStringPrintf(
-                                 "[BA.730] BrepArray <%s>: NURBS edge #%zu in "
-                                 "brep #%zu %s endpoint evaluated at t=%.6f is "
-                                 "%.6f from vertex #%d "
-                                 "(brep:intersectTol3d[%zu] = %g).",
-                                 usdPrim.GetPath().GetText(), e, brepIdx,
-                                 labels[side], params[side], dist,
-                                 vtxIdx[side], brepIdx, tol));
-                        break;
-                    }
-                }
-            }
-        }
-
-        ++nurbIdx;
-        cvOffset += nCv;
-        knotOffset += nKnots;
-    }
-}
-
+// Spatial containment: each brep:extent box inside the prim's extent (BA.040,
+// BA.045, BA.050), each Brep's vertex positions (BA.310) and NURBS control
+// vertices (BA.365, BA.465) inside its own box, analytic surface origins near
+// the extent union (BA.620), and each point shell's position inside its
+// Brep's box (BA.710).
 UsdValidationErrorVector
 _BrepArrayContainment(const UsdPrim &usdPrim,
                       const UsdValidationTimeRange & /*timeRange*/)
@@ -6083,126 +6168,15 @@ _BrepArrayContainment(const UsdPrim &usdPrim,
     if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
         return {};
     }
-    const UsdSolidBrepArray brep(usdPrim);
-    const VtArray<GfVec3d> extent = _Read<GfVec3d>(brep.GetBrepExtentAttr());
-    const size_t numBoxes = extent.size() / 2;
-    UsdValidationErrorVector errors;
-
-    // Containment slop for BA.310/365/465: a vertex or control point may sit a
-    // tolerance outside a brep:extent box without being a real violation. The
-    // slop follows the Brep's own authored 3D tolerance
-    // (_FirstAuthoredIntersectTol3d) rather than the former hard-coded 1e-11, which
-    // was tighter than float32 round-off. Real CAD is frequently authored on a
-    // float path (the prim's `extent` is float3, and brep:extent corners are
-    // commonly float-derived), so a double vertex compared to a float-quantized
-    // box overshot 1e-11 routinely and turned BA.310 into a hard-Error false
-    // positive (register row 14). _DomainTol (1e-6) floors the slop so an asset
-    // that authors an over-tight tolerance is still judged against at least the
-    // domain tolerance; a per-corner relative float32 term (~1.2e-7 * |corner|)
-    // is added so the slop tracks the quantization at large coordinates.
-    const double tol3d = _FirstAuthoredIntersectTol3d(brep);
-    const double baseSlop = std::max(tol3d, _DomainTol);
-    const double floatRel = _ExtentFloatRel;
-
-    // BA.040 / BA.045 / BA.050: each brep:extent box within the prim's own
-    // extent (_validate_brep_extent).
-    {
-        _BrepChecker c(usdPrim, { "BA.040", "BA.045", "BA.050" });
-        c.ValidateBrepExtent();
-        errors = c.TakeErrors();
-    }
-
-    if (numBoxes == 0) {
-        return errors;
-    }
-
-    // A point is contained if it lies within ANY brep:extent box (within
-    // tolerance). Per-point Brep attribution is not derivable from the flat
-    // data for vertices/control points (no per-Brep count array), so the union
-    // is used; for a single Brep this is exactly that Brep's box.
-    const auto insideAnyExtent = [&](const GfVec3d &p) {
-        for (size_t b = 0; b < numBoxes; ++b) {
-            const GfVec3d &mn = extent[2 * b];
-            const GfVec3d &mx = extent[2 * b + 1];
-            bool inside = true;
-            for (int k = 0; k < 3; ++k) {
-                // Per-axis slop = tolerance ladder + a float32-quantization term
-                // scaled to the box corner's magnitude (register row 14).
-                const double loSlop
-                    = baseSlop + floatRel * std::abs(mn[k]);
-                const double hiSlop
-                    = baseSlop + floatRel * std::abs(mx[k]);
-                if (p[k] < mn[k] - loSlop || p[k] > mx[k] + hiSlop) {
-                    inside = false;
-                    break;
-                }
-            }
-            if (inside) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    // BA.310: vertex positions lie on the solid boundary, so they must be
-    // within a brep:extent box (Error; reports every offending vertex).
-    const VtArray<GfVec3d> vpos
-        = _ReadName<GfVec3d>(usdPrim, "brep:vertexPoint:point:position");
-    for (size_t v = 0; v < vpos.size(); ++v) {
-        if (!insideAnyExtent(vpos[v])) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens
-                     ->vertexPositionOutsideBrepExtent,
-                 usdPrim,
-                 TfStringPrintf("[BA.310] BrepArray <%s>: vertex position %zu "
-                                "lies outside all brep:extent boxes.",
-                                usdPrim.GetPath().GetText(), v));
-        }
-    }
-
-    // BA.365 / BA.465: a NURBS control vertex must lie within a brep:extent
-    // box. brep_validator.py reports one outside as a failed check, so it is an
-    // Error here, even though a control hull may extend past the surface it
-    // defines.
-    const VtArray<GfVec3d> edgeCv = _ReadName<GfVec3d>(
-        usdPrim, "brep:edge3dNurb:curve3d:nurb:controlVertices");
-    for (size_t c = 0; c < edgeCv.size(); ++c) {
-        if (!insideAnyExtent(edgeCv[c])) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->controlPointOutsideBrepExtent,
-                 usdPrim,
-                 TfStringPrintf("[BA.365] BrepArray <%s>: edge3dNurb control "
-                                "vertex %zu lies outside all brep:extent boxes "
-                                "(NURBS control hulls may legitimately exceed the "
-                                "surface bounds).",
-                                usdPrim.GetPath().GetText(), c));
-            break;
-        }
-    }
-    const VtArray<GfVec3d> surfCv
-        = _ReadName<GfVec3d>(usdPrim, "brep:surface:nurb:controlVertices");
-    for (size_t c = 0; c < surfCv.size(); ++c) {
-        if (!insideAnyExtent(surfCv[c])) {
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->controlPointOutsideBrepExtent,
-                 usdPrim,
-                 TfStringPrintf("[BA.465] BrepArray <%s>: surface NURBS control "
-                                "vertex %zu lies outside all brep:extent boxes "
-                                "(NURBS control hulls may legitimately exceed the "
-                                "surface bounds).",
-                                usdPrim.GetPath().GetText(), c));
-            break;
-        }
-    }
-
-    // BA.620: an analytic surface's origin, and the face it carries, must not
-    // both sit outside the extent expanded by twice its diagonal.
-    _CheckAnalyticSurfaceOriginContainment(usdPrim, brep, &errors);
-
-    // BA.710: a shell point lies within its own Brep's brep:extent box.
-    _CheckShellPointContainment(usdPrim, brep, &errors);
-
-    return errors;
+    _BrepChecker c(usdPrim, { "BA.040", "BA.045", "BA.050", "BA.310", "BA.365",
+                              "BA.465", "BA.620", "BA.710" });
+    c.ValidateBrepExtent();
+    c.ValidateVertexPositionContainment();
+    c.ValidateEdge3dNurbsControlPointContainment();
+    c.ValidateSurfaceNurbsControlPointContainment();
+    c.ValidateAnalyticSurfaceOriginContainment();
+    c.ValidateShellPointContainment();
+    return c.TakeErrors();
 }
 
 // -------------------------------------------------------------------------- //

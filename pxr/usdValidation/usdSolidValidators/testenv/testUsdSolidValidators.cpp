@@ -260,19 +260,18 @@ def Xform "World"
         uniform uint[] brep:regionCount = [1, 1, 1, 1, 1]
     }
 
-    # Row 14 (BA.310): brep:extent containment slop must follow the
-    # intersectTol3d ladder + a float32-quantization term, not a fixed 1e-11.
-    # The box max on X is 1000; the float32 quantization at 1000 is ~6e-5. Vertex
-    # 0 sits 5e-5 past the box max (1000.00005): below the float slop, so it must
-    # NOT be flagged (it WAS a hard-Error false positive under the old 1e-11).
-    # Vertex 1 sits 1.0 past the box (1001): well outside, still flagged.
-    def BrepArray "ExtentFloatSlop"
+    # BA.310 (BrepArrayContainment): a vertex position lies inside its Brep's
+    # brep:extent box within NUMERICAL_TOLERANCE (1e-11), as in
+    # brep_validator.py. Vertex 0 is 5e-12 past the box max (inside the
+    # tolerance); vertex 1 is 5e-5 past it and vertex 2 a whole unit past it,
+    # and both of those are flagged.
+    def BrepArray "VertexExtentTolerance"
     {
         uniform double[] brep:intersectTol3d = [1e-6]
-        uniform double3[] brep:extent = [(-1000, -1, -1), (1000, 1, 1)]
+        uniform double3[] brep:extent = [(-1, -1, -1), (1, 1, 1)]
         uniform uint[] brep:regionCount = [1]
-        uniform point3d[] brep:vertexPoint:point:position = [(1000.00005, 0, 0), (1001, 0, 0)]
-        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI"]
+        uniform point3d[] brep:vertexPoint:point:position = [(1.000000000005, 0, 0), (1.00005, 0, 0), (2, 0, 0)]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
     }
 
     # Row 16 (BA.532): curve axis frames use the SAME 1e-6 unit-length tolerance
@@ -586,14 +585,11 @@ TestBrepArrayEdgeCurveVertices()
 }
 
 static void
-TestBrepArrayContainmentFloatSlop()
+TestBrepArrayVertexContainment()
 {
-    // Row 14 (BA.310): the brep:extent containment slop follows the
-    // intersectTol3d ladder plus a float32-quantization term, not a fixed
-    // 1e-11. A vertex 5e-5 past a box max of 1000 (below the ~6e-5 float slop at
-    // that magnitude) must NOT be flagged -- under the old 1e-11 slop it was a
-    // hard-Error false positive. A vertex 1.0 past the box is still flagged.
-    // Exactly one vertexPositionOutsideBrepExtent must fire.
+    // BA.310: brep_validator.py allows NUMERICAL_TOLERANCE (1e-11) outside the
+    // box and no more, so a 5e-5 overshoot is flagged along with a whole-unit
+    // one, and a 5e-12 overshoot is not.
     UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
     const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
         UsdSolidValidatorNameTokens->brepArrayContainment);
@@ -601,12 +597,10 @@ TestBrepArrayContainmentFloatSlop()
 
     UsdStageRefPtr stage = _OpenLayer(layerContents);
     const UsdPrim prim
-        = stage->GetPrimAtPath(SdfPath("/World/ExtentFloatSlop"));
+        = stage->GetPrimAtPath(SdfPath("/World/VertexExtentTolerance"));
     TF_AXIOM(prim);
     const UsdValidationErrorVector errors = validator->Validate(prim);
-    // Only the vertex well outside the box (vertex 1) is flagged; the 5e-5
-    // overshoot (vertex 0) is within the float-quantization slop.
-    TF_AXIOM(_CountError(errors, ".VertexPositionOutsideBrepExtent") == 1);
+    TF_AXIOM(_CountError(errors, ".VertexPositionOutsideBrepExtent") == 2);
 }
 
 static void
@@ -1078,11 +1072,20 @@ def Xform "World"
         uniform point3d[] brep:shellPoint:point:position = [(0, 0, 0)]
     }
 
+    # One edge and one face, each with a one-vertex NURBS record, so each
+    # control vertex sits in its Brep's control-vertex span (the spans come
+    # from the vertex counts, as in brep_validator.py).
     def BrepArray "ControlVerticesOutside"
     {
         uniform uint[] brep:regionCount = [1]
+        uniform uint[] region:shellCount = [1]
+        uniform uint[] shell:faceuseCount = [2]
         uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
+        uniform int2[] edge:vertexIndices = [(0, 1)]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [1]
         uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(5, 5, 5)]
+        uniform uint[] brep:surface:nurb:uVertexCount = [1]
+        uniform uint[] brep:surface:nurb:vVertexCount = [1]
         uniform point3d[] brep:surface:nurb:controlVertices = [(5, 5, 5)]
     }
 
@@ -1289,7 +1292,7 @@ main()
     TestBrepArrayNurbs();
     TestBrepArrayAnalyticCurves();
     TestBrepArrayEdgeCurveVertices();
-    TestBrepArrayContainmentFloatSlop();
+    TestBrepArrayVertexContainment();
     TestBrepArrayCurveFrameTol();
     TestBrepArrayMinimumCountsAndSizes();
     TestBrepArrayGeomSubsets();
