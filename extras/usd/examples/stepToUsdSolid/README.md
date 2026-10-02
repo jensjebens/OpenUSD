@@ -71,7 +71,7 @@ these first, ahead of anything that reads geometry.
 ## Where STEP and UsdSolid disagree
 
 STEP and UsdSolid do not accept the same B-reps, so a translator has to convert
-between the two rule sets rather than copy topology across. Two differences show
+between the two rule sets rather than copy topology across. Three differences show
 up on almost any production CAD file.
 
 **Sub-tolerance edges are removed.** UsdSolid rule 7.ii forbids an edge whose
@@ -84,6 +84,14 @@ moved vertex. Adjacent circles and NURBS curves keep their geometry, so an
 endpoint that was already close to the tolerance limit can cross it after the
 weld; re-solving their parameter ranges is healing proper and belongs in a
 healer, not here.
+
+**The outer loop is put first.** The proposal's rule 424 makes a face's first
+loop its outer loop. STEP names that loop with `FACE_OUTER_BOUND`, which is
+optional: the KUKA KR 640 writes each of its 2,729 multi-loop faces with
+`FACE_BOUND` only and lists a hole first on 1,050 of them. Where no bound is named
+outer, the importer puts first the loop whose boundary spans the largest box. A
+bound whose orientation flag is `.F.` runs its edge loop backwards, as STEP
+defines it; the KUKA has 252.
 
 **Seam edges are synthesised for cylinders and cones.** UsdSolid rule 5.iv
 requires a face to have a single outer loop carrying a seam edge; STEP does not,

@@ -1090,6 +1090,41 @@ def _resolve_shell_faces(rd, sh_ref):
         return rd.args(base)[1]
     return rd.args(sh_ref)[1]
 
+def _outer_loop_first(loop_specs, floop_edges, edgeuses, edges, verts, esamples):
+    """Put a face's outer loop first when its STEP bounds don't name it.
+
+    Rule 424 makes a face's first loop its outer loop. STEP names that loop with
+    FACE_OUTER_BOUND, but the entity is optional: the KUKA KR 640 authors each of
+    its 2,729 multi-loop faces with FACE_BOUND only, in an order that lists a hole
+    first on 1,050 of them, and SMLib fails to tessellate 475 such planar faces.
+    The outer loop encloses the others, so it is the loop whose boundary samples
+    span the largest box; on a tie the file's order stands. The face's edgeuses
+    are the last ones authored, a block per loop, and move with their loop."""
+    def extent(eis):
+        pts = []
+        for ei in eis:
+            if ei not in esamples:
+                esamples[ei] = _edge_interior_samples(edges[ei], verts)
+            s, t = edges[ei]["v"]
+            pts += [verts[s]] + esamples[ei] + [verts[t]]
+        if not pts:
+            return 0.0
+        return math.dist([min(p[k] for p in pts) for k in range(3)],
+                         [max(p[k] for p in pts) for k in range(3)])
+
+    ext = [extent(eis) for eis, _ in floop_edges]
+    k = max(range(len(ext)), key=ext.__getitem__)
+    if k == 0 or ext[k] <= ext[0] * (1 + 1e-9):
+        return loop_specs, floop_edges
+    order = [k] + [j for j in range(len(ext)) if j != k]
+    start = len(edgeuses) - sum(n for n, _ in loop_specs)
+    blocks, pos = [], start
+    for n, _ in loop_specs:
+        blocks.append(edgeuses[pos:pos + n])
+        pos += n
+    edgeuses[start:] = [eu for j in order for eu in blocks[j]]
+    return [loop_specs[j] for j in order], [floop_edges[j] for j in order]
+
 # ================================================================ topology + geometry
 def extract_brep(rd, cfg, solid_refs=None):
     """Read one or more STEP solids into the radial-edge topology + geometry the
@@ -1185,18 +1220,24 @@ def extract_brep(rd, cfg, solid_refs=None):
                 loop_specs = []
                 for b in bounds:
                     # Loop winding comes from the edge same_sense flags, the edgeuse
-                    # orientations, and the face same_sense above. The separate
-                    # FACE_BOUND/FACE_OUTER_BOUND orientation flag is assumed .T.
-                    # across the CAD exporters tested here; a producer that authors
-                    # a .F. bound would need it honored, which belongs in the winding
-                    # logic (not a mode) if that case ever turns up.
+                    # orientations, the face same_sense above, and the bound's own
+                    # orientation flag: a .F. bound traverses its EDGE_LOOP backwards
+                    # (the KUKA KR 640 authors 252), so its edgeuses run in reverse
+                    # order, each flipped.
                     ba = rd.args(b)
                     n, eis, vi = walk_loop(ba[1])
+                    if n and len(ba) > 2 and ba[2] == ("enum", "F"):
+                        edgeuses[-n:] = [dict(eu, orient="opposite" if eu["orient"] == "same" else "same")
+                                         for eu in reversed(edgeuses[-n:])]
+                        eis = eis[::-1]
                     loop_specs.append((n, vi))
                     lc += 1
                     for ei in eis: fv.update(edges[ei]["v"])
                     floop_edges.append((eis, [eu["orient"] for eu in edgeuses[-n:]] if n else []))
                     if vi: fv.add(vi)
+                if lc > 1 and not any(rd.typ(b) == "FACE_OUTER_BOUND" for b in bounds):
+                    loop_specs, floop_edges = _outer_loop_first(
+                        loop_specs, floop_edges, edgeuses, edges, verts, esamples)
                 fverts = [verts[i] for i in fv]
                 # The face:range footprint projects SAMPLED boundary-edge points, not
                 # boundary vertices alone -- vertex-only footprints collapse to
