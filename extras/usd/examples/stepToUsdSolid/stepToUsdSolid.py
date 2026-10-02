@@ -11,18 +11,19 @@ validators.
 
     stepToUsdSolid input.stp output.usdc
 
-The converter reads whatever the STEP file contains and does the right thing with
-it, with no modes to choose. It handles planar/cylindrical/conical/spherical/
-toroidal analytic surfaces and NURBS surfaces and curves; lowers swept surfaces
+The converter has no modes to choose. It handles planar/cylindrical/conical/
+spherical/toroidal analytic surfaces, line/circle/ellipse curves (bare or wrapped in
+SURFACE_CURVE / SEAM_CURVE), and NURBS surfaces and curves; lowers swept surfaces
 (linear extrusion, revolution) to NURBS; resolves void shells (BREP_WITH_VOIDS /
 ORIENTED_CLOSED_SHELL) and vertex loops; derives the parametric UV window of each
 face from its trimming edges; and reads per-body / per-face colors from STEP styled
 items. The plane-angle unit and the tolerance are read from the file.
 
-Scope: it maps each STEP solid to a top-level prim in world coordinates (flat
-multi-body). Assembly instancing (NAUO/CDSR placement transforms) is not handled.
-This is a reference/sample importer, like the gsplat ply-to-usd sample -- not a
-production STEP exporter.
+Scope: an assembly comes through as one Xform per NEXT_ASSEMBLY_USAGE_OCCURRENCE
+placement, with the part's solids as BrepArray children; a file with no assembly
+structure maps each solid to a top-level prim in world coordinates. This is a
+reference/sample importer, like the gsplat ply-to-usd sample -- not a production
+STEP importer.
 """
 import re, math
 from collections import Counter
@@ -375,7 +376,7 @@ def lower_revolution(rd, ref, a0=0.0, a1=2*math.pi):
 def surface_geom(rd, ref, cfg, fverts=None):
     """(token, dict-of-arrays) for a face surface. cfg selects cone unit-context
     and swept-surface lowering. fverts (face boundary vertices) is required for
-    the swept-surface param bounds (no PCURVE in these files)."""
+    the swept-surface param bounds (PCURVEs are not read)."""
     t = rd.typ(ref)
     a = rd.args(ref)
     if t == "PLANE":
@@ -2220,9 +2221,8 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
     that part's solids as BrepArray children.
 
     Geometry stays in the part's own coordinate system, where the STEP authored
-    it; the placement is the only thing that moves. That keeps a part placed
-    several times -- a fastener repeated across an assembly -- to one set of
-    authored surfaces per part instead of one per placement."""
+    it; the placement is the only thing that moves. Each placement authors its
+    own copy of the part's BrepArrays."""
     sidx = {sref: k for k, sref in enumerate(solids)}
     used = {}
     for sr, nm, M in placed:
@@ -2255,8 +2255,9 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
 
 def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
     """Convert one STEP file to a UsdSolid stage: one Xform + BrepArray prim per
-    solid, under a /World Xform. Output format follows the extension (.usda text or
-    .usdc binary crate)."""
+    solid, or for an assembly one Xform per placement with its part's solids as
+    BrepArray children, under a /World Xform. Output format follows the extension
+    (.usda text or .usdc binary crate)."""
     with open(inp, errors="replace") as f:
         ents = parse_step(f.read())
     rd = Reader(ents)

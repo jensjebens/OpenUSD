@@ -26,7 +26,8 @@ the file contains:
 
 - **Analytic surfaces** — plane, cylinder, cone, sphere, torus — and **NURBS**
   surfaces, authored to the matching `BrepSurface*API`.
-- **Analytic curves** — line, circle, ellipse — and **NURBS** curves.
+- **Analytic curves** — line, circle, ellipse — and **NURBS** curves, bare or
+  wrapped in `SURFACE_CURVE` / `SEAM_CURVE`.
 - **Swept surfaces** — linear extrusion and revolution — lowered to NURBS with
   exact rational-arc control points.
 - **Void shells** (`BREP_WITH_VOIDS` / `ORIENTED_CLOSED_SHELL`) and **vertex loops**.
@@ -40,14 +41,14 @@ from the file (from its `UNCERTAINTY_MEASURE`, with a bounding-box fallback).
 
 An assembly comes through as one `Xform` per placement, with the transform composed
 down the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` chains and the part's solids as `BrepArray`
-children. Geometry stays in the part's own coordinate system, so a part placed several
-times has one set of authored surfaces rather than one per placement. A file with no
-assembly structure maps each solid to a top-level prim in world coordinates.
+children. Geometry stays in the part's own coordinate system, and each placement
+authors its own copy of the part's `BrepArray`s. A file with no assembly structure
+maps each solid to a top-level prim in world coordinates.
 
 This is a **reference / sample importer**, in the spirit of the Gaussian-splat
 `py3dgsPlyToUsd.py` sample under `extras/imaging/examples/hdParticleField`: enough to
 exercise the schema end to end and to generate test assets, not a production STEP
-exporter.
+importer.
 
 ### Optional features
 
