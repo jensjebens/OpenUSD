@@ -1435,6 +1435,107 @@ TestBrepArrayUvWeightCardinality()
     TF_AXIOM(_CountRule(validator->Validate(nonPositive), "BA.410") == 1);
 }
 
+static const std::string typesAndSeveritiesContents = R"usda(#usda 1.0
+(
+    defaultPrim = "World"
+)
+def Xform "World"
+{
+    def BrepArray "VectorPositions"
+    {
+        uniform vector3d[] brep:vertexPoint:point:position = [(0, 0, 0)]
+        uniform vector3d[] brep:shellPoint:point:position = [(0, 0, 0)]
+    }
+
+    def BrepArray "PointPositions"
+    {
+        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0)]
+        uniform point3d[] brep:shellPoint:point:position = [(0, 0, 0)]
+    }
+
+    def BrepArray "ControlVerticesOutside"
+    {
+        uniform uint[] brep:regionCount = [1]
+        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
+        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(5, 5, 5)]
+        uniform point3d[] brep:surface:nurb:controlVertices = [(5, 5, 5)]
+    }
+
+    def BrepArray "FullPeriodCylinderNoSeam"
+    {
+        uniform token[] face:surfaceType = ["BrepSurfaceCylinderAPI"]
+        uniform double2[] face:range = [(0, 0), (6.283185307179586, 1)]
+        uniform uint[] face:loopCount = [1]
+        uniform uint[] loop:edgeuseCount = [2]
+        uniform uint[] edgeuse:edgeIndex = [0, 1]
+    }
+}
+)usda";
+
+// The rule's findings, all of which must carry `type`.
+static size_t
+_CountRuleWithType(const UsdValidationErrorVector &errors,
+                   const std::string &rule, UsdValidationErrorType type)
+{
+    size_t count = 0;
+    for (const UsdValidationError &error : errors) {
+        if (TfStringStartsWith(error.GetMessage(), "[" + rule + "]")) {
+            TF_AXIOM(error.GetType() == type);
+            ++count;
+        }
+    }
+    return count;
+}
+
+static void
+TestBrepArrayPositionTypesAndSeverities()
+{
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *dataTypes
+        = registry.GetOrLoadValidatorByName(
+            UsdSolidValidatorNameTokens->brepArrayDataTypes);
+    const UsdValidationValidator *containment
+        = registry.GetOrLoadValidatorByName(
+            UsdSolidValidatorNameTokens->brepArrayContainment);
+    const UsdValidationValidator *uvTrim = registry.GetOrLoadValidatorByName(
+        UsdSolidValidatorNameTokens->brepArrayUvTrim);
+    TF_AXIOM(dataTypes && containment && uvTrim);
+
+    UsdStageRefPtr stage = _OpenLayer(typesAndSeveritiesContents);
+
+    // BA.326 / BA.327: the positions are point3d[], exactly. vector3d[] holds
+    // the same GfVec3d values and still fails, as it does in Python.
+    {
+        const UsdValidationErrorVector errors = dataTypes->Validate(
+            stage->GetPrimAtPath(SdfPath("/World/VectorPositions")));
+        TF_AXIOM(_CountRule(errors, "BA.326") == 1);
+        TF_AXIOM(_CountRule(errors, "BA.327") == 1);
+    }
+    {
+        const UsdValidationErrorVector errors = dataTypes->Validate(
+            stage->GetPrimAtPath(SdfPath("/World/PointPositions")));
+        TF_AXIOM(_CountRule(errors, "BA.326") == 0);
+        TF_AXIOM(_CountRule(errors, "BA.327") == 0);
+    }
+
+    // BA.365 / BA.465 and BA.761 are failed checks in brep_validator.py, so
+    // Errors here; only BA.702 is a Python warning.
+    {
+        const UsdValidationErrorVector errors = containment->Validate(
+            stage->GetPrimAtPath(SdfPath("/World/ControlVerticesOutside")));
+        TF_AXIOM(_CountRuleWithType(errors, "BA.365",
+                                    UsdValidationErrorType::Error) == 1);
+        TF_AXIOM(_CountRuleWithType(errors, "BA.465",
+                                    UsdValidationErrorType::Error) == 1);
+    }
+    {
+        const UsdValidationErrorVector errors = uvTrim->Validate(
+            stage->GetPrimAtPath(SdfPath("/World/FullPeriodCylinderNoSeam")));
+        TF_AXIOM(_CountRuleWithType(errors, "BA.761",
+                                    UsdValidationErrorType::Error) == 1);
+    }
+}
+
 int
 main()
 {
@@ -1463,6 +1564,7 @@ main()
     TestBrepArrayGeomSubsets();
     TestBrepArrayPointShells();
     TestBrepArrayUvWeightCardinality();
+    TestBrepArrayPositionTypesAndSeverities();
 
     std::cout << "OK\n";
     return EXIT_SUCCESS;

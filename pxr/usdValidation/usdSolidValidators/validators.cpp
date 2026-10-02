@@ -2248,10 +2248,14 @@ _BrepArrayDataTypes(const UsdPrim &usdPrim,
         { "wireEdge:vertexIndices", SdfValueTypeNames->Int2Array, "BA.291" },
         { "wireEdge:range", SdfValueTypeNames->DoubleArray, "BA.291" },
         { "vertex:pointType", SdfValueTypeNames->TokenArray, "BA.316" },
+        // The positions must be exactly point3d[], the type BrepPointAPI
+        // declares: brep_validator.py compares the authored type name against
+        // the schema's, so the other GfVec3d roles (vector3d[], double3[]) fail
+        // BA.326 / BA.327 even though they hold the same values.
         { "brep:vertexPoint:point:position", SdfValueTypeNames->Point3dArray,
-          "BA.326", true },
+          "BA.326" },
         { "brep:shellPoint:point:position", SdfValueTypeNames->Point3dArray,
-          "BA.327", true },
+          "BA.327" },
         // BA.061: analytic geometry attribute types. A production STEP->UsdSolid
         // conversion authored analytic axes/positions with wrong roles/precision
         // (e.g. float3[] instead of a double-precision 3-vector) and the scalar
@@ -2357,9 +2361,8 @@ _BrepArrayDataTypes(const UsdPrim &usdPrim,
         { "brep:wireEdge3dEllipse:curve3d:ellipse:yRadius",
           SdfValueTypeNames->DoubleArray, "BA.061" },
     };
-    // point3d / vector3d / double3 all carry GfVec3d; the SimReady producer
-    // authors positions as vector3d[] while the schema declares point3d[], so
-    // accept any of these role-aliases rather than rejecting valid output.
+    // point3d / vector3d / double3 all carry GfVec3d; the analytic families
+    // flagged vecRole accept any of these role-aliases.
     const std::vector<SdfValueTypeName> vec3Roles
         = { SdfValueTypeNames->Point3dArray, SdfValueTypeNames->Vector3dArray,
             SdfValueTypeNames->Double3Array };
@@ -4683,10 +4686,10 @@ _BrepArrayContainment(const UsdPrim &usdPrim,
         }
     }
 
-    // BA.365 / BA.465: NURBS control hulls can legitimately extend beyond the
-    // surface (and hence the extent) for rational/curved geometry, so a control
-    // point outside the extent is reported as a Warning, not an Error. One
-    // finding per stratum keeps the output quiet on valid curved breps.
+    // BA.365 / BA.465: a NURBS control vertex must lie within a brep:extent
+    // box. brep_validator.py reports one outside as a failed check, so it is an
+    // Error here, even though a control hull may extend past the surface it
+    // defines.
     const VtArray<GfVec3d> edgeCv = _ReadName<GfVec3d>(
         usdPrim, "brep:edge3dNurb:curve3d:nurb:controlVertices");
     for (size_t c = 0; c < edgeCv.size(); ++c) {
@@ -4698,8 +4701,7 @@ _BrepArrayContainment(const UsdPrim &usdPrim,
                                 "vertex %zu lies outside all brep:extent boxes "
                                 "(NURBS control hulls may legitimately exceed the "
                                 "surface bounds).",
-                                usdPrim.GetPath().GetText(), c),
-                 UsdValidationErrorType::Warn);
+                                usdPrim.GetPath().GetText(), c));
             break;
         }
     }
@@ -4714,8 +4716,7 @@ _BrepArrayContainment(const UsdPrim &usdPrim,
                                 "vertex %zu lies outside all brep:extent boxes "
                                 "(NURBS control hulls may legitimately exceed the "
                                 "surface bounds).",
-                                usdPrim.GetPath().GetText(), c),
-                 UsdValidationErrorType::Warn);
+                                usdPrim.GetPath().GetText(), c));
             break;
         }
     }
@@ -5675,14 +5676,9 @@ _BrepArrayNurbs(const UsdPrim &usdPrim,
             // vertex, because the failure this catches -- a stratum indexed
             // against the wrong Brep -- names itself once.
             //
-            // Severity and slop follow BA.365 / BA.465, which ask the same
-            // question of edge3d and surface control hulls: a Warning, judged
-            // against the intersectTol3d ladder plus a float32 relative term,
-            // because a NURBS control hull may legitimately exceed the surface
-            // it defines and real CAD extents are commonly float-quantized.
-            // The Python validator draws no severity distinction between the
-            // three, so leaving this one an Error made the wire-edge family
-            // stricter than its siblings for no stated reason.
+            // Severity follows BA.365 / BA.465, which ask the same question
+            // of edge3d and surface control hulls: an Error, as
+            // brep_validator.py reports all three as failed checks.
             const VtArray<GfVec3d> wireExtent
                 = _Read<GfVec3d>(brep.GetBrepExtentAttr());
             const VtArray<unsigned int> wireRegionCount
@@ -5723,8 +5719,7 @@ _BrepArrayNurbs(const UsdPrim &usdPrim,
                                         "control hulls may legitimately exceed "
                                         "the curve bounds).",
                                         usdPrim.GetPath().GetText(), c, p[0],
-                                        p[1], p[2]),
-                         UsdValidationErrorType::Warn);
+                                        p[1], p[2]));
                     break;
                 }
             }
@@ -6063,8 +6058,9 @@ _CheckUvTrimDomainContainment(const UsdPrim &usdPrim,
 // face full in U or V) closes on itself, so its loop should walk the seam edge
 // twice: one 3D edge, two edgeuses, hence a repeated edgeuse:edgeIndex within
 // the face. A face with no repeat has authored the seam as two separate edges
-// (or has no seam at all). Reported as a Warning: the repeat is a topological
-// signal, not a proof that the repeated edge is geometrically the seam.
+// (or has no seam at all). The repeat is a topological signal, not a proof
+// that the repeated edge is geometrically the seam, but brep_validator.py
+// reports a face without one as a failed check, so it is an Error here too.
 void
 _CheckFullPeriodFaceSeamEdgeuse(const UsdPrim &usdPrim,
                                 const UsdSolidBrepArray &brep,
@@ -6199,8 +6195,7 @@ _CheckFullPeriodFaceSeamEdgeuse(const UsdPrim &usdPrim,
                  "3D edge; this is a schema-level heuristic and does not prove "
                  "a geometric seam exists.",
                  usdPrim.GetPath().GetText(), _SurfaceLabel(stype).c_str(),
-                 localFaceIdx, brepIdx, axes.c_str()),
-             UsdValidationErrorType::Warn);
+                 localFaceIdx, brepIdx, axes.c_str()));
     }
 }
 
