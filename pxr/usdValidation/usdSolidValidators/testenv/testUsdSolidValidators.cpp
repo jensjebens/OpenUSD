@@ -164,29 +164,6 @@ def Xform "World"
         uniform token[] vertex:pointType = ["BrepPointAPI"]
     }
 
-    # A face whose FIRST (outer) loop has zero edgeuses: an edgeless periodic
-    # surface (a cylinder/sphere/cone authored as a single seamless NURBS
-    # patch). Proposal #109 rule 424/425 requires the outer loop to carry seam
-    # edges, so BrepArrayFaceOuterLoop must flag FaceOuterLoopNoEdges.
-    def BrepArray "BadOuterLoop"
-    {
-        uniform uint[] face:loopCount = [1]
-        uniform uint[] loop:edgeuseCount = [0]
-        uniform uint[] loop:vertexIndex = [0]
-    }
-
-    # A face authored honestly: its FIRST (outer) loop carries four edgeuses,
-    # and it has a SECOND (inner) loop that is a legal degenerate vertex-loop
-    # (zero edgeuses, a vertexIndex). Rule 428 permits a zero-edgeuse loop only
-    # as a non-first inner loop, so BrepArrayFaceOuterLoop must NOT flag it.
-    def BrepArray "GoodOuterLoopWithInnerVertex"
-    {
-        uniform uint[] face:loopCount = [2]
-        uniform uint[] loop:edgeuseCount = [4, 0]
-        uniform uint[] loop:vertexIndex = [0, 1]
-        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3]
-    }
-
     def BrepArray "BadNurbOrder"
     {
         uniform token[] face:surfaceType = ["BrepSurfaceNurbAPI"]
@@ -205,109 +182,10 @@ def Xform "World"
         double[] brep:edge3dCircle:curve3d:circle:radius = [-1.0]
     }
 
-    # A single planar patch with four single-use (identity-ring) boundary edges
-    # that LABELS itself a closed solid (regionCount = [void, solid]). The solid
-    # shell is not closed -> BrepArraySolidClosure must flag SolidShellOpenEdge.
-    def BrepArray "OpenSolidPatch"
-    {
-        uniform double[] brep:intersectTol3d = [1e-6]
-        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 0)]
-        uniform uint[] brep:regionCount = [2]
-        uniform uint[] region:shellCount = [1, 1]
-        uniform token[] region:type = ["voidRegion", "solidRegion"]
-        uniform uint[] shell:faceuseCount = [1, 1]
-        uniform uint[] shell:wireEdgeCount = [0, 0]
-        uniform token[] shell:pointType = ["none", "none"]
-        uniform uint[] faceuse:faceIndex = [0, 0]
-        uniform token[] faceuse:orientationType = ["same", "opposite"]
-        uniform uint[] face:loopCount = [1]
-        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI"]
-        uniform token[] face:trimType = ["general"]
-        uniform double2[] face:range = [(0, 0), (1, 1)]
-        uniform uint[] loop:edgeuseCount = [4]
-        uniform uint[] loop:vertexIndex = [0]
-        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3]
-        uniform token[] edgeuse:orientationType = ["same", "same", "same", "same"]
-        uniform uint[] edgeuse:nextRadialEUIndex = [0, 1, 2, 3]
-        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry"]
-        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI"]
-        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 3), (3, 0)]
-        uniform double[] edge:range = [0, 1, 0, 1, 0, 1, 0, 1]
-        uniform token[] vertex:pointType = ["none", "none", "none", "none"]
-    }
-
-    # The SAME single open patch authored honestly as a sheet: one voidRegion,
-    # no solidRegion. Its single-use boundary edges are legal on a sheet, so
-    # BrepArraySolidClosure must NOT flag it (valid sheets pass).
-    def BrepArray "OpenSheetPatch"
-    {
-        uniform double[] brep:intersectTol3d = [1e-6]
-        uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 0)]
-        uniform uint[] brep:regionCount = [1]
-        uniform uint[] region:shellCount = [1]
-        uniform token[] region:type = ["voidRegion"]
-        uniform uint[] shell:faceuseCount = [2]
-        uniform uint[] shell:wireEdgeCount = [0]
-        uniform token[] shell:pointType = ["none"]
-        uniform uint[] faceuse:faceIndex = [0, 0]
-        uniform token[] faceuse:orientationType = ["same", "opposite"]
-        uniform uint[] face:loopCount = [1]
-        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI"]
-        uniform token[] face:trimType = ["general"]
-        uniform double2[] face:range = [(0, 0), (1, 1)]
-        uniform uint[] loop:edgeuseCount = [4]
-        uniform uint[] loop:vertexIndex = [0]
-        uniform uint[] edgeuse:edgeIndex = [0, 1, 2, 3]
-        uniform token[] edgeuse:orientationType = ["same", "same", "same", "same"]
-        uniform uint[] edgeuse:nextRadialEUIndex = [0, 1, 2, 3]
-        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry"]
-        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI", "BrepCurve3dLineAPI"]
-        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (2, 3), (3, 0)]
-        uniform double[] edge:range = [0, 1, 0, 1, 0, 1, 0, 1]
-        uniform token[] vertex:pointType = ["none", "none", "none", "none"]
-    }
-
-    # Two NURBS edges. Edge 0 has all control vertices equal (both (0,0,0)) and
-    # its vertexIndices name the same vertex twice: a degenerate/collapsed apex
-    # edge that proposal rule 381 forbids. Edge 1 is a healthy line from
-    # vertex 1 to vertex 2. BrepArrayDegenerateEdges must flag exactly edge 0.
-    def BrepArray "DegenerateEdges"
-    {
-        uniform double[] brep:intersectTol3d = [1e-6]
-        uniform uint[] brep:regionCount = [1]
-        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
-        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(0, 0, 0), (0, 0, 0), (1, 0, 0), (2, 0, 0)]
-        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2]
-        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2]
-        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1]
-        uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
-        uniform double[] edge:range = [0, 1, 0, 1]
-        uniform int2[] edge:vertexIndices = [(0, 0), (1, 2)]
-        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
-    }
-
-    # A degenerate analytic (zero-length line) edge: origin == vertex, direction
-    # scaled by a zero-length edge:range span. BrepArrayDegenerateEdges must flag
-    # it via the analytic (zero arc length) path.
-    def BrepArray "DegenerateAnalyticEdge" (
-        prepend apiSchemas = ["BrepCurve3dLineAPI:edge3dLine"]
-    )
-    {
-        uniform double[] brep:intersectTol3d = [1e-6]
-        uniform uint[] brep:regionCount = [1]
-        uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0), (1, 0, 0)]
-        uniform vector3d[] brep:edge3dLine:curve3d:line:direction = [(1, 0, 0), (1, 0, 0)]
-        uniform point3d[] brep:edge3dLine:curve3d:line:origin = [(0, 0, 0), (0, 0, 0)]
-        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI"]
-        # Edge 0 span 5->5 = 0 (degenerate); edge 1 span 0->1 = healthy.
-        uniform double[] edge:range = [5, 5, 0, 1]
-        uniform int2[] edge:vertexIndices = [(0, 0), (0, 1)]
-        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI"]
-    }
-
     # Two NURBS edges with matching curve/vertex directions: edge 0 runs
-    # vertex 0 -> vertex 1, edge 1 runs vertex 1 -> vertex 2, and the control
-    # hulls agree. BrepArrayEdgeCurveVertices must NOT flag either.
+    # vertex 0 -> vertex 1, edge 1 runs vertex 1 -> vertex 2. Evaluated at
+    # their edge:range endpoints, both land on their vertices, so BA.730
+    # (BrepArrayEdgeCurveVertices) must NOT flag either.
     def BrepArray "GoodEdgeVertices"
     {
         uniform double[] brep:intersectTol3d = [1e-6]
@@ -317,6 +195,7 @@ def Xform "World"
         uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2]
         uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2]
         uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [0, 0, 1, 1, 0, 0, 1, 1]
         uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
         uniform double[] edge:range = [0, 1, 0, 1]
         uniform int2[] edge:vertexIndices = [(0, 1), (1, 2)]
@@ -325,8 +204,7 @@ def Xform "World"
 
     # Same geometry as GoodEdgeVertices, but edge 0's vertexIndices are swapped
     # to (1, 0): the curve still runs (0,0,0)->(1,0,0) but the authored order
-    # says vertex 1 -> vertex 0. This is exactly the topological-order authoring
-    # rule 434 forbids. BrepArrayEdgeCurveVertices must flag edge 0 (and only 0).
+    # says vertex 1 -> vertex 0. BA.730 must flag edge 0 (and only edge 0).
     def BrepArray "ReversedEdgeVertices"
     {
         uniform double[] brep:intersectTol3d = [1e-6]
@@ -336,38 +214,11 @@ def Xform "World"
         uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2]
         uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2]
         uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [0, 0, 1, 1, 0, 0, 1, 1]
         uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
         uniform double[] edge:range = [0, 1, 0, 1]
         uniform int2[] edge:vertexIndices = [(1, 0), (1, 2)]
         uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
-    }
-
-    # BA.061 (BrepArrayDataTypes): analytic geometry attributes authored with
-    # the wrong value type. A production STEP->UsdSolid conversion authored
-    # analytic axes/positions with wrong precision/role and scalar parameters
-    # with the wrong scalar type; those "type" mistakes previously produced no
-    # data-type diagnostic. Here the cylinder axis is a float3[] (not a
-    # double-precision 3-vector) and the radius is a float[] (not double[]).
-    # BrepArrayDataTypes must flag both.
-    def BrepArray "BadAnalyticTypes"
-    {
-        uniform token[] face:surfaceType = ["BrepSurfaceCylinderAPI"]
-        uniform point3d[] brep:surface:cylinder:origin = [(0, 0, 0)]
-        uniform float3[] brep:surface:cylinder:axis = [(0, 0, 1)]
-        uniform vector3d[] brep:surface:cylinder:refDirection = [(1, 0, 0)]
-        uniform float[] brep:surface:cylinder:radius = [3.0]
-    }
-
-    # The SAME cylinder authored with conformant types, including the
-    # point3d/vector3d role-aliases the lenient policy accepts. BrepArrayDataTypes
-    # must NOT flag any of these.
-    def BrepArray "GoodAnalyticTypes"
-    {
-        uniform token[] face:surfaceType = ["BrepSurfaceCylinderAPI"]
-        uniform point3d[] brep:surface:cylinder:origin = [(0, 0, 0)]
-        uniform vector3d[] brep:surface:cylinder:axis = [(0, 0, 1)]
-        uniform vector3d[] brep:surface:cylinder:refDirection = [(1, 0, 0)]
-        uniform double[] brep:surface:cylinder:radius = [3.0]
     }
 
     # BA.570 (BrepArraySpans, EdgeRangeSpanExceeded): a periodic circle edge
@@ -401,52 +252,6 @@ def Xform "World"
         uniform double[] brep:intersectTol3d = [inf]
         uniform double3[] brep:extent = [(0, 0, 0), (1, 1, 1)]
         uniform uint[] brep:regionCount = [1]
-    }
-
-    # Row 13 (BA.230): the analytic degeneracy branch must measure arc length
-    # against the Brep's brep:intersectTol3d, not a fixed 1e-4 curve epsilon.
-    # intersectTol3d is 0.01 here. Edge 0 is a circle of radius 1 spanning
-    # 0.005 rad -> arc length 0.005 <= 0.01, so it is degenerate under the
-    # authored tolerance (it was NOT flagged under the old fixed 1e-4 epsilon,
-    # since 0.005 > 1e-4). Edge 1 is a healthy quarter arc (arc length ~1.57).
-    # Edge 2 is an eccentric ellipse (xRadius 10, yRadius 0.001) spanning
-    # 0.005 rad: its upper-bound arc length uses max(xr, yr) = 10 -> 0.05 > 0.01,
-    # so max(xr,yr) keeps it NON-degenerate (the old mean-radius form would have
-    # used ~5.0 and also cleared it, but max is the conservative bound). Only
-    # edge 0 must be flagged.
-    def BrepArray "DegenerateAnalyticArcTol"
-    {
-        uniform double[] brep:intersectTol3d = [0.01]
-        uniform uint[] brep:regionCount = [1]
-        uniform token[] edge:curveType = ["BrepCurve3dCircleAPI", "BrepCurve3dCircleAPI", "BrepCurve3dEllipseAPI"]
-        point3d[] brep:edge3dCircle:curve3d:circle:center = [(0, 0, 0), (0, 0, 0)]
-        vector3d[] brep:edge3dCircle:curve3d:circle:axis = [(0, 0, 1), (0, 0, 1)]
-        vector3d[] brep:edge3dCircle:curve3d:circle:refDirection = [(1, 0, 0), (1, 0, 0)]
-        double[] brep:edge3dCircle:curve3d:circle:radius = [1.0, 1.0]
-        point3d[] brep:edge3dEllipse:curve3d:ellipse:center = [(0, 0, 0)]
-        vector3d[] brep:edge3dEllipse:curve3d:ellipse:axis = [(0, 0, 1)]
-        vector3d[] brep:edge3dEllipse:curve3d:ellipse:refDirection = [(1, 0, 0)]
-        double[] brep:edge3dEllipse:curve3d:ellipse:xRadius = [10.0]
-        double[] brep:edge3dEllipse:curve3d:ellipse:yRadius = [0.001]
-        # Edge 0: 0.005 rad span (degenerate). Edge 1: quarter arc (healthy).
-        # Edge 2: ellipse 0.005 rad span (non-degenerate via max(xr,yr)).
-        uniform double[] edge:range = [0, 0.005, 0, 1.5707963267948966, 0, 0.005]
-    }
-
-    # Row 15 (BA.230): a BrepArray that authors NO brep:intersectTol3d exercises
-    # the reader-side fallback (_FallbackIntersectTol3d = 1e-6). Edge 0 is a
-    # zero-direction-scaled line spanning 5e-7 model units -> arc length 5e-7,
-    # which is <= 1e-6 (flagged) but was > 1e-9 under the OLD fallback (NOT
-    # flagged). Edge 1 spans 1e-3 (healthy under either fallback). Exactly edge 0
-    # must be flagged, and only because the fallback is 1e-6.
-    def BrepArray "UnauthoredTolDegenerate"
-    {
-        uniform uint[] brep:regionCount = [1]
-        uniform token[] edge:curveType = ["BrepCurve3dLineAPI", "BrepCurve3dLineAPI"]
-        point3d[] brep:edge3dLine:curve3d:line:origin = [(0, 0, 0), (0, 0, 0)]
-        vector3d[] brep:edge3dLine:curve3d:line:direction = [(1, 0, 0), (1, 0, 0)]
-        # Edge 0 span 0 -> 5e-7 (arc 5e-7, sub-fallback). Edge 1 span 0 -> 1e-3.
-        uniform double[] edge:range = [0, 5e-7, 0, 1e-3]
     }
 
     # Row 14 (BA.310): brep:extent containment slop must follow the
@@ -491,7 +296,6 @@ TestRegistration()
         UsdSolidValidatorNameTokens->brepArrayTopology,
         UsdSolidValidatorNameTokens->brepArrayTokenValues,
         UsdSolidValidatorNameTokens->brepArrayRanges,
-        UsdSolidValidatorNameTokens->brepArrayFaceOuterLoop,
         UsdSolidValidatorNameTokens->brepArrayAnalyticSurfaces,
         UsdSolidValidatorNameTokens->brepArrayAuthorship,
         UsdSolidValidatorNameTokens->brepArrayDataTypes,
@@ -502,8 +306,6 @@ TestRegistration()
         UsdSolidValidatorNameTokens->brepArraySpans,
         UsdSolidValidatorNameTokens->brepArrayAnalyticCurves,
         UsdSolidValidatorNameTokens->brepArrayNurbs,
-        UsdSolidValidatorNameTokens->brepArraySolidClosure,
-        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges,
         UsdSolidValidatorNameTokens->brepArrayEdgeCurveVertices,
         UsdSolidValidatorNameTokens->brepArrayUvTrim,
         UsdSolidValidatorNameTokens->brepArrayGeomSubsets,
@@ -512,7 +314,7 @@ TestRegistration()
     const UsdValidationValidatorMetadataVector metadata
         = registry.GetValidatorMetadataForPlugin(
             _tokens->usdSolidValidatorsPlugin);
-    TF_AXIOM(metadata.size() == 20);
+    TF_AXIOM(metadata.size() == 17);
 
     std::set<TfToken> validatorNames;
     for (const UsdValidationValidatorMetadata &m : metadata) {
@@ -586,37 +388,6 @@ TestBrepArrayStructureNonFiniteTol()
         const UsdValidationErrorVector errors = validator->Validate(prim);
         TF_AXIOM(!_HasError(errors, ".NonFiniteIntersectTol3d"));
         TF_AXIOM(_HasError(errors, ".NonPositiveIntersectTol3d"));
-    }
-}
-
-static void
-TestBrepArrayDataTypes()
-{
-    // BA.061: analytic geometry attribute types. A wrong-precision axis
-    // (float3[]) and a wrong scalar radius (float[]) must be flagged with
-    // InvalidAttributeDataType; the conformant cylinder (using the accepted
-    // point3d/vector3d role-aliases and double[]) must stay clean.
-    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
-    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
-        UsdSolidValidatorNameTokens->brepArrayDataTypes);
-    TF_AXIOM(validator);
-
-    UsdStageRefPtr stage = _OpenLayer(layerContents);
-
-    {
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/BadAnalyticTypes"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        // The float3[] axis and the float[] radius are both wrong.
-        TF_AXIOM(_CountError(errors, ".InvalidAttributeDataType") == 2);
-    }
-    {
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/GoodAnalyticTypes"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(!_HasError(errors, ".InvalidAttributeDataType"));
     }
 }
 
@@ -700,38 +471,6 @@ TestBrepArrayRanges()
     TF_AXIOM(_HasError(errors, ".InvalidFaceLoopCount"));
     TF_AXIOM(_HasError(errors, ".DegenerateFaceURange"));
     TF_AXIOM(_HasError(errors, ".InvalidEdgeRangeOrder"));
-}
-
-static void
-TestBrepArrayFaceOuterLoop()
-{
-    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
-    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
-        UsdSolidValidatorNameTokens->brepArrayFaceOuterLoop);
-    TF_AXIOM(validator);
-
-    UsdStageRefPtr stage = _OpenLayer(layerContents);
-
-    {
-        // Face whose first/outer loop has zero edgeuses: an edgeless periodic
-        // surface. Rule 424/425 requires the outer loop to carry seam edges.
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/BadOuterLoop"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(_CountError(errors, ".FaceOuterLoopNoEdges") == 1);
-    }
-
-    {
-        // Outer loop carries four edgeuses; the zero-edgeuse loop is a legal
-        // degenerate inner (non-first) vertex-loop (rule 428) and must NOT be
-        // flagged.
-        const UsdPrim prim = stage->GetPrimAtPath(
-            SdfPath("/World/GoodOuterLoopWithInnerVertex"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(!_HasError(errors, ".FaceOuterLoopNoEdges"));
-    }
 }
 
 static void
@@ -829,76 +568,6 @@ TestBrepArrayAnalyticCurves()
 }
 
 static void
-TestBrepArraySolidClosure()
-{
-    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
-    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
-        UsdSolidValidatorNameTokens->brepArraySolidClosure);
-    TF_AXIOM(validator);
-
-    UsdStageRefPtr stage = _OpenLayer(layerContents);
-
-    {
-        // A single open patch labeled solidRegion: every boundary edge is
-        // single-use, so the solid shell is not closed.
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/OpenSolidPatch"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(_HasError(errors, ".SolidShellOpenEdge"));
-    }
-
-    {
-        // The same open patch authored honestly as a voidRegion-only sheet:
-        // single-use edges are legal on a sheet, so it must NOT be flagged.
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/OpenSheetPatch"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(!_HasError(errors, ".SolidShellOpenEdge"));
-        TF_AXIOM(errors.empty());
-    }
-}
-
-static void
-TestBrepArrayDegenerateEdges()
-{
-    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
-    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
-        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges);
-    TF_AXIOM(validator);
-
-    UsdStageRefPtr stage = _OpenLayer(layerContents);
-
-    {
-        // Edge 0 has all NURBS control vertices equal; edge 1 is healthy.
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/DegenerateEdges"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(_CountError(errors, ".DegenerateEdge") == 1);
-    }
-
-    {
-        // Edge 0 is a zero-length (zero arc) analytic line; edge 1 is healthy.
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/DegenerateAnalyticEdge"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(_CountError(errors, ".DegenerateEdge") == 1);
-    }
-
-    {
-        // Clean, non-degenerate edges: no findings.
-        const UsdPrim prim
-            = stage->GetPrimAtPath(SdfPath("/World/GoodEdgeVertices"));
-        TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(!_HasError(errors, ".DegenerateEdge"));
-    }
-}
-
-static void
 TestBrepArrayEdgeCurveVertices()
 {
     UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
@@ -913,63 +582,17 @@ TestBrepArrayEdgeCurveVertices()
         const UsdPrim prim
             = stage->GetPrimAtPath(SdfPath("/World/GoodEdgeVertices"));
         TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(!_HasError(errors, ".EdgeCurveVertexMismatch"));
+        TF_AXIOM(_CountRule(validator->Validate(prim), "BA.730") == 0);
     }
 
     {
-        // Edge 0's vertexIndices are swapped versus its curve direction
-        // (topological rather than curve-parametric order). Rule 434 flags it.
+        // Edge 0's vertexIndices are swapped against its curve direction, so
+        // its start point lands on the wrong vertex. One finding per edge.
         const UsdPrim prim
             = stage->GetPrimAtPath(SdfPath("/World/ReversedEdgeVertices"));
         TF_AXIOM(prim);
-        const UsdValidationErrorVector errors = validator->Validate(prim);
-        TF_AXIOM(_CountError(errors, ".EdgeCurveVertexMismatch") == 1);
+        TF_AXIOM(_CountRule(validator->Validate(prim), "BA.730") == 1);
     }
-}
-
-static void
-TestBrepArrayDegenerateAnalyticArcTol()
-{
-    // Row 13 (BA.230): the analytic degeneracy branch measures arc length
-    // against the Brep's brep:intersectTol3d (here 0.01), not a fixed 1e-4
-    // curve epsilon. A 0.005-rad circle arc (arc length 0.005 <= 0.01) is
-    // degenerate under the authored tolerance; the old 1e-4 epsilon cleared it.
-    // A quarter arc is healthy, and an eccentric ellipse's upper-bound arc
-    // length uses max(xRadius, yRadius) so it is not falsely collapsed. Exactly
-    // one edge (edge 0) must be flagged.
-    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
-    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
-        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges);
-    TF_AXIOM(validator);
-
-    UsdStageRefPtr stage = _OpenLayer(layerContents);
-    const UsdPrim prim
-        = stage->GetPrimAtPath(SdfPath("/World/DegenerateAnalyticArcTol"));
-    TF_AXIOM(prim);
-    const UsdValidationErrorVector errors = validator->Validate(prim);
-    TF_AXIOM(_CountError(errors, ".DegenerateEdge") == 1);
-}
-
-static void
-TestBrepArrayUnauthoredTolFallback()
-{
-    // Row 15 (BA.230): with no authored brep:intersectTol3d, the reader-side
-    // fallback (_FallbackIntersectTol3d = 1e-6) governs degeneracy. A 5e-7-long
-    // analytic line edge is <= 1e-6 (degenerate) but was > 1e-9 under the old
-    // fallback (clean). Exactly the sub-fallback edge 0 must be flagged, which
-    // proves the fallback magnitude is 1e-6 rather than the former 1e-9.
-    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
-    const UsdValidationValidator *validator = registry.GetOrLoadValidatorByName(
-        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges);
-    TF_AXIOM(validator);
-
-    UsdStageRefPtr stage = _OpenLayer(layerContents);
-    const UsdPrim prim
-        = stage->GetPrimAtPath(SdfPath("/World/UnauthoredTolDegenerate"));
-    TF_AXIOM(prim);
-    const UsdValidationErrorVector errors = validator->Validate(prim);
-    TF_AXIOM(_CountError(errors, ".DegenerateEdge") == 1);
 }
 
 static void
@@ -1447,6 +1070,11 @@ def Xform "World"
         uniform vector3d[] brep:shellPoint:point:position = [(0, 0, 0)]
     }
 
+    def BrepArray "IntRegionShellCount"
+    {
+        uniform int[] region:shellCount = [1]
+    }
+
     def BrepArray "PointPositions"
     {
         uniform point3d[] brep:vertexPoint:point:position = [(0, 0, 0)]
@@ -1516,6 +1144,12 @@ TestBrepArrayPositionTypesAndSeverities()
             stage->GetPrimAtPath(SdfPath("/World/PointPositions")));
         TF_AXIOM(_CountRule(errors, "BA.326") == 0);
         TF_AXIOM(_CountRule(errors, "BA.327") == 0);
+    }
+    {
+        // int[] where the schema declares uint[].
+        const UsdValidationErrorVector errors = dataTypes->Validate(
+            stage->GetPrimAtPath(SdfPath("/World/IntRegionShellCount")));
+        TF_AXIOM(_CountRule(errors, "BA.076") == 1);
     }
 
     // BA.365 / BA.465 and BA.761 are failed checks in brep_validator.py, so
@@ -1648,22 +1282,16 @@ main()
     TestRegistration();
     TestBrepArrayStructure();
     TestBrepArrayStructureNonFiniteTol();
-    TestBrepArrayDataTypes();
     TestBrepArraySpans();
     TestBrepArrayTopology();
     TestBrepArrayTokenValues();
     TestBrepArrayRanges();
-    TestBrepArrayFaceOuterLoop();
     TestBrepArrayAnalyticSurfaces();
     TestBrepArrayAuthorship();
     TestBrepArrayReferences();
     TestBrepArrayNurbs();
     TestBrepArrayAnalyticCurves();
-    TestBrepArraySolidClosure();
-    TestBrepArrayDegenerateEdges();
     TestBrepArrayEdgeCurveVertices();
-    TestBrepArrayDegenerateAnalyticArcTol();
-    TestBrepArrayUnauthoredTolFallback();
     TestBrepArrayContainmentFloatSlop();
     TestBrepArrayCurveFrameTol();
     TestBrepArrayMinimumCountsAndSizes();

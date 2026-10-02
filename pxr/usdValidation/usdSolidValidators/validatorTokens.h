@@ -21,7 +21,6 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((brepArrayTopology, "usdSolidValidators:BrepArrayTopology"))              \
     ((brepArrayTokenValues, "usdSolidValidators:BrepArrayTokenValues"))        \
     ((brepArrayRanges, "usdSolidValidators:BrepArrayRanges"))                  \
-    ((brepArrayFaceOuterLoop, "usdSolidValidators:BrepArrayFaceOuterLoop"))     \
     ((brepArrayAnalyticSurfaces,                                               \
       "usdSolidValidators:BrepArrayAnalyticSurfaces"))                         \
     ((brepArrayAuthorship, "usdSolidValidators:BrepArrayAuthorship"))          \
@@ -34,9 +33,6 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((brepArrayAnalyticCurves,                                                 \
       "usdSolidValidators:BrepArrayAnalyticCurves"))                           \
     ((brepArrayNurbs, "usdSolidValidators:BrepArrayNurbs"))                     \
-    ((brepArraySolidClosure, "usdSolidValidators:BrepArraySolidClosure"))       \
-    ((brepArrayDegenerateEdges,                                                 \
-      "usdSolidValidators:BrepArrayDegenerateEdges"))                           \
     ((brepArrayEdgeCurveVertices,                                               \
       "usdSolidValidators:BrepArrayEdgeCurveVertices"))                         \
     ((brepArrayUvTrim, "usdSolidValidators:BrepArrayUvTrim"))                  \
@@ -95,8 +91,6 @@ PXR_NAMESPACE_OPEN_SCOPE
       "AngularRangeOutsidePrimaryPeriod"))                                     \
     ((faceVDomainNotOrdered, "FaceVDomainNotOrdered"))                         \
     ((nonFiniteFloatArrayValue, "NonFiniteFloatArrayValue"))                   \
-    /* BrepArrayFaceOuterLoop */                                               \
-    ((faceOuterLoopNoEdges, "FaceOuterLoopNoEdges"))                           \
     /* BrepArrayAnalyticSurfaces */                                            \
     ((inconsistentAnalyticSurfaceCount, "InconsistentAnalyticSurfaceCount"))   \
     ((nonPositiveSurfaceRadius, "NonPositiveSurfaceRadius"))                    \
@@ -112,7 +106,6 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((schemaUsageInconsistent, "SchemaUsageInconsistent"))                     \
     /* BrepArrayReferences */                                                  \
     ((faceuseFaceIndexOutOfRange, "FaceuseFaceIndexOutOfRange"))               \
-    ((faceSidesNotPaired, "FaceSidesNotPaired"))                               \
     ((loopVertexIndexOutOfRange, "LoopVertexIndexOutOfRange"))                 \
     ((edgeuseNextRadialIndexOutOfRange, "EdgeuseNextRadialIndexOutOfRange"))   \
     ((edgeuseEdgeIndexOutOfRange, "EdgeuseEdgeIndexOutOfRange"))               \
@@ -165,13 +158,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((nurbInvalidDataType, "NurbInvalidDataType"))                             \
     ((nurbOrderBelowMinimum, "NurbOrderBelowMinimum"))                         \
     ((nurbVertexCountBelowOrder, "NurbVertexCountBelowOrder"))                  \
-    /* BrepArraySolidClosure */                                                \
-    ((solidShellOpenEdge, "SolidShellOpenEdge"))                               \
-    ((solidShellBrokenRadialRing, "SolidShellBrokenRadialRing"))               \
-    /* BrepArrayDegenerateEdges */                                             \
-    ((degenerateEdge, "DegenerateEdge"))                                       \
     /* BrepArrayEdgeCurveVertices */                                           \
-    ((edgeCurveVertexMismatch, "EdgeCurveVertexMismatch"))                     \
     ((nurbsEdgeEndpointVertexMismatch,                                         \
       "NurbsEdgeEndpointVertexMismatch"))                                      \
     /* BrepArrayUvTrim */                                                      \

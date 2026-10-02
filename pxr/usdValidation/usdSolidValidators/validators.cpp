@@ -30,7 +30,6 @@
 #include "pxr/usdValidation/usdValidation/validator.h"
 
 #include <algorithm>
-#include <map>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -57,20 +56,7 @@ constexpr double _FrameTol = 1e-6;
 // pi/2, used to bound cone semiAngle.
 constexpr double _HalfPi = 1.5707963267948966;
 // Fallback intersection tolerance (a 3D length) used only when a BrepArray
-// authors no positive brep:intersectTol3d. Real CAD producers carry positional
-// noise on the order of a micron (STEP files commonly declare uncertainty
-// ~1e-6..1e-5 model units), so the older 1e-9 default was tighter than any real
-// producer and turned benign endpoint/degeneracy noise into systematic
-// proposal-381 /
-// proposal-434 false positives on float-pathed real files. 1e-6 is the reader-side
-// analogue of the builder's weld floor policy max(1e-4, 10*tol) in
-// brepBuilder.cpp: both express "how far apart two points may be before we treat
-// them as distinct"; the builder is deliberately looser (it must weld a mesh),
-// the validator deliberately tighter (it only reports, and conformant assets
-// author their own tol so this fallback never fires on them). See also the
-// tolerance-policy note in docs/usdsolid-debt-register.md.
-// (_FirstAuthoredIntersectTol3d(), below _Read, packages the "authored tol else
-// this fallback" resolution the tolerance-aware rules share.)
+// authors no positive brep:intersectTol3d. See _FirstAuthoredIntersectTol3d.
 constexpr double _FallbackIntersectTol3d = 1e-6;
 
 UsdValidationErrorSites
@@ -91,13 +77,9 @@ _Read(const UsdAttribute &attr)
 }
 
 // The first authored, finite, positive brep:intersectTol3d, or the reader-side
-// _FallbackIntersectTol3d. Centralizes the fallback expression that
-// proposal-381,
-// proposal-434 and BA.375 all need (previously
-// "(!tol.empty() && tol[0] > 0.0) ? tol[0] : 1e-9" copy-pasted at three sites,
-// each with the fallback magnitude unexplained). A per-Brep tolerance would need
-// per-edge Brep attribution, which the flat data does not carry; the first
-// Brep's tolerance is exact for the common single-Brep case.
+// _FallbackIntersectTol3d. A per-Brep tolerance would need per-edge Brep
+// attribution, which the flat data does not carry; the first Brep's tolerance
+// is exact for the common single-Brep case.
 double
 _FirstAuthoredIntersectTol3d(const UsdSolidBrepArray &brep)
 {
@@ -367,11 +349,8 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
     // non-finite tolerance (NaN/Inf) silently breaks every tolerance-based rule
     // downstream: NaN fails every comparison (so an authored NaN slips past the
     // <= 0.0 test here), and the shared tolerance resolution
-    // (_FirstAuthoredIntersectTol3d, used by proposal-381/434 and BA.375)
-    // would carry a
-    // poisoned tolerance into endpoint/degeneracy checks -- which is why that
-    // helper additionally requires std::isfinite before accepting the authored
-    // value. Flag the finiteness violation
+    // (_FirstAuthoredIntersectTol3d) requires std::isfinite before accepting
+    // the authored value for the same reason. Flag the finiteness violation
     // explicitly and separately from the non-positive case (a NaN is neither
     // "positive" nor "<= 0.0", so the ordering test alone cannot catch it).
     for (size_t i = 0; i < tol.size(); ++i) {
@@ -1208,68 +1187,6 @@ _BrepArrayRanges(const UsdPrim &usdPrim,
 
     // BA.660: no floating-point array holds a NaN or an Inf.
     _CheckFloatArraysFinite(usdPrim, &errors);
-
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
-// BrepArrayFaceOuterLoop                                                     //
-// -------------------------------------------------------------------------- //
-UsdValidationErrorVector
-_BrepArrayFaceOuterLoop(const UsdPrim &usdPrim,
-                        const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    const UsdSolidBrepArray brep(usdPrim);
-
-    UsdValidationErrorVector errors;
-
-    const VtArray<unsigned int> faceLoopCount
-        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
-    const VtArray<unsigned int> loopEdgeuseCount
-        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
-
-    // BA.145 (proposal #109 rule 424/425): each face has a single outer loop,
-    // and the first loop listed is that outer loop; seam edges are required, so
-    // the outer loop must contain at least one edgeuse. A loop with zero
-    // edgeuses (a degenerate vertex-loop, rule 428) is legal only as a
-    // non-first (inner) loop. Faces whose FIRST loop has loop:edgeuseCount == 0
-    // are edgeless periodic surfaces (a cylinder/sphere/cone authored as a
-    // single seamless NURBS patch) and are flagged. Loops beyond the first are
-    // not examined here (a degenerate inner vertex-loop is allowed).
-    //
-    // Loops are stored contiguously: face f owns the loops in the half-open
-    // range [loopCursor, loopCursor + face:loopCount[f]); the first of those is
-    // the outer loop.
-    size_t loopCursor = 0;
-    for (size_t f = 0; f < faceLoopCount.size(); ++f) {
-        const unsigned int nlp = faceLoopCount[f];
-        if (nlp == 0) {
-            // No loops at all: BrepArrayRanges (BA.140) reports this; there is
-            // no outer loop to examine.
-            continue;
-        }
-        const size_t outerLoop = loopCursor;
-        if (outerLoop < loopEdgeuseCount.size()
-            && loopEdgeuseCount[outerLoop] == 0u) {
-            errors.emplace_back(
-                UsdSolidValidationErrorNameTokens->faceOuterLoopNoEdges,
-                UsdValidationErrorType::Error, _PrimSites(usdPrim),
-                TfStringPrintf(
-                    "[BA.145] BrepArray <%s>: face %zu has an outer loop "
-                    "(loop %zu, the first loop of the face) with "
-                    "loop:edgeuseCount = 0; a face's outer loop must contain "
-                    "at least one edgeuse (seam edges are required). A "
-                    "zero-edgeuse vertex-loop is legal only as a degenerate "
-                    "inner (non-first) loop. This face is an edgeless periodic "
-                    "surface (e.g. a cylinder/sphere/cone authored as a single "
-                    "seamless NURBS patch).",
-                    usdPrim.GetPath().GetText(), f, outerLoop));
-        }
-        loopCursor += nlp;
-    }
 
     return errors;
 }
@@ -2215,7 +2132,6 @@ _BrepArrayDataTypes(const UsdPrim &usdPrim,
         const char *attr;
         SdfValueTypeName type;
         const char *ba;
-        bool vecRole = false; // accept any double-precision 3-vector role
     };
     const std::vector<Item> items = {
         { "brep:intersectTol3d", SdfValueTypeNames->DoubleArray, "BA.061" },
@@ -2254,123 +2170,11 @@ _BrepArrayDataTypes(const UsdPrim &usdPrim,
           "BA.326" },
         { "brep:shellPoint:point:position", SdfValueTypeNames->Point3dArray,
           "BA.327" },
-        // BA.061: analytic geometry attribute types. A production STEP->UsdSolid
-        // conversion authored analytic axes/positions with wrong roles/precision
-        // (e.g. float3[] instead of a double-precision 3-vector) and the scalar
-        // parameters with wrong scalar types; those "type" mistakes previously
-        // sailed through with no data-type diagnostic (a wrong-typed axis reads
-        // back as an empty GfVec3d array, so only a misleading
-        // InconsistentAnalyticSurfaceCount fired, if anything). The vec3-role
-        // families (origin/center/axis/refDirection) use the same lenient
-        // point3d/vector3d/double3 policy as the position attributes above: the
-        // goal is catching float-precision or non-3-vector mistakes, not role
-        // churn. The scalar families (radii, semiAngle) must be double[].
-        //
-        // NURBS surface/edge families are intentionally omitted here: their data
-        // types are already owned by BrepArrayNurbs (_CheckNurbType, BA.471 /
-        // BA.371 / BA.416). Only authored attributes are checked (absence is the
-        // Authorship validator's job).
-        // --- analytic surfaces: plane / cylinder / cone / sphere / torus ---
-        { "brep:surface:plane:origin", SdfValueTypeNames->Point3dArray,
-          "BA.061", true },
-        { "brep:surface:plane:axis", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:plane:refDirection", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:cylinder:origin", SdfValueTypeNames->Point3dArray,
-          "BA.061", true },
-        { "brep:surface:cylinder:axis", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:cylinder:refDirection", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:cylinder:radius", SdfValueTypeNames->DoubleArray,
-          "BA.061" },
-        { "brep:surface:cone:origin", SdfValueTypeNames->Point3dArray,
-          "BA.061", true },
-        { "brep:surface:cone:axis", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:cone:refDirection", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:cone:radius", SdfValueTypeNames->DoubleArray,
-          "BA.061" },
-        { "brep:surface:cone:semiAngle", SdfValueTypeNames->DoubleArray,
-          "BA.061" },
-        { "brep:surface:sphere:center", SdfValueTypeNames->Point3dArray,
-          "BA.061", true },
-        { "brep:surface:sphere:axis", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:sphere:refDirection", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:sphere:radius", SdfValueTypeNames->DoubleArray,
-          "BA.061" },
-        { "brep:surface:torus:origin", SdfValueTypeNames->Point3dArray,
-          "BA.061", true },
-        { "brep:surface:torus:axis", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:torus:refDirection", SdfValueTypeNames->Vector3dArray,
-          "BA.061", true },
-        { "brep:surface:torus:majorRadius", SdfValueTypeNames->DoubleArray,
-          "BA.061" },
-        { "brep:surface:torus:minorRadius", SdfValueTypeNames->DoubleArray,
-          "BA.061" },
-        // --- analytic 3D curves: line / circle / ellipse (edge3d + wireEdge3d) ---
-        { "brep:edge3dLine:curve3d:line:origin", SdfValueTypeNames->Point3dArray,
-          "BA.061", true },
-        { "brep:edge3dLine:curve3d:line:direction",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:wireEdge3dLine:curve3d:line:origin",
-          SdfValueTypeNames->Point3dArray, "BA.061", true },
-        { "brep:wireEdge3dLine:curve3d:line:direction",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:edge3dCircle:curve3d:circle:center",
-          SdfValueTypeNames->Point3dArray, "BA.061", true },
-        { "brep:edge3dCircle:curve3d:circle:axis",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:edge3dCircle:curve3d:circle:refDirection",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:edge3dCircle:curve3d:circle:radius",
-          SdfValueTypeNames->DoubleArray, "BA.061" },
-        { "brep:wireEdge3dCircle:curve3d:circle:center",
-          SdfValueTypeNames->Point3dArray, "BA.061", true },
-        { "brep:wireEdge3dCircle:curve3d:circle:axis",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:wireEdge3dCircle:curve3d:circle:refDirection",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:wireEdge3dCircle:curve3d:circle:radius",
-          SdfValueTypeNames->DoubleArray, "BA.061" },
-        { "brep:edge3dEllipse:curve3d:ellipse:center",
-          SdfValueTypeNames->Point3dArray, "BA.061", true },
-        { "brep:edge3dEllipse:curve3d:ellipse:axis",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:edge3dEllipse:curve3d:ellipse:refDirection",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:edge3dEllipse:curve3d:ellipse:xRadius",
-          SdfValueTypeNames->DoubleArray, "BA.061" },
-        { "brep:edge3dEllipse:curve3d:ellipse:yRadius",
-          SdfValueTypeNames->DoubleArray, "BA.061" },
-        { "brep:wireEdge3dEllipse:curve3d:ellipse:center",
-          SdfValueTypeNames->Point3dArray, "BA.061", true },
-        { "brep:wireEdge3dEllipse:curve3d:ellipse:axis",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:wireEdge3dEllipse:curve3d:ellipse:refDirection",
-          SdfValueTypeNames->Vector3dArray, "BA.061", true },
-        { "brep:wireEdge3dEllipse:curve3d:ellipse:xRadius",
-          SdfValueTypeNames->DoubleArray, "BA.061" },
-        { "brep:wireEdge3dEllipse:curve3d:ellipse:yRadius",
-          SdfValueTypeNames->DoubleArray, "BA.061" },
     };
-    // point3d / vector3d / double3 all carry GfVec3d; the analytic families
-    // flagged vecRole accept any of these role-aliases.
-    const std::vector<SdfValueTypeName> vec3Roles
-        = { SdfValueTypeNames->Point3dArray, SdfValueTypeNames->Vector3dArray,
-            SdfValueTypeNames->Double3Array };
     UsdValidationErrorVector errors;
     for (const Item &it : items) {
         std::string got;
-        const bool mismatch
-            = it.vecRole ? _AuthoredTypeIn(usdPrim, it.attr, vec3Roles, &got)
-                         : _AuthoredTypeMismatch(usdPrim, it.attr, it.type, &got);
-        if (mismatch) {
+        if (_AuthoredTypeMismatch(usdPrim, it.attr, it.type, &got)) {
             _Err(&errors,
                  UsdSolidValidationErrorNameTokens->invalidAttributeDataType,
                  usdPrim,
@@ -2617,51 +2421,6 @@ _BrepArrayReferences(const UsdPrim &usdPrim,
                                     usdPrim.GetPath().GetText(), fu,
                                     faceIndex[fu], b, off.face[b],
                                     off.face[b + 1]));
-            }
-        }
-    }
-
-    // [proposal-1.i] A face has two sides, so exactly two faceuses name it:
-    // one "same", on the positive-normal side of its surface, and one
-    // "opposite". Authoring both on one side leaves a face with no use on the
-    // other, and a kernel walking the radial ring around a shared edge cannot
-    // resolve which region each use bounds.
-    //
-    // This is a per-face rule and deliberately not a per-shell one. A shell
-    // may legitimately mix the two: the proposal's non-manifold cubes author
-    // shell 2 as five "opposite" faceuses and one "same".
-    {
-        const VtArray<TfToken> fuOrient
-            = _Read<TfToken>(brep.GetFaceuseOrientationTypeAttr());
-        static const TfToken sameTok("same");
-        static const TfToken oppositeTok("opposite");
-        for (size_t b = 0; b < n; ++b) {
-            const auto blk = _IndexBlock(off.faceuse, b, n, faceIndex.size());
-            std::map<unsigned int, std::pair<size_t, size_t>> sides;
-            for (size_t fu = blk.first; fu < blk.second; ++fu) {
-                if (fu >= fuOrient.size()) {
-                    break;
-                }
-                auto &s = sides[faceIndex[fu]];
-                if (fuOrient[fu] == sameTok) {
-                    ++s.first;
-                } else if (fuOrient[fu] == oppositeTok) {
-                    ++s.second;
-                }
-            }
-            for (const auto &entry : sides) {
-                if (entry.second.first == 1 && entry.second.second == 1) {
-                    continue;
-                }
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->faceSidesNotPaired,
-                     usdPrim,
-                     TfStringPrintf(
-                         "[proposal-1.i] BrepArray <%s>: face %u in brep %zu is "
-                         "named by %zu \"same\" and %zu \"opposite\" faceuse(s); "
-                         "a face has two sides and needs exactly one of each.",
-                         usdPrim.GetPath().GetText(), entry.first, b,
-                         entry.second.first, entry.second.second));
             }
         }
     }
@@ -2984,466 +2743,11 @@ _BrepArrayCompleteness(const UsdPrim &usdPrim,
 }
 
 // -------------------------------------------------------------------------- //
-// BrepArraySolidClosure                                                      //
-// -------------------------------------------------------------------------- //
-// A region declared "solidRegion" bounds a finite volume, so its shell(s) must
-// be CLOSED: every non-degenerate edge on a solid shell must be shared by at
-// least two edgeuses whose radial ring actually links them. A single-use
-// (laminar / identity-ring) boundary edge on a solid shell means the surface is
-// open -- surface soup or an open sheet mislabeled as a solid. The same
-// single-use edges on a voidRegion-only (sheet/wire/point) model are legal and
-// are NOT flagged. CLOSED-LOOP edges (start vertex == end vertex -- a
-// full-circle rim or a seam ring, e.g. at the corner singularities of a
-// filleted solid) are exempt from the shared-edge count: they are full-length
-// legal edges, NOT rule-381 degenerate edges. Zero-length (degenerate) edges
-// are never exempted anywhere -- proposal-381 (_BrepArrayDegenerateEdges)
-// flags them as errors, measured against brep:intersectTol3d per proposal
-// rule 381.
-//
-// These two checks have no counterpart in brep_validator.py and no allocated
-// requirement number. They carried BA.590 and BA.591, which are
-// brep-nurbs-order-positive and brep-nurbs-vertex-count-ge-order -- both
-// implemented correctly elsewhere in this file, so the same tag named two
-// unrelated checks and a reader could not tell which had fired. They report
-// as [solid-shell-closure] until a number is allocated.
-UsdValidationErrorVector
-_BrepArraySolidClosure(const UsdPrim &usdPrim,
-                       const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    const UsdSolidBrepArray brep(usdPrim);
-    const _BrepOffsets off = _ComputeOffsets(brep);
-    if (!off.ok) {
-        return {};
-    }
-    const size_t n = off.numBreps;
-    UsdValidationErrorVector errors;
-
-    const VtArray<TfToken> regionType
-        = _Read<TfToken>(brep.GetRegionTypeAttr());
-    const VtArray<unsigned int> regionShellCount
-        = _Read<unsigned int>(brep.GetRegionShellCountAttr());
-    const VtArray<unsigned int> shellFaceuseCount
-        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
-    const VtArray<unsigned int> faceuseFaceIndex
-        = _Read<unsigned int>(brep.GetFaceuseFaceIndexAttr());
-    const VtArray<unsigned int> faceLoopCount
-        = _Read<unsigned int>(brep.GetFaceLoopCountAttr());
-    const VtArray<unsigned int> loopEdgeuseCount
-        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
-    const VtArray<unsigned int> edgeuseEdgeIndex
-        = _Read<unsigned int>(brep.GetEdgeuseEdgeIndexAttr());
-    const VtArray<unsigned int> nextRadial
-        = _Read<unsigned int>(brep.GetEdgeuseNextRadialEUIndexAttr());
-    const VtArray<GfVec2i> edgeVtx
-        = _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr());
-
-    static const TfToken solidRegionTok("solidRegion");
-
-    for (size_t b = 0; b < n; ++b) {
-        // 1. Which faces of this Brep lie on a solidRegion shell?
-        std::unordered_set<unsigned int> solidFaces;
-        size_t shellCursor = off.shell[b];
-        size_t faceuseCursor = off.faceuse[b];
-        for (size_t r = off.region[b]; r < off.region[b + 1]; ++r) {
-            const bool isSolid
-                = r < regionType.size() && regionType[r] == solidRegionTok;
-            const unsigned int nsh
-                = r < regionShellCount.size() ? regionShellCount[r] : 0u;
-            for (unsigned int s = 0; s < nsh; ++s) {
-                const size_t shellIdx = shellCursor + s;
-                const unsigned int nfu = shellIdx < shellFaceuseCount.size()
-                    ? shellFaceuseCount[shellIdx] : 0u;
-                for (unsigned int k = 0; k < nfu; ++k) {
-                    const size_t fu = faceuseCursor + k;
-                    if (isSolid && fu < faceuseFaceIndex.size()) {
-                        solidFaces.insert(faceuseFaceIndex[fu]);
-                    }
-                }
-                faceuseCursor += nfu;
-            }
-            shellCursor += nsh;
-        }
-        if (solidFaces.empty()) {
-            continue;   // pure sheet / wire / point body: nothing to enforce.
-        }
-
-        // 2. Map each edgeuse of this Brep to its owning face; accumulate, per
-        //    edge, its referencing edgeuses and whether any belongs to a solid
-        //    face. edgeuse -> loop (loop:edgeuseCount) -> face (face:loopCount).
-        std::unordered_map<unsigned int, std::vector<size_t>> edgeToEUs;
-        std::unordered_set<unsigned int> solidEdges;
-        size_t loopCursor = off.loop[b];
-        size_t euCursor = off.edgeuse[b];
-        for (size_t f = off.face[b]; f < off.face[b + 1]; ++f) {
-            const bool faceIsSolid
-                = solidFaces.count(static_cast<unsigned int>(f)) > 0;
-            const unsigned int nlp
-                = f < faceLoopCount.size() ? faceLoopCount[f] : 0u;
-            for (unsigned int lk = 0; lk < nlp; ++lk) {
-                const size_t lp = loopCursor + lk;
-                const unsigned int neu
-                    = lp < loopEdgeuseCount.size() ? loopEdgeuseCount[lp] : 0u;
-                for (unsigned int ek = 0; ek < neu; ++ek) {
-                    const size_t eu = euCursor + ek;
-                    if (eu >= edgeuseEdgeIndex.size()) {
-                        continue;
-                    }
-                    const unsigned int e = edgeuseEdgeIndex[eu];
-                    edgeToEUs[e].push_back(eu);
-                    if (faceIsSolid) {
-                        solidEdges.insert(e);
-                    }
-                }
-                euCursor += neu;
-            }
-            loopCursor += nlp;
-        }
-
-        // 3. Enforce closure on every solid edge.
-        const bool ringAuthored = nextRadial.size() >= off.edgeuse[b + 1];
-        for (const unsigned int e : solidEdges) {
-            // A closed-loop edge (start vertex == end vertex: full-circle rim
-            // or seam ring) is a legal single-use seam on a closed analytic
-            // patch; exempt it from the shared-edge count. This is NOT a
-            // rule-381 degenerate (zero-length) edge -- those are errors,
-            // flagged by proposal-381.
-            if (e < edgeVtx.size() && edgeVtx[e][0] == edgeVtx[e][1]) {
-                continue;
-            }
-            const std::vector<size_t> &eus = edgeToEUs[e];
-
-            // BA.590: a solid edge must be shared (>= 2 edgeuses). A single-use
-            // edge is an open boundary -> the solid shell is not closed.
-            if (eus.size() < 2) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->solidShellOpenEdge,
-                     usdPrim,
-                     TfStringPrintf(
-                         "[solid-shell-closure] BrepArray <%s>: edge %u on a "
-                         "solidRegion "
-                         "shell of Brep %zu is referenced by %zu edgeuse(s) "
-                         "(expected >= 2); a solid shell must be closed (no "
-                         "single-use boundary edges). This is an open surface "
-                         "or sheet mislabeled as a solid.",
-                         usdPrim.GetPath().GetText(), e, b, eus.size()));
-                continue;
-            }
-
-            // BA.591: the radial ring of a solid edge must form one cycle that
-            // visits exactly the edgeuses referencing that edge. Only checked
-            // when the ring is authored; an absent ring is reported by
-            // BrepArrayAuthorship.
-            if (!ringAuthored) {
-                continue;
-            }
-            std::unordered_set<size_t> expected(eus.begin(), eus.end());
-            std::unordered_set<size_t> visited;
-            size_t cur = eus.front();
-            for (size_t step = 0; step < expected.size() + 1; ++step) {
-                if (cur >= nextRadial.size() || !visited.insert(cur).second) {
-                    break;
-                }
-                cur = nextRadial[cur];
-            }
-            if (visited != expected) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens
-                         ->solidShellBrokenRadialRing,
-                     usdPrim,
-                     TfStringPrintf(
-                         "[solid-shell-closure] BrepArray <%s>: the radial "
-                         "ring of edge %u "
-                         "on a solidRegion shell of Brep %zu does not link its "
-                         "%zu edgeuses into a single cycle (an identity/self "
-                         "ring leaves the shared faces unconnected).",
-                         usdPrim.GetPath().GetText(), e, b, eus.size()));
-            }
-        }
-    }
-
-    return errors;
-}
-
-// ========================================================================== //
-// Shared edge-geometry support (degenerate edges + curve-endpoint checks)    //
-// ========================================================================== //
-
-// One edge/wireEdge instance's resolved 3D geometry, enough to decide
-// degeneracy and to recover the curve's start/end points. Populated per
-// curve family (NURBS control hull, or analytic line/circle/ellipse).
-struct _EdgeGeom {
-    bool hasGeom = false;       // geometry for this edge was found
-    // NURBS: the control-vertex hull for this edge (in curve order).
-    bool isNurb = false;
-    std::vector<GfVec3d> cvs;
-    // Analytic: the curve's arc length over its authored parameter span (a raw
-    // length, no threshold applied here so the caller can measure it against the
-    // Brep's brep:intersectTol3d consistently with the NURBS branch -- register
-    // row 13). Negative when unset (NURBS edges, or an unresolved analytic edge).
-    double arcLen = -1.0;
-    // Curve endpoints in curve-parametric order (start = param min, end = max).
-    // Valid whenever hasGeom is true.
-    GfVec3d start{ 0, 0, 0 };
-    GfVec3d end{ 0, 0, 0 };
-};
-
-// Resolve every edge (or wireEdge, when wire==true) of a BrepArray to its 3D
-// geometry. NURBS edges pull their control hull from the edge3dNurb /
-// wireEdge3dNurb strata (a clamped curve passes through its first and last
-// control vertex, so those are its endpoints). Analytic edges pull line /
-// circle / ellipse parameters and evaluate the curve at the authored edge:range
-// endpoints. Instances of one curve family are packed in edge order, matching
-// the BrepArrayAnalyticCurves / BrepArrayNurbs conventions.
-std::vector<_EdgeGeom>
-_ResolveEdgeGeom(const UsdPrim &prim, const UsdSolidBrepArray &brep, bool wire)
-{
-    const std::string inst = wire ? "wireEdge" : "edge";
-    const VtArray<TfToken> curveType = wire
-        ? _Read<TfToken>(brep.GetWireEdgeCurveTypeAttr())
-        : _Read<TfToken>(brep.GetEdgeCurveTypeAttr());
-    const VtArray<double> range = wire
-        ? _Read<double>(brep.GetWireEdgeRangeAttr())
-        : _Read<double>(brep.GetEdgeRangeAttr());
-    const size_t numE = curveType.size();
-    std::vector<_EdgeGeom> geom(numE);
-
-    static const TfToken nurbTok("BrepCurve3dNurbAPI");
-    static const TfToken lineTok("BrepCurve3dLineAPI");
-    static const TfToken circleTok("BrepCurve3dCircleAPI");
-    static const TfToken ellipseTok("BrepCurve3dEllipseAPI");
-
-    // --- NURBS hull: per-edge control vertices sliced by vertexCount. --- //
-    const std::string nurbBase
-        = std::string("brep:") + (wire ? "wireEdge3dNurb" : "edge3dNurb")
-        + ":curve3d:nurb:";
-    const VtArray<unsigned int> nVC
-        = _ReadName<unsigned int>(prim, nurbBase + "vertexCount");
-    const VtArray<GfVec3d> nCv
-        = _ReadName<GfVec3d>(prim, nurbBase + "controlVertices");
-    size_t nurbCursor = 0;
-    size_t nurbInst = 0;
-
-    // --- Analytic parameter arrays (packed per curve family, edge order). --- //
-    const std::string lineBase
-        = std::string("brep:") + inst + "3dLine:curve3d:line:";
-    const VtArray<GfVec3d> lineOrigin
-        = _ReadName<GfVec3d>(prim, lineBase + "origin");
-    const VtArray<GfVec3d> lineDir
-        = _ReadName<GfVec3d>(prim, lineBase + "direction");
-    size_t lineInst = 0;
-
-    const std::string circleBase
-        = std::string("brep:") + inst + "3dCircle:curve3d:circle:";
-    const VtArray<GfVec3d> circleCenter
-        = _ReadName<GfVec3d>(prim, circleBase + "center");
-    const VtArray<GfVec3d> circleAxis
-        = _ReadName<GfVec3d>(prim, circleBase + "axis");
-    const VtArray<GfVec3d> circleRef
-        = _ReadName<GfVec3d>(prim, circleBase + "refDirection");
-    const VtArray<double> circleRadius
-        = _ReadName<double>(prim, circleBase + "radius");
-    size_t circleInst = 0;
-
-    const std::string ellipseBase
-        = std::string("brep:") + inst + "3dEllipse:curve3d:ellipse:";
-    const VtArray<GfVec3d> ellipseCenter
-        = _ReadName<GfVec3d>(prim, ellipseBase + "center");
-    const VtArray<GfVec3d> ellipseAxis
-        = _ReadName<GfVec3d>(prim, ellipseBase + "axis");
-    const VtArray<GfVec3d> ellipseRef
-        = _ReadName<GfVec3d>(prim, ellipseBase + "refDirection");
-    const VtArray<double> ellipseX
-        = _ReadName<double>(prim, ellipseBase + "xRadius");
-    const VtArray<double> ellipseY
-        = _ReadName<double>(prim, ellipseBase + "yRadius");
-    size_t ellipseInst = 0;
-
-    // Evaluate a conic (circle/ellipse) point:
-    //   center + cos(t)*xr*ref + sin(t)*yr*(axis x ref).
-    const auto conicAt = [](const GfVec3d &center, const GfVec3d &axis,
-                            const GfVec3d &ref, double xr, double yr,
-                            double t) {
-        const GfVec3d yDir = GfCross(axis, ref);
-        return center + std::cos(t) * xr * ref + std::sin(t) * yr * yDir;
-    };
-
-    for (size_t e = 0; e < numE; ++e) {
-        _EdgeGeom &g = geom[e];
-        const double t0 = 2 * e < range.size() ? range[2 * e] : 0.0;
-        const double t1 = 2 * e + 1 < range.size() ? range[2 * e + 1] : 0.0;
-        const TfToken &ct = curveType[e];
-        if (ct == nurbTok) {
-            const unsigned int vc
-                = nurbInst < nVC.size() ? nVC[nurbInst] : 0u;
-            ++nurbInst;
-            if (vc >= 1 && nurbCursor + vc <= nCv.size()) {
-                g.hasGeom = true;
-                g.isNurb = true;
-                g.cvs.assign(nCv.begin() + nurbCursor,
-                             nCv.begin() + nurbCursor + vc);
-                g.start = g.cvs.front();
-                g.end = g.cvs.back();
-            }
-            nurbCursor += vc;
-        } else if (ct == lineTok) {
-            const size_t i = lineInst++;
-            if (i < lineOrigin.size() && i < lineDir.size()) {
-                g.hasGeom = true;
-                g.start = lineOrigin[i] + t0 * lineDir[i];
-                g.end = lineOrigin[i] + t1 * lineDir[i];
-                // Arc length = |span| * |direction|; measured against
-                // brep:intersectTol3d by the caller (register row 13).
-                g.arcLen = std::abs((t1 - t0) * lineDir[i].GetLength());
-            }
-        } else if (ct == circleTok) {
-            const size_t i = circleInst++;
-            if (i < circleCenter.size() && i < circleAxis.size()
-                && i < circleRef.size() && i < circleRadius.size()) {
-                g.hasGeom = true;
-                const double r = circleRadius[i];
-                g.start = conicAt(circleCenter[i], circleAxis[i], circleRef[i],
-                                  r, r, t0);
-                g.end = conicAt(circleCenter[i], circleAxis[i], circleRef[i],
-                                r, r, t1);
-                // Exact circular arc length = r * |span|.
-                g.arcLen = std::abs(r * (t1 - t0));
-            }
-        } else if (ct == ellipseTok) {
-            const size_t i = ellipseInst++;
-            if (i < ellipseCenter.size() && i < ellipseAxis.size()
-                && i < ellipseRef.size() && i < ellipseX.size()
-                && i < ellipseY.size()) {
-                g.hasGeom = true;
-                g.start = conicAt(ellipseCenter[i], ellipseAxis[i],
-                                  ellipseRef[i], ellipseX[i], ellipseY[i], t0);
-                g.end = conicAt(ellipseCenter[i], ellipseAxis[i],
-                                ellipseRef[i], ellipseX[i], ellipseY[i], t1);
-                // Upper-bound arc length = max(xRadius, yRadius) * |span|. The
-                // larger semi-axis bounds the true elliptic arc from above, so
-                // an edge only registers as degenerate when even that bound is
-                // below tolerance -- an eccentric ellipse (xr >> yr) with a
-                // short span past the minor axis is never falsely collapsed
-                // (register row 13; previously used the mean radius).
-                const double maxR = std::max(ellipseX[i], ellipseY[i]);
-                g.arcLen = std::abs(maxR * (t1 - t0));
-            }
-        }
-    }
-    return geom;
-}
-
-// -------------------------------------------------------------------------- //
-// BrepArrayDegenerateEdges                                                   //
-// -------------------------------------------------------------------------- //
-// Proposal rule 381: "degenerate geometry is not allowed, where degeneracy is
-// measured against tolerance." An edge is degenerate when its 3D curve has no
-// extent: for a NURBS curve, every control vertex coincides (Umhoefer: "we
-// should be able to catch these degenerate edges because all of the control
-// points are equal"); for an analytic curve, the arc length falls below
-// tolerance. BOTH branches now measure against the same Brep tolerance
-// (brep:intersectTol3d, with the shared reader fallback) -- the analytic branch
-// previously used a hard-coded 1e-4 curve epsilon while the NURBS branch used
-// the Brep tolerance, so the same physical gap was called degenerate on one
-// curve family and healthy on another (register row 13). Both edge3d* and
-// wireEdge3d* instances are checked.
-//
-// Like the proposal-434 check below, this has no allocated requirement
-// number: it was written against proposal rule 381 and carried a "BA.230"
-// tag, but BA.230 is brep-edge-range-per-edge-structure, an unrelated size
-// rule implemented in BrepArrayStructure. It reports as [proposal-381]
-// until a number is allocated.
-UsdValidationErrorVector
-_BrepArrayDegenerateEdges(const UsdPrim &usdPrim,
-                          const UsdValidationTimeRange & /*timeRange*/)
-{
-    if (!(usdPrim && usdPrim.IsA<UsdSolidBrepArray>())) {
-        return {};
-    }
-    const UsdSolidBrepArray brep(usdPrim);
-
-    // Tolerance: the first authored brep:intersectTol3d, else the shared reader
-    // fallback (see _FirstAuthoredIntersectTol3d).
-    const double tol3d = _FirstAuthoredIntersectTol3d(brep);
-
-    UsdValidationErrorVector errors;
-
-    for (int wirePass = 0; wirePass < 2; ++wirePass) {
-        const bool wire = wirePass == 1;
-        const char *label = wire ? "wireEdge" : "edge";
-        const std::vector<_EdgeGeom> geom
-            = _ResolveEdgeGeom(usdPrim, brep, wire);
-        for (size_t e = 0; e < geom.size(); ++e) {
-            const _EdgeGeom &g = geom[e];
-            if (!g.hasGeom) {
-                continue;   // no resolvable geometry (reported elsewhere).
-            }
-            bool degenerate = false;
-            if (g.isNurb) {
-                // All control vertices equal within tolerance => the curve
-                // collapses to a point.
-                degenerate = true;
-                for (size_t c = 1; c < g.cvs.size(); ++c) {
-                    if ((g.cvs[c] - g.cvs[0]).GetLength() > tol3d) {
-                        degenerate = false;
-                        break;
-                    }
-                }
-                if (g.cvs.size() < 2) {
-                    // A single control vertex is a point, i.e. degenerate.
-                    degenerate = true;
-                }
-            } else {
-                // Analytic: the curve's arc length (an upper bound for the
-                // ellipse) is degenerate when it does not exceed the Brep
-                // tolerance. arcLen < 0 means the analytic parameters were not
-                // resolvable, which is reported elsewhere.
-                degenerate = g.arcLen >= 0.0 && g.arcLen <= tol3d;
-            }
-            if (degenerate) {
-                _Err(&errors,
-                     UsdSolidValidationErrorNameTokens->degenerateEdge, usdPrim,
-                     TfStringPrintf(
-                         "[proposal-381] BrepArray <%s>: %s %zu is degenerate "
-                         "(its 3D "
-                         "curve has no extent within brep:intersectTol3d = %g; "
-                         "%s). Degenerate geometry is not allowed (proposal rule "
-                         "381).",
-                         usdPrim.GetPath().GetText(), label, e, tol3d,
-                         g.isNurb ? "all NURBS control vertices are equal"
-                                  : TfStringPrintf(
-                                        "the analytic curve arc length %g is "
-                                        "within tolerance",
-                                        g.arcLen).c_str()));
-            }
-        }
-    }
-
-    return errors;
-}
-
-// -------------------------------------------------------------------------- //
 // BrepArrayEdgeCurveVertices                                                 //
 // -------------------------------------------------------------------------- //
-// Proposal rule 434: "the curve runs from the start vertex to the end vertex."
-// An edge's authored vertexIndices name the start and end vertices; the edge's
-// 3D curve, evaluated at its parametric endpoints, must reach those vertex
-// positions in that order. This catches edge:vertexIndices authored in
-// topological (loop-traversal) order rather than curve-parametric order -- a
-// reversed edge whose curve start actually lands on the "end" vertex. Distances
-// are measured against brep:intersectTol3d. Degenerate edges (start vertex ==
-// end vertex) are exempt: their two endpoints coincide, so orientation is
-// meaningless (and proposal-381 already reports them).
-//
-// This check has no allocated requirement number. It was written against
-// proposal rule 434 directly and carried a "BA.240" tag that the requirement
-// set never defined, so it reports as [proposal-434] until Jason allocates one.
-// For edges it overlaps BA.600/601/602 (line, circle, ellipse) and BA.730
-// (NURBS), which evaluate the curve at the authored edge:range rather than
-// reading the first and last control vertex, and are the stronger check. It
-// reaches ground they do not on wire edges, which none of them read.
+// BA.730: a NURBS edge evaluated at its authored edge:range endpoints must land
+// on the vertices its edge:vertexIndices name, within its Brep's
+// brep:intersectTol3d (_CheckNurbsEdgeEndpointVertices, below).
 UsdValidationErrorVector
 _BrepArrayEdgeCurveVertices(const UsdPrim &usdPrim,
                             const UsdValidationTimeRange & /*timeRange*/)
@@ -3452,91 +2756,8 @@ _BrepArrayEdgeCurveVertices(const UsdPrim &usdPrim,
         return {};
     }
     const UsdSolidBrepArray brep(usdPrim);
-
-    const VtArray<GfVec3d> vpos
-        = _ReadName<GfVec3d>(usdPrim, "brep:vertexPoint:point:position");
-    if (vpos.empty()) {
-        // Without vertex positions the endpoints cannot be checked; the
-        // vertexPoint data is required by BrepArraySchemaUsage when declared.
-        return {};
-    }
-
-    const double tol3d = _FirstAuthoredIntersectTol3d(brep);
-
     UsdValidationErrorVector errors;
-
-    struct Pass {
-        bool wire;
-        const char *label;
-        VtArray<GfVec2i> vtxIdx;
-    };
-    const std::vector<Pass> passes = {
-        { false, "edge", _Read<GfVec2i>(brep.GetEdgeVertexIndicesAttr()) },
-        { true, "wireEdge",
-          _Read<GfVec2i>(brep.GetWireEdgeVertexIndicesAttr()) },
-    };
-
-    for (const Pass &p : passes) {
-        const std::vector<_EdgeGeom> geom
-            = _ResolveEdgeGeom(usdPrim, brep, p.wire);
-        const size_t numE = std::min(geom.size(), p.vtxIdx.size());
-        for (size_t e = 0; e < numE; ++e) {
-            const _EdgeGeom &g = geom[e];
-            if (!g.hasGeom) {
-                continue;
-            }
-            const int vs = p.vtxIdx[e][0];
-            const int ve = p.vtxIdx[e][1];
-            if (vs < 0 || ve < 0 || vs >= static_cast<int>(vpos.size())
-                || ve >= static_cast<int>(vpos.size())) {
-                continue;   // out-of-range indices are reported by References.
-            }
-            if (vs == ve) {
-                continue;   // degenerate edge: exempt (see proposal-381).
-            }
-            const GfVec3d &pStart = vpos[vs];
-            const GfVec3d &pEnd = vpos[ve];
-            const double dForward = (g.start - pStart).GetLength()
-                + (g.end - pEnd).GetLength();
-            const double dReverse = (g.start - pEnd).GetLength()
-                + (g.end - pStart).GetLength();
-            // The endpoints match the authored order when the curve start is at
-            // the start vertex and the curve end is at the end vertex.
-            const bool matchesForward = (g.start - pStart).GetLength() <= tol3d
-                && (g.end - pEnd).GetLength() <= tol3d;
-            if (matchesForward) {
-                continue;
-            }
-            // Distinguish a mere reversal (curve runs end->start) from a genuine
-            // geometry/topology mismatch, for a clearer message.
-            const bool reversed = (g.start - pEnd).GetLength() <= tol3d
-                && (g.end - pStart).GetLength() <= tol3d;
-            _Err(&errors,
-                 UsdSolidValidationErrorNameTokens->edgeCurveVertexMismatch,
-                 usdPrim,
-                 TfStringPrintf(
-                     "[proposal-434] BrepArray <%s>: %s %zu curve endpoints do not "
-                     "match its vertexIndices (%d, %d) within "
-                     "brep:intersectTol3d = %g. %s The curve must run from the "
-                     "start vertex to the end vertex (proposal rule 434); "
-                     "vertexIndices appear to be authored in topological rather "
-                     "than curve-parametric order.",
-                     usdPrim.GetPath().GetText(), p.label, e, vs, ve, tol3d,
-                     reversed
-                         ? "The curve runs from the end vertex to the start "
-                           "vertex (endpoints are swapped)."
-                         : TfStringPrintf(
-                               "Forward endpoint error %g, reversed %g.",
-                               dForward, dReverse)
-                               .c_str()));
-        }
-    }
-
-    // BA.730: the same question asked of NURBS edges through a de Boor
-    // evaluation at the authored edge:range endpoints, instead of the control
-    // hull's first and last vertex.
     _CheckNurbsEdgeEndpointVertices(usdPrim, brep, &errors);
-
     return errors;
 }
 
@@ -4422,11 +3643,6 @@ _DeBoorEvaluate3d(unsigned int order, const std::vector<double> &knots,
 
 // A NURBS edge evaluated at its authored edge:range endpoints must land on the
 // vertices its edge:vertexIndices name, within the Brep's brep:intersectTol3d.
-// The proposal-434 check (above) asks the same question of every curve family,
-// but it takes a
-// NURBS curve's endpoints from the first and last control vertex, which is only
-// exact for a clamped curve evaluated over its full knot domain; this rule
-// evaluates the curve where edge:range says the edge starts and ends.
 //
 // The tolerance is resolved per Brep here rather than through
 // _FirstAuthoredIntersectTol3d: brep_validator.py attributes each edge to a
@@ -4595,8 +3811,8 @@ _BrepArrayContainment(const UsdPrim &usdPrim,
 
     // Containment slop for BA.310/365/465: a vertex or control point may sit a
     // tolerance outside a brep:extent box without being a real violation. The
-    // slop follows the intersectTol3d ladder used by proposal-434 -- the Brep's own
-    // authored 3D tolerance -- rather than the former hard-coded 1e-11, which
+    // slop follows the Brep's own authored 3D tolerance
+    // (_FirstAuthoredIntersectTol3d) rather than the former hard-coded 1e-11, which
     // was tighter than float32 round-off. Real CAD is frequently authored on a
     // float path (the prim's `extent` is float3, and brep:extent corners are
     // commonly float-derived), so a double vertex compared to a float-quantized
@@ -4826,7 +4042,7 @@ _BrepArraySpans(const UsdPrim &usdPrim,
     // span) are owned by BrepArrayRanges (BA.235/BA.275, InvalidEdgeRangeOrder /
     // InvalidWireEdgeRangeOrder) and are not re-flagged here.
     //
-    // Tolerance: mirror proposal-434 -- use the shared authored-tol resolution
+    // Tolerance: the shared authored-tol resolution
     // (_FirstAuthoredIntersectTol3d), floored at the analytic domain tolerance
     // so the bound is never tighter than the surface-domain checks above (a
     // benign floating-point overshoot must not become a false positive on an
@@ -4976,14 +4192,8 @@ _ReportUnresolvedEdgeTol(const UsdPrim &prim, const char *ba,
 //
 // Instances of one curve family are packed in edge order, so the family cursors
 // advance on every edge of that family even when the edge itself is skipped.
-//
-// The proposal-434 check (BrepArrayEdgeCurveVertices) tests the same relation,
-// but across every
-// edge and wireEdge including NURBS, against Brep 0's tolerance with a
-// reader-side fallback, and exempts an edge whose two vertices coincide. These
-// rules are narrower and stricter: analytic edges only, each against the
-// tolerance of the Brep that owns it, no fallback and no exemption. A file that
-// fails one usually fails the other.
+// Each edge is measured against the tolerance of the Brep that owns it, with no
+// fallback.
 void
 _CheckAnalyticEdgeEndpointVertices(const UsdPrim &prim,
                                    const UsdSolidBrepArray &brep,
@@ -6589,10 +5799,6 @@ TF_REGISTRY_FUNCTION(UsdValidationRegistry)
         UsdSolidValidatorNameTokens->brepArrayRanges, _BrepArrayRanges);
 
     registry.RegisterPluginValidator(
-        UsdSolidValidatorNameTokens->brepArrayFaceOuterLoop,
-        _BrepArrayFaceOuterLoop);
-
-    registry.RegisterPluginValidator(
         UsdSolidValidatorNameTokens->brepArrayAnalyticSurfaces,
         _BrepArrayAnalyticSurfaces);
 
@@ -6626,14 +5832,6 @@ TF_REGISTRY_FUNCTION(UsdValidationRegistry)
 
     registry.RegisterPluginValidator(
         UsdSolidValidatorNameTokens->brepArrayNurbs, _BrepArrayNurbs);
-
-    registry.RegisterPluginValidator(
-        UsdSolidValidatorNameTokens->brepArraySolidClosure,
-        _BrepArraySolidClosure);
-
-    registry.RegisterPluginValidator(
-        UsdSolidValidatorNameTokens->brepArrayDegenerateEdges,
-        _BrepArrayDegenerateEdges);
 
     registry.RegisterPluginValidator(
         UsdSolidValidatorNameTokens->brepArrayEdgeCurveVertices,
