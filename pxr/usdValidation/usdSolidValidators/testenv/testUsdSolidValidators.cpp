@@ -1536,6 +1536,112 @@ TestBrepArrayPositionTypesAndSeverities()
     }
 }
 
+static const std::string presenceContents = R"usda(#usda 1.0
+(
+    defaultPrim = "World"
+)
+def Xform "World"
+{
+    def BrepArray "NothingAuthored"
+    {
+    }
+
+    def BrepArray "DeclaredWithoutValues"
+    {
+        uniform double[] brep:intersectTol3d
+        uniform double3[] brep:extent
+        uniform uint[] brep:regionCount
+        uniform uint[] region:shellCount
+        uniform token[] region:type
+        uniform uint[] shell:faceuseCount
+        uniform uint[] shell:wireEdgeCount
+        uniform token[] shell:pointType
+        uniform uint[] faceuse:faceIndex
+        uniform token[] faceuse:orientationType
+        uniform uint[] face:loopCount
+        uniform token[] face:trimType
+        uniform token[] face:surfaceType
+        uniform double2[] face:range
+        uniform uint[] loop:edgeuseCount
+        uniform uint[] loop:vertexIndex
+        uniform token[] edge:curveType
+        uniform int2[] edge:vertexIndices
+        uniform double[] edge:range
+        uniform uint[] edgeuse:edgeIndex
+        uniform token[] edgeuse:orientationType
+        uniform uint[] edgeuse:nextRadialEUIndex
+        uniform token[] edgeuse:thisRadialEntryType
+        uniform token[] vertex:pointType
+    }
+
+    def BrepArray "PartialWireEdges"
+    {
+        uniform token[] wireEdge:curveType = []
+    }
+
+    def BrepArray "WireEdgesDeclaredNotAuthored"
+    {
+        uniform uint[] shell:wireEdgeCount = [1]
+    }
+}
+)usda";
+
+static void
+TestBrepArrayPresence()
+{
+    // brep_validator.py counts an attribute as present when it has any
+    // authored opinion, checks every topology family whether or not it has
+    // members, and reports each missing attribute on its own.
+    UsdValidationRegistry &registry = UsdValidationRegistry::GetInstance();
+    const UsdValidationValidator *authorship
+        = registry.GetOrLoadValidatorByName(
+            UsdSolidValidatorNameTokens->brepArrayAuthorship);
+    const UsdValidationValidator *structure
+        = registry.GetOrLoadValidatorByName(
+            UsdSolidValidatorNameTokens->brepArrayStructure);
+    TF_AXIOM(authorship && structure);
+
+    UsdStageRefPtr stage = _OpenLayer(presenceContents);
+
+    {
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/NothingAuthored"));
+        const UsdValidationErrorVector errors = authorship->Validate(prim);
+        TF_AXIOM(_CountRule(errors, "BA.070") == 2);
+        TF_AXIOM(_CountRule(errors, "BA.085") == 3);
+        TF_AXIOM(_CountRule(errors, "BA.105") == 2);
+        TF_AXIOM(_CountRule(errors, "BA.125") == 4);
+        TF_AXIOM(_CountRule(errors, "BA.170") == 2);
+        TF_AXIOM(_CountRule(errors, "BA.215") == 3);
+        TF_AXIOM(_CountRule(errors, "BA.185") == 4);
+        TF_AXIOM(_CountRule(errors, "BA.300") == 1);
+        // No wire edges declared and none authored: nothing to report.
+        TF_AXIOM(_CountRule(errors, "BA.255") == 0);
+        TF_AXIOM(_CountRule(structure->Validate(prim), "BA.005") == 3);
+    }
+    {
+        // A declaration without a value is an authored opinion.
+        const UsdPrim prim
+            = stage->GetPrimAtPath(SdfPath("/World/DeclaredWithoutValues"));
+        TF_AXIOM(!_HasError(authorship->Validate(prim),
+                            ".AttributeNotAuthored"));
+        TF_AXIOM(_CountRule(structure->Validate(prim), "BA.005") == 0);
+    }
+    {
+        // Some wire-edge attributes but not all: one finding naming both.
+        const UsdValidationErrorVector errors = authorship->Validate(
+            stage->GetPrimAtPath(SdfPath("/World/PartialWireEdges")));
+        TF_AXIOM(_CountRule(errors, "BA.255") == 1);
+    }
+    {
+        // Wire edges declared, none of the three authored: one per attribute.
+        const UsdValidationErrorVector errors = authorship->Validate(
+            stage->GetPrimAtPath(
+                SdfPath("/World/WireEdgesDeclaredNotAuthored")));
+        TF_AXIOM(_CountRule(errors, "BA.255") == 3);
+    }
+}
+
 int
 main()
 {
@@ -1565,6 +1671,7 @@ main()
     TestBrepArrayPointShells();
     TestBrepArrayUvWeightCardinality();
     TestBrepArrayPositionTypesAndSeverities();
+    TestBrepArrayPresence();
 
     std::cout << "OK\n";
     return EXIT_SUCCESS;

@@ -58,7 +58,7 @@
                         ]
                     },
                     "BrepArrayAuthorship": {
-                        "doc": "Validates that every per-family schema attribute (region, shell, faceuse, face, loop, edgeuse, edge, wireEdge, vertex) is authored on a UsdSolid BrepArray prim.",
+                        "doc": "Validates that every per-family topology attribute (region, shell, faceuse, face, loop, edgeuse, edge, vertex) is authored on a UsdSolid BrepArray prim, whether or not the family has members, counting any authored opinion (a declaration without a value included) as present and reporting each missing attribute. The wireEdge attributes are all-or-none, and required when shell:wireEdgeCount declares wire edges.",
                         "keywords": [
                             "UsdSolidBrep"
                         ],

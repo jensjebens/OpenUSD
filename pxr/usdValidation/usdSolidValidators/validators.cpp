@@ -296,26 +296,21 @@ _BrepArrayStructure(const UsdPrim &usdPrim,
 
     UsdValidationErrorVector errors;
 
-    // BA.005: required Brep schema attributes must be authored.
-    std::vector<std::string> missing;
-    if (!tolAttr.HasAuthoredValue()) {
-        missing.emplace_back("brep:intersectTol3d");
-    }
-    if (!extentAttr.HasAuthoredValue()) {
-        missing.emplace_back("brep:extent");
-    }
-    if (!regionCountAttr.HasAuthoredValue()) {
-        missing.emplace_back("brep:regionCount");
-    }
-    if (!missing.empty()) {
-        errors.emplace_back(
-            UsdSolidValidationErrorNameTokens->missingBrepAttributes,
-            UsdValidationErrorType::Error, _PrimSites(usdPrim),
-            TfStringPrintf(
-                "[BA.005] BrepArray <%s> is missing required brep "
-                "attribute(s): %s.",
-                usdPrim.GetPath().GetText(),
-                TfStringJoin(missing, ", ").c_str()));
+    // BA.005: the three Brep schema attributes must be authored, each reported
+    // on its own. Authored means any opinion (UsdAttribute::IsAuthored), as in
+    // brep_validator.py's _validate_authorship_only: a declaration with no
+    // value is present, and BA.000 then reads it as an empty array.
+    for (const UsdAttribute &attr : { tolAttr, extentAttr, regionCountAttr }) {
+        if (!attr.IsAuthored()) {
+            errors.emplace_back(
+                UsdSolidValidationErrorNameTokens->missingBrepAttributes,
+                UsdValidationErrorType::Error, _PrimSites(usdPrim),
+                TfStringPrintf(
+                    "[BA.005] BrepArray <%s>: %s is not authored in "
+                    "BrepArray.",
+                    usdPrim.GetPath().GetText(),
+                    attr.GetName().GetText()));
+        }
     }
 
     const VtArray<double> tol = _Read<double>(tolAttr);
@@ -2098,6 +2093,29 @@ _CheckEllipseInstance(const UsdPrim &prim, const char *inst, size_t count,
 // -------------------------------------------------------------------------- //
 // BrepArrayAuthorship                                                        //
 // -------------------------------------------------------------------------- //
+// Whether an attribute counts as present the way brep_validator.py's
+// authorship rules count it: UsdAttribute::IsAuthored, i.e. any authored
+// opinion at all. A declaration with no value ("uniform uint[] loop:vertexIndex"
+// and nothing after it) is present; HasAuthoredValue would call it missing.
+bool
+_IsAuthoredOpinion(const UsdPrim &prim, const char *name)
+{
+    const UsdAttribute a = prim.GetAttribute(TfToken(name));
+    return a && a.IsAuthored();
+}
+
+// BA.070 / BA.085 / BA.105 / BA.125 / BA.170 / BA.185 / BA.215 / BA.300 /
+// BA.255. Every topology family's attributes must be authored, on every
+// BrepArray, whether or not the counts above it say the family has members:
+// Python's _validate_authorship_only runs unconditionally and reports each
+// missing attribute on its own. A BrepArray with no faces still authors
+// face:loopCount, as an empty array.
+//
+// The wire-edge family is the exception, as in Python's
+// _validate_wireEdge_arrays: its three attributes are all-or-none (BA.255).
+// Authoring some but not all is one finding naming both lists; authoring none
+// is a finding per attribute only when shell:wireEdgeCount declares wire
+// edges.
 UsdValidationErrorVector
 _BrepArrayAuthorship(const UsdPrim &usdPrim,
                      const UsdValidationTimeRange & /*timeRange*/)
@@ -2107,97 +2125,77 @@ _BrepArrayAuthorship(const UsdPrim &usdPrim,
     }
     struct Item {
         const char *attr;
-        const char *family;
         const char *ba;
     };
+    // In the order brep_validator.py checks them (CheckPrim runs the face
+    // family before the loop family, and edges before edgeuses).
     static const std::vector<Item> items = {
-        { "region:shellCount", "region", "BA.070" },
-        { "region:type", "region", "BA.070" },
-        { "shell:faceuseCount", "shell", "BA.085" },
-        { "shell:wireEdgeCount", "shell", "BA.085" },
-        { "shell:pointType", "shell", "BA.085" },
-        { "faceuse:faceIndex", "faceuse", "BA.105" },
-        { "faceuse:orientationType", "faceuse", "BA.105" },
-        { "face:loopCount", "face", "BA.125" },
-        { "face:surfaceType", "face", "BA.125" },
-        { "face:trimType", "face", "BA.125" },
-        { "face:range", "face", "BA.125" },
-        { "loop:edgeuseCount", "loop", "BA.170" },
-        { "loop:vertexIndex", "loop", "BA.170" },
-        { "edgeuse:edgeIndex", "edgeuse", "BA.185" },
-        { "edgeuse:orientationType", "edgeuse", "BA.185" },
-        { "edgeuse:nextRadialEUIndex", "edgeuse", "BA.185" },
-        { "edgeuse:thisRadialEntryType", "edgeuse", "BA.185" },
-        { "edge:curveType", "edge", "BA.215" },
-        { "edge:vertexIndices", "edge", "BA.215" },
-        { "edge:range", "edge", "BA.215" },
-        { "wireEdge:curveType", "wireEdge", "BA.255" },
-        { "wireEdge:vertexIndices", "wireEdge", "BA.255" },
-        { "wireEdge:range", "wireEdge", "BA.255" },
-        { "vertex:pointType", "vertex", "BA.300" },
-    };
-    // Lenient authorship: require a family's attributes only when that family's
-    // entities actually exist (derived from the structural count arrays). A
-    // face-only solid need not author the wireEdge:* / point families, a wire
-    // body need not author the face families, and so on -- matching the schema's
-    // support for point/wire/sheet/solid bodies and USD's "author what you use"
-    // idiom. region and shell always apply to a BrepArray.
-    const UsdSolidBrepArray brep(usdPrim);
-    const auto sumU = [](const VtArray<unsigned int> &a) {
-        size_t s = 0;
-        for (unsigned int v : a) {
-            s += v;
-        }
-        return s;
-    };
-    const VtArray<unsigned int> shellFaceuseCount
-        = _Read<unsigned int>(brep.GetShellFaceuseCountAttr());
-    const VtArray<unsigned int> shellWireEdgeCount
-        = _Read<unsigned int>(brep.GetShellWireEdgeCountAttr());
-    const VtArray<unsigned int> loopEdgeuseCount
-        = _Read<unsigned int>(brep.GetLoopEdgeuseCountAttr());
-    const size_t numFaceuses = sumU(shellFaceuseCount);
-    const size_t numWireEdges = sumU(shellWireEdgeCount);
-    const size_t numEdgeuses = sumU(loopEdgeuseCount);
-    size_t numPointShells = 0;
-    {
-        const size_t ns
-            = std::min(shellFaceuseCount.size(), shellWireEdgeCount.size());
-        for (size_t s = 0; s < ns; ++s) {
-            if (shellFaceuseCount[s] == 0u && shellWireEdgeCount[s] == 0u) {
-                ++numPointShells;
-            }
-        }
-    }
-    const bool hasFaces = numFaceuses > 0;
-    const bool hasEdgeuses = numEdgeuses > 0;
-    const bool hasWire = numWireEdges > 0;
-    const bool hasVerts = hasEdgeuses || hasWire || numPointShells > 0;
-    const auto familyRequired = [&](const char *fam) -> bool {
-        const std::string f(fam);
-        if (f == "faceuse" || f == "face" || f == "loop") {
-            return hasFaces;
-        }
-        if (f == "edgeuse" || f == "edge") {
-            return hasEdgeuses;
-        }
-        if (f == "wireEdge") {
-            return hasWire;
-        }
-        if (f == "vertex") {
-            return hasVerts;
-        }
-        return true; // region, shell: always present on a BrepArray.
+        { "region:shellCount", "BA.070" },
+        { "region:type", "BA.070" },
+        { "shell:faceuseCount", "BA.085" },
+        { "shell:wireEdgeCount", "BA.085" },
+        { "shell:pointType", "BA.085" },
+        { "faceuse:faceIndex", "BA.105" },
+        { "faceuse:orientationType", "BA.105" },
+        { "face:loopCount", "BA.125" },
+        { "face:trimType", "BA.125" },
+        { "face:surfaceType", "BA.125" },
+        { "face:range", "BA.125" },
+        { "loop:edgeuseCount", "BA.170" },
+        { "loop:vertexIndex", "BA.170" },
+        { "edge:curveType", "BA.215" },
+        { "edge:vertexIndices", "BA.215" },
+        { "edge:range", "BA.215" },
+        { "edgeuse:edgeIndex", "BA.185" },
+        { "edgeuse:orientationType", "BA.185" },
+        { "edgeuse:nextRadialEUIndex", "BA.185" },
+        { "edgeuse:thisRadialEntryType", "BA.185" },
+        { "vertex:pointType", "BA.300" },
     };
     UsdValidationErrorVector errors;
     for (const Item &it : items) {
-        if (familyRequired(it.family) && !_IsAuthored(usdPrim, it.attr)) {
+        if (!_IsAuthoredOpinion(usdPrim, it.attr)) {
             _Err(&errors, UsdSolidValidationErrorNameTokens->attributeNotAuthored,
                  usdPrim,
-                 TfStringPrintf("[%s] BrepArray <%s>: %s attribute %s is not "
-                                "authored.",
-                                it.ba, usdPrim.GetPath().GetText(), it.family,
-                                it.attr));
+                 TfStringPrintf("[%s] BrepArray <%s>: %s is not authored in "
+                                "BrepArray.",
+                                it.ba, usdPrim.GetPath().GetText(), it.attr));
+        }
+    }
+
+    // BA.255: the wire-edge family, all or none.
+    static const char *const wireAttrs[3]
+        = { "wireEdge:curveType", "wireEdge:vertexIndices", "wireEdge:range" };
+    std::vector<std::string> authored, notAuthored;
+    for (const char *name : wireAttrs) {
+        (_IsAuthoredOpinion(usdPrim, name) ? authored : notAuthored)
+            .push_back(TfStringPrintf("'%s'", name));
+    }
+    if (!authored.empty() && !notAuthored.empty()) {
+        _Err(&errors, UsdSolidValidationErrorNameTokens->attributeNotAuthored,
+             usdPrim,
+             TfStringPrintf("[BA.255] BrepArray <%s>: Wire edge topology "
+                            "attributes must be authored together or all "
+                            "omitted. Authored: [%s]; not authored: [%s].",
+                            usdPrim.GetPath().GetText(),
+                            TfStringJoin(authored, ", ").c_str(),
+                            TfStringJoin(notAuthored, ", ").c_str()));
+    } else if (authored.empty()) {
+        const UsdSolidBrepArray brep(usdPrim);
+        const size_t totalWireEdges
+            = _Sum(_Read<unsigned int>(brep.GetShellWireEdgeCountAttr()));
+        if (totalWireEdges > 0) {
+            for (const char *name : wireAttrs) {
+                _Err(&errors,
+                     UsdSolidValidationErrorNameTokens->attributeNotAuthored,
+                     usdPrim,
+                     TfStringPrintf("[BA.255] BrepArray <%s>: %s is not "
+                                    "authored in BrepArray but "
+                                    "shell:wireEdgeCount requires %zu wire "
+                                    "edge(s).",
+                                    usdPrim.GetPath().GetText(), name,
+                                    totalWireEdges));
+            }
         }
     }
     return errors;
