@@ -821,13 +821,20 @@ def _full_period(lo, hi):
     return span >= _TWO_PI - PERIOD_TOL or span < _SEAM_EPS
 
 def _base_face_range(stok, sg, fverts):
-    """The flat (natural-period) face:range from step_to_usdsolid_fixed."""
+    """The flat (natural-period) face:range from step_to_usdsolid_fixed.
+
+    A plane's window is padded like a cylinder's height: the samples along a
+    boundary arc stop short of its extreme by up to its sagitta between
+    samples (0.055 mm on a 125 mm circle), and a window that stops there cuts
+    the face. SMLib then integrates such a face short by far more than the
+    sliver cut off: 18.5 mm2 on the gripper flange's top, whose sliver is
+    0.55 mm2."""
     if stok == "BrepSurfacePlaneAPI" and fverts:
         o, u = sg["origin"], sg["refDirection"]
         v = vcross(sg["axis"], sg["refDirection"])
         us = [vdot(vsub(p, o), u) for p in fverts]
         vs = [vdot(vsub(p, o), v) for p in fverts]
-        return (_bump(min(us), max(us)), _bump(min(vs), max(vs)))
+        return (_pad(*_bump(min(us), max(us)), None), _pad(*_bump(min(vs), max(vs)), None))
     if sg.get("nurb"):
         return ((sg["uKnots"][0], sg["uKnots"][-1]), (sg["vKnots"][0], sg["vKnots"][-1]))
     if stok in ("BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI") and fverts:

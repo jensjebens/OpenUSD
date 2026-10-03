@@ -11,7 +11,7 @@
 # evaluating surfaces. The STEP input is generated here so the test carries no
 # binary fixture.
 
-import os, shutil, sys, tempfile, unittest
+import math, os, shutil, sys, tempfile, unittest
 from pxr import Sdf, Usd, UsdSolid, UsdValidation
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -289,6 +289,25 @@ class TestStepToUsdSolid(unittest.TestCase):
             names, ["adapter_plate", "adapter_plate_1", "_2nd_jaw", "jaw_left"])
         self.assertTrue(all(Sdf.Path.IsValidIdentifier(n) for n in names))
         self.assertEqual(self._Brep().GetPrim().GetParent().GetName(), "Box")
+
+    def test_PlaneWindowHoldsItsCircle(self):
+        """A plane face's window (face:range) holds its whole boundary, not
+        only the points sampled along it. A circle of radius 125 sampled every
+        0.06 rad reaches only v = 124.945 at its samples; a window that stops
+        there cuts the face, and SMLib then measures a flange's volume 5e-4
+        short."""
+        r = 125.0
+        edge = {"ctok": "BrepCurve3dCircleAPI", "rng": (0.0, 2 * math.pi), "v": (0, 0),
+                "geom": {"center": (0.0, 0.0, 0.0), "axis": (0.0, 0.0, 1.0),
+                         "refDirection": (1.0, 0.0, 0.0), "radius": r}}
+        verts = [(r, 0.0, 0.0)]
+        samples = verts + stepToUsdSolid._edge_interior_samples(edge, verts)
+        plane = {"origin": (0.0, 0.0, 0.0), "axis": (0.0, 0.0, 1.0),
+                 "refDirection": (1.0, 0.0, 0.0)}
+        (ulo, uhi), (vlo, vhi) = stepToUsdSolid.face_range(
+            "BrepSurfacePlaneAPI", plane, samples)
+        self.assertLessEqual(max(ulo, vlo), -r)
+        self.assertGreaterEqual(min(uhi, vhi), r)
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not
