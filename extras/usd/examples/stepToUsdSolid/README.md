@@ -47,6 +47,13 @@ children. Geometry stays in the part's own coordinate system, and each placement
 authors its own copy of the part's `BrepArray`s. A file with no assembly structure
 maps each solid to a top-level prim in world coordinates.
 
+A solid's prim is named after the STEP `PRODUCT` of the part it belongs to, so an
+assembly's parts keep their names (`adapter_plate`, `jaw_left`). Names become
+valid USD identifiers (ASCII letters, digits and underscores, no leading digit),
+and a repeated name gets `_1`, `_2`. A part with several solids keeps the solids'
+own names, since one product name cannot tell them apart; a solid with no name
+is `body_<i>`.
+
 This is a **reference / sample importer**, in the spirit of the Gaussian-splat
 `py3dgsPlyToUsd.py` sample under `extras/imaging/examples/hdParticleField`: enough to
 exercise the schema end to end and to generate test assets, not a production STEP

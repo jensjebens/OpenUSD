@@ -12,7 +12,7 @@
 # binary fixture.
 
 import os, shutil, sys, tempfile, unittest
-from pxr import Usd, UsdSolid, UsdValidation
+from pxr import Sdf, Usd, UsdSolid, UsdValidation
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import stepToUsdSolid
@@ -33,11 +33,14 @@ _FACES = [([0,3,2,1], (0,0,-1), (1,0,0)),    # z = 0
           ([3,0,4,7], (-1,0,0), (0,-1,0))]   # x = 0
 
 
-def _MakeBoxStep(reversedFaces=()):
+def _MakeBoxStep(reversedFaces=(), products=None):
     """Return an AP214 STEP file describing the box above, as a string. Each
     face index in reversedFaces is written as a reversed face: its plane's
     normal points into the box and its ADVANCED_FACE same_sense is .F., which
-    describes the same box."""
+    describes the same box. With products, a list of names, the file holds one
+    box per name instead, side by side along x: each the only solid of a part
+    whose PRODUCT has that name, and with no name of its own, as an AP214
+    assembly's parts are written."""
     rows, state = [], {"n": 0}
 
     def emit(text):
@@ -59,8 +62,56 @@ def _MakeBoxStep(reversedFaces=()):
         m = sum(c * c for c in d) ** 0.5
         return tuple(c / m for c in d)
 
-    pt = {i: emit(point(v)) for i, v in enumerate(_V)}
-    vtx = {i: emit("VERTEX_POINT('',#%d)" % pt[i]) for i in range(len(_V))}
+    def box(dx, solidName):
+        return _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName)
+
+    wcs = emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
+               % (emit(point((0, 0, 0))), emit(direction((0, 0, 1))),
+                  emit(direction((1, 0, 0)))))
+    lengthUnit = emit("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))")
+    angleUnit = emit("(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))")
+    solidUnit = emit("(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())")
+    # The converter derives brep:intersectTol3d from this value.
+    tol = emit("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-7),#%d,"
+               "'distance_accuracy_value','')" % lengthUnit)
+    context = emit("(GEOMETRIC_REPRESENTATION_CONTEXT(3)"
+                   "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#%d))"
+                   "GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d,#%d,#%d))"
+                   "REPRESENTATION_CONTEXT('',''))"
+                   % (tol, lengthUnit, angleUnit, solidUnit))
+    if products is None:
+        emit("ADVANCED_BREP_SHAPE_REPRESENTATION('Box',(#%d,#%d),#%d)"
+             % (wcs, box(0.0, "Box"), context))
+    else:
+        app = emit("APPLICATION_CONTEXT('core data for automotive mechanical "
+                   "design processes')")
+        for k, name in enumerate(products):
+            shape = emit("ADVANCED_BREP_SHAPE_REPRESENTATION('',(#%d,#%d),#%d)"
+                         % (wcs, box(2 * _S * k, ""), context))
+            product = emit("PRODUCT('%s','%s','',(#%d))" % (
+                name, name, emit("PRODUCT_CONTEXT('',#%d,'mechanical')" % app)))
+            formation = emit("PRODUCT_DEFINITION_FORMATION('','',#%d)" % product)
+            definition = emit("PRODUCT_DEFINITION('design','',#%d,#%d)" % (
+                formation,
+                emit("PRODUCT_DEFINITION_CONTEXT('part definition',#%d,'design')" % app)))
+            emit("SHAPE_DEFINITION_REPRESENTATION(#%d,#%d)" % (
+                emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % definition), shape))
+
+    return ("ISO-10303-21;\n"
+            "HEADER;\n"
+            "FILE_DESCRIPTION(('UsdSolid stepToUsdSolid test box'),'2;1');\n"
+            "FILE_NAME('box.step','2026-01-01T00:00:00',(''),(''),'','','');\n"
+            "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }'));\n"
+            "ENDSEC;\nDATA;\n%s\nENDSEC;\nEND-ISO-10303-21;\n"
+            % "\n".join(rows))
+
+
+def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName):
+    """Emit the box above, moved dx along x, as a MANIFOLD_SOLID_BREP named
+    solidName; return its id."""
+    V = [(x + dx, y, z) for x, y, z in _V]
+    pt = {i: emit(point(v)) for i, v in enumerate(V)}
+    vtx = {i: emit("VERTEX_POINT('',#%d)" % pt[i]) for i in range(len(V))}
 
     # One EDGE_CURVE per unordered vertex pair, then an ORIENTED_EDGE per
     # (edge, sense). Sharing the curve is what makes the two faces either side
@@ -72,7 +123,7 @@ def _MakeBoxStep(reversedFaces=()):
             key = (min(i, j), max(i, j))
             if key not in curve:
                 a, b = key
-                vec = emit("VECTOR('',#%d,1.)" % emit(direction(unit(_V[a], _V[b]))))
+                vec = emit("VECTOR('',#%d,1.)" % emit(direction(unit(V[a], V[b]))))
                 line = emit("LINE('',#%d,#%d)" % (pt[a], vec))
                 curve[key] = emit("EDGE_CURVE('',#%d,#%d,#%d,.T.)"
                                   % (vtx[a], vtx[b], line))
@@ -102,32 +153,7 @@ def _MakeBoxStep(reversedFaces=()):
                           % (bound, plane, "F" if reverse else "T")))
 
     shell = emit("CLOSED_SHELL('',(%s))" % ",".join("#%d" % f for f in faces))
-    solid = emit("MANIFOLD_SOLID_BREP('Box',#%d)" % shell)
-
-    wcs = emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
-               % (emit(point((0, 0, 0))), emit(direction((0, 0, 1))),
-                  emit(direction((1, 0, 0)))))
-    lengthUnit = emit("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))")
-    angleUnit = emit("(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))")
-    solidUnit = emit("(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())")
-    # The converter derives brep:intersectTol3d from this value.
-    tol = emit("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-7),#%d,"
-               "'distance_accuracy_value','')" % lengthUnit)
-    context = emit("(GEOMETRIC_REPRESENTATION_CONTEXT(3)"
-                   "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#%d))"
-                   "GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d,#%d,#%d))"
-                   "REPRESENTATION_CONTEXT('',''))"
-                   % (tol, lengthUnit, angleUnit, solidUnit))
-    emit("ADVANCED_BREP_SHAPE_REPRESENTATION('Box',(#%d,#%d),#%d)"
-         % (wcs, solid, context))
-
-    return ("ISO-10303-21;\n"
-            "HEADER;\n"
-            "FILE_DESCRIPTION(('UsdSolid stepToUsdSolid test box'),'2;1');\n"
-            "FILE_NAME('box.step','2026-01-01T00:00:00',(''),(''),'','','');\n"
-            "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }'));\n"
-            "ENDSEC;\nDATA;\n%s\nENDSEC;\nEND-ISO-10303-21;\n"
-            % "\n".join(rows))
+    return emit("MANIFOLD_SOLID_BREP('%s',#%d)" % (solidName, shell))
 
 
 def _SolidValidators():
@@ -245,6 +271,24 @@ class TestStepToUsdSolid(unittest.TestCase):
         self.assertEqual(
             [], list(errors),
             "\n".join("%s: %s" % (e.GetName(), e.GetMessage()) for e in errors))
+
+    def test_BodiesNamedAfterProducts(self):
+        """A solid that is the only solid of a part is named after the part's
+        PRODUCT, made a valid prim name and unique. The box above, which no
+        part holds, keeps its own name."""
+        stepPath = os.path.join(self._dir, "parts.step")
+        with open(stepPath, "w") as f:
+            f.write(_MakeBoxStep(products=[
+                "adapter plate", "adapter plate", "2nd jaw", "jaw (left)"]))
+        usdPath = os.path.join(self._dir, "parts.usda")
+        stepToUsdSolid.convert(stepPath, usdPath, verbose=False)
+        stage = Usd.Stage.Open(usdPath)
+        names = [p.GetParent().GetName() for p in stage.Traverse()
+                 if p.IsA(UsdSolid.BrepArray)]
+        self.assertEqual(
+            names, ["adapter_plate", "adapter_plate_1", "_2nd_jaw", "jaw_left"])
+        self.assertTrue(all(Sdf.Path.IsValidIdentifier(n) for n in names))
+        self.assertEqual(self._Brep().GetPrim().GetParent().GetName(), "Box")
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not

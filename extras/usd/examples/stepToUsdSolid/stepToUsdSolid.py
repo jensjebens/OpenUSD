@@ -22,7 +22,9 @@ plane-angle unit and the tolerance are read from the file.
 
 Scope: an assembly comes through as one Xform per NEXT_ASSEMBLY_USAGE_OCCURRENCE
 placement, with the part's solids as BrepArray children; a file with no assembly
-structure maps each solid to a top-level prim in world coordinates. This is a
+structure maps each solid to a top-level prim in world coordinates. A solid
+that is its part's only solid is named after the part's STEP PRODUCT; every
+name is made a valid, unique USD name (product_names, _prim_name). This is a
 reference/sample importer, like the gsplat ply-to-usd sample -- not a production
 STEP importer.
 """
@@ -1913,17 +1915,52 @@ def _product_name(rd, ref):
         seen.add(r[1])
         t = rd.typ(r)
         if t == "PRODUCT":
-            nm = rd.args(r)[1] if len(rd.args(r)) > 1 else ""
-            if isinstance(nm, str) and nm.strip():
-                return _sanitize(nm)
+            a = rd.args(r)
+            for nm in (a[1] if len(a) > 1 else "", a[0] if a else ""):  # name, then id
+                if isinstance(nm, str) and _prim_name(nm):
+                    return _prim_name(nm)
         for x in rd.args(r):
             if isinstance(x, tuple) and x[0] == "ref":
                 stack.append(x)
     return ""
 
-def _sanitize(nm):
-    nm = "".join(c if (c.isalnum() or c == "_") else "_" for c in (nm or "")).strip("_")
-    return nm
+def _prim_name(nm):
+    """A USD prim name from a STEP name: ASCII letters, digits and underscores,
+    never a leading digit; '' when nothing is left."""
+    nm = re.sub(r"[^A-Za-z0-9_]+", "_", nm if isinstance(nm, str) else "").strip("_")
+    return "_" + nm if nm[:1].isdigit() else nm
+
+def _unique_name(nm, used):
+    """nm, or nm_1, nm_2, ... the first that is not in the set used; adds it."""
+    out, k = nm, 0
+    while out in used:
+        k += 1
+        out = f"{nm}_{k}"
+    used.add(out)
+    return out
+
+def product_names(rd):
+    """{solid_ref: name} for every solid that is the only solid of a part, named
+    after the part's PRODUCT. SHAPE_DEFINITION_REPRESENTATION ties a part's
+    PRODUCT_DEFINITION_SHAPE to the shape representation that holds its solids
+    (solids_by_representation). A part with several solids names none of them:
+    one product name cannot tell them apart, and they keep their own."""
+    srmap = solids_by_representation(rd)
+    out = {}
+    for sdr in rd.find("SHAPE_DEFINITION_REPRESENTATION"):
+        a = rd.args(("ref", sdr))
+        if len(a) < 2 or not (isinstance(a[0], tuple) and isinstance(a[1], tuple)):
+            continue
+        solids = srmap.get(a[1][1], [])
+        pds = rd.args(a[0])
+        definition = pds[2] if len(pds) > 2 else None
+        if len(solids) != 1 or not isinstance(definition, tuple) \
+                or rd.typ(definition) == "NEXT_ASSEMBLY_USAGE_OCCURRENCE":
+            continue
+        nm = _product_name(rd, definition)
+        if nm:
+            out.setdefault(solids[0], nm)
+    return out
 
 def solids_by_representation(rd):
     """{shape_representation_ref: [solid_ref, ...]}. A part's geometry hangs off
@@ -1954,9 +1991,10 @@ def solids_by_representation(rd):
             out[a] = out[b]
     return out
 
-def solid_name(rd, solid_ref, i):
-    nm = rd.args(("ref", solid_ref))[0]
-    nm = "".join(c if (c.isalnum() or c == "_") else "_" for c in (nm or "")).strip("_")
+def solid_name(rd, solid_ref, i, products=None):
+    """The prim name of solid i: its part's PRODUCT name when it is the part's
+    only solid (product_names), else the solid's own STEP name, else body_<i>."""
+    nm = (products or {}).get(solid_ref) or _prim_name(rd.args(("ref", solid_ref))[0])
     return nm if nm else f"body_{i}"
 
 def resolve_colors(rd, ents, solid_refs):
@@ -2068,14 +2106,9 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
     it; the placement is the only thing that moves. Each placement authors its
     own copy of the part's BrepArrays."""
     sidx = {sref: k for k, sref in enumerate(solids)}
-    used = {}
+    used = set()
     for sr, nm, M in placed:
-        name = _sanitize(nm) or f"part_{sr}"
-        if name in used:
-            used[name] += 1
-            name = f"{name}_{used[name]}"
-        else:
-            used[name] = 0
+        name = _unique_name(_prim_name(nm) or f"part_{sr}", used)
         xf = UsdGeom.Xform.Define(stage, f"/World/{name}")
         xf.AddTransformOp().Set(_usd_matrix(M))
         part_solids = srmap[sr]
@@ -2100,8 +2133,9 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
 def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
     """Convert one STEP file to a UsdSolid stage: one Xform + BrepArray prim per
     solid, or for an assembly one Xform per placement with its part's solids as
-    BrepArray children, under a /World Xform. Output format follows the extension
-    (.usda text or .usdc binary crate)."""
+    BrepArray children, under a /World Xform. A solid's Xform is named after its
+    part's PRODUCT when the part has that one solid (solid_name). Output format
+    follows the extension (.usda text or .usdc binary crate)."""
     with open(inp, errors="replace") as f:
         ents = parse_step(f.read())
     rd = Reader(ents)
@@ -2138,15 +2172,11 @@ def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
             print(f"wrote {out} ({len(placed)} placement(s))")
         return
 
-    used = {}
+    used = set()
+    products = product_names(rd)
     for i, s in enumerate(solids):
         b = extract_brep(rd, cfg, [s])
-        name = solid_name(rd, s, i)
-        if name in used:
-            used[name] += 1
-            name = f"{name}_{used[name]}"
-        else:
-            used[name] = 0
+        name = _unique_name(solid_name(rd, s, i, products), used)
         xf = UsdGeom.Xform.Define(stage, f"/World/{name}")
         body = colors.get(i)
         if body:
