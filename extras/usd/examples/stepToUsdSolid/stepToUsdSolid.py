@@ -1090,6 +1090,31 @@ def _resolve_shell_faces(rd, sh_ref):
         return rd.args(base)[1]
     return rd.args(sh_ref)[1]
 
+def _reverse_loops_of_reversed_faces(faces, loops, edgeuses):
+    """Reverse, in place, every loop of each face whose ADVANCED_FACE
+    same_sense is .F.: its edgeuses run in the opposite order, each flipped.
+
+    UsdSolid winds a face's loops as seen from its `same` faceuse, the side its
+    surface normal points to (edgeuse:orientationType). STEP winds them about
+    the face normal, which on a reversed face points the other way, so the
+    loops of a reversed face run backwards until they are turned here; the
+    face's outward faceuse becomes `opposite` to match (pack_regions). Returns
+    how many faces were reversed."""
+    li = eo = count = 0
+    for face in faces:
+        rev = not face["sense"]
+        for _ in range(face["loopCount"]):
+            n = loops[li]
+            if rev and n:
+                edgeuses[eo:eo + n] = [
+                    dict(eu, orient="opposite" if eu["orient"] == "same" else "same")
+                    for eu in reversed(edgeuses[eo:eo + n])]
+            li += 1
+            eo += n
+        count += rev
+    return count
+
+
 def _outer_loop_first(loop_specs, floop_edges, edgeuses, edges, verts, esamples):
     """Put a face's outer loop first when its STEP bounds don't name it.
 
@@ -1220,10 +1245,11 @@ def extract_brep(rd, cfg, solid_refs=None):
                 loop_specs = []
                 for b in bounds:
                     # Loop winding comes from the edge same_sense flags, the edgeuse
-                    # orientations, the face same_sense above, and the bound's own
-                    # orientation flag: a .F. bound traverses its EDGE_LOOP backwards
-                    # (the KUKA KR 640 authors 252), so its edgeuses run in reverse
-                    # order, each flipped.
+                    # orientations and the bound's own orientation flag: a .F. bound
+                    # traverses its EDGE_LOOP backwards (the KUKA KR 640 authors
+                    # 252), so its edgeuses run in reverse order, each flipped. A
+                    # reversed face's loops are turned once all loops are built
+                    # (_reverse_loops_of_reversed_faces).
                     ba = rd.args(b)
                     n, eis, vi = walk_loop(ba[1])
                     if n and len(ba) > 2 and ba[2] == ("enum", "F"):
@@ -1276,17 +1302,24 @@ def extract_brep(rd, cfg, solid_refs=None):
                                        faces, cfg)
     seams = _synthesize_rim_seams(verts, edges, edgeuses, loops, loop_vidx,
                                   faces, cfg)
+    # The seams were minted in STEP's winding, so reversed faces turn last.
+    reversed_faces = _reverse_loops_of_reversed_faces(faces, loops, edgeuses)
 
     by_edge = {}
     for i, eu in enumerate(edgeuses): by_edge.setdefault(eu["edge"], []).append(i)
     for ei, g in by_edge.items():
         for k, idx in enumerate(g):
             edgeuses[idx]["next"] = g[(k+1) % len(g)]
-            edgeuses[idx]["entry"] = "topEntry" if k % 2 == 0 else "bottomEntry"
+            # A use running along the edge curve enters the radial order from
+            # the top, one running against it from the bottom, as SMLib's own
+            # exporter writes them. Alternating by position instead fails on a
+            # reversed face, whose use of an edge can run the same way as its
+            # neighbour's.
+            edgeuses[idx]["entry"] = "topEntry" if edgeuses[idx]["orient"] == "same" else "bottomEntry"
 
     return dict(verts=verts, edges=edges, edgeuses=edgeuses, loops=loops, faces=faces,
                 brep_faces=brep_faces, by_edge=by_edge, loop_vidx=loop_vidx,
-                dropped_edges=dropped, seam_edges=seams)
+                dropped_edges=dropped, seam_edges=seams, reversed_faces=reversed_faces)
 
 # ================================================================ region packing
 def pack_regions(b):
@@ -1311,18 +1344,18 @@ def pack_regions(b):
         """One faceuse per face, on the side facing the region being built.
 
         faceuse:orientationType names a side of the surface, so the two
-        faceuses of a face are always one `same` and one `opposite`. The
-        ADVANCED_FACE same_sense flag does not belong here: face_range and the
-        loop winding already consume it when the loops are authored, and
-        folding it in a second time flips both faceuses of every reversed face
-        relative to its neighbours. SMLib then finds the two uses of a shared
-        edge in different shells -- 8,100 "Edgeuse/RadialEdgeuse pair not
-        attached to same Shell" failures on the KUKA export, and three bodies
-        it would not read at all."""
+        faceuses of a face are always one `same` and one `opposite`. A face
+        whose ADVANCED_FACE same_sense is .F. has its surface normal pointing
+        into the solid, so its outward side is `opposite`. Its loops are
+        reversed to match (_reverse_loops_of_reversed_faces): flipping the
+        sides alone leaves the two uses of a shared edge in different shells,
+        8,236 "Edgeuse/RadialEdgeuse pair not attached to same Shell" failures
+        on the KUKA export."""
         shellFaceuseCount.append(len(face_ids))
         for fi in face_ids:
             fuFaceIndex.append(fi)
-            fuOrient.append("same" if outward else "opposite")
+            side = outward == b["faces"][fi]["sense"]
+            fuOrient.append("same" if side else "opposite")
 
     for shells in b["brep_faces"]:
         outer, voids = shells[0], shells[1:]

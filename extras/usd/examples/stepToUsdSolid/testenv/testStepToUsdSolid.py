@@ -24,6 +24,7 @@ import stepToUsdSolid
 _S = 10.0
 _V = [(0,0,0), (_S,0,0), (_S,_S,0), (0,_S,0),
       (0,0,_S), (_S,0,_S), (_S,_S,_S), (0,_S,_S)]
+_TOP = 1   # index into _FACES of the z = S face
 _FACES = [([0,3,2,1], (0,0,-1), (1,0,0)),    # z = 0
           ([4,5,6,7], (0,0, 1), (1,0,0)),    # z = S
           ([0,1,5,4], (0,-1,0), (1,0,0)),    # y = 0
@@ -32,8 +33,11 @@ _FACES = [([0,3,2,1], (0,0,-1), (1,0,0)),    # z = 0
           ([3,0,4,7], (-1,0,0), (0,-1,0))]   # x = 0
 
 
-def _MakeBoxStep():
-    """Return an AP214 STEP file describing the box above, as a string."""
+def _MakeBoxStep(reversedFaces=()):
+    """Return an AP214 STEP file describing the box above, as a string. Each
+    face index in reversedFaces is written as a reversed face: its plane's
+    normal points into the box and its ADVANCED_FACE same_sense is .F., which
+    describes the same box."""
     rows, state = [], {"n": 0}
 
     def emit(text):
@@ -79,7 +83,10 @@ def _MakeBoxStep():
                     % (curve[key], "T" if sense else "F"))
 
     faces = []
-    for loop, normal, udir in _FACES:
+    for index, (loop, normal, udir) in enumerate(_FACES):
+        reverse = index in reversedFaces
+        if reverse:
+            normal = tuple(-c for c in normal)
         oes = []
         for k in range(len(loop)):
             i, j = loop[k], loop[(k + 1) % len(loop)]
@@ -91,7 +98,8 @@ def _MakeBoxStep():
                          % (pt[loop[0]], emit(direction(normal)),
                             emit(direction(udir))))
         plane = emit("PLANE('',#%d)" % placement)
-        faces.append(emit("ADVANCED_FACE('',(#%d),#%d,.T.)" % (bound, plane)))
+        faces.append(emit("ADVANCED_FACE('',(#%d),#%d,.%s.)"
+                          % (bound, plane, "F" if reverse else "T")))
 
     shell = emit("CLOSED_SHELL('',(%s))" % ",".join("#%d" % f for f in faces))
     solid = emit("MANIFOLD_SOLID_BREP('Box',#%d)" % shell)
@@ -141,11 +149,41 @@ class TestStepToUsdSolid(unittest.TestCase):
         stepToUsdSolid.convert(stepPath, cls._usdPath, verbose=False)
         cls._stage = Usd.Stage.Open(cls._usdPath)
         cls.assertTrue(cls._stage, "converter produced no stage")
+        # The same box with its top face (index 1) written reversed.
+        reversedStep = os.path.join(cls._dir, "box_reversed.step")
+        with open(reversedStep, "w") as f:
+            f.write(_MakeBoxStep(reversedFaces=(_TOP,)))
+        cls._reversedPath = os.path.join(cls._dir, "box_reversed.usda")
+        stepToUsdSolid.convert(reversedStep, cls._reversedPath, verbose=False)
+        cls._reversedStage = Usd.Stage.Open(cls._reversedPath)
 
-    def _Brep(self):
-        breps = [p for p in self._stage.Traverse() if p.IsA(UsdSolid.BrepArray)]
+    def _Brep(self, stage=None):
+        stage = stage or self._stage
+        breps = [p for p in stage.Traverse() if p.IsA(UsdSolid.BrepArray)]
         self.assertEqual(len(breps), 1, "expected exactly one BrepArray")
         return UsdSolid.BrepArray(breps[0])
+
+    def _Topology(self, stage):
+        """Per face: its outward faceuse side and its loops, each a list of
+        (edge index, edgeuse orientation); and every edgeuse's orientation
+        with its radial entry."""
+        prim = self._Brep(stage).GetPrim()
+        get = lambda name: list(prim.GetAttribute(name).Get())
+        loopCount, euCount = get("face:loopCount"), get("loop:edgeuseCount")
+        euEdge, euOrient = get("edgeuse:edgeIndex"), get("edgeuse:orientationType")
+        fuFace, fuOrient = get("faceuse:faceIndex"), get("faceuse:orientationType")
+        outward = {}
+        for k in range(get("shell:faceuseCount")[0]):   # the exterior shell
+            outward[fuFace[k]] = fuOrient[k]
+        faces, li, eo = [], 0, 0
+        for fi, count in enumerate(loopCount):
+            loops = []
+            for _ in range(count):
+                n = euCount[li]
+                loops.append([(euEdge[eo + j], euOrient[eo + j]) for j in range(n)])
+                li, eo = li + 1, eo + n
+            faces.append((outward[fi], loops))
+        return faces, list(zip(euOrient, get("edgeuse:thisRadialEntryType")))
 
     def test_TopologyCounts(self):
         """The six ADVANCED_FACEs and eight VERTEX_POINTs survive the
@@ -168,6 +206,42 @@ class TestStepToUsdSolid(unittest.TestCase):
         validators = _SolidValidators()
         self.assertTrue(validators, "usdSolidValidators are not registered")
         errors = UsdValidation.ValidationContext(validators).Validate(self._stage)
+        self.assertEqual(
+            [], list(errors),
+            "\n".join("%s: %s" % (e.GetName(), e.GetMessage()) for e in errors))
+
+    def test_ReversedFace(self):
+        """A face whose same_sense is .F. has its surface normal pointing into
+        the solid. Its outward faceuse is `opposite` and its loop is the plain
+        box's loop reversed, which is how SMLib's own exporter writes a
+        reversed face; the other faces are unchanged."""
+        plain, _ = self._Topology(self._stage)
+        rev, _ = self._Topology(self._reversedStage)
+        self.assertEqual(plain[_TOP][0], "same")
+        self.assertEqual(rev[_TOP][0], "opposite")
+        flip = {"same": "opposite", "opposite": "same"}
+        self.assertEqual(rev[_TOP][1],
+                         [[(e, flip[o]) for e, o in reversed(loop)]
+                          for loop in plain[_TOP][1]])
+        for fi in range(len(plain)):
+            if fi != _TOP:
+                self.assertEqual(rev[fi], plain[fi], "face %d changed" % fi)
+
+    def test_RadialEntryFollowsOrientation(self):
+        """Each edgeuse enters the radial order from the top when it runs
+        along its edge curve and from the bottom otherwise, in both boxes. On
+        the reversed face's edges both uses run the same way, so alternating
+        the entry by position would be wrong there."""
+        for stage in (self._stage, self._reversedStage):
+            _, uses = self._Topology(stage)
+            self.assertEqual(
+                [], [(o, e) for o, e in uses
+                     if e != ("topEntry" if o == "same" else "bottomEntry")])
+
+    def test_ReversedFaceValidators(self):
+        """The reversed box satisfies every usdSolid validator too."""
+        errors = UsdValidation.ValidationContext(
+            _SolidValidators()).Validate(self._reversedStage)
         self.assertEqual(
             [], list(errors),
             "\n".join("%s: %s" % (e.GetName(), e.GetMessage()) for e in errors))

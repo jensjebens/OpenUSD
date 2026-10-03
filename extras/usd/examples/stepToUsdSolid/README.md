@@ -71,7 +71,7 @@ these first, ahead of anything that reads geometry.
 ## Where STEP and UsdSolid disagree
 
 STEP and UsdSolid do not accept the same B-reps, so a translator has to convert
-between the two rule sets rather than copy topology across. Three differences show
+between the two rule sets rather than copy topology across. Four differences show
 up on almost any production CAD file.
 
 **Sub-tolerance edges are removed.** UsdSolid rule 7.ii forbids an edge whose
@@ -92,6 +92,15 @@ optional: the KUKA KR 640 writes each of its 2,729 multi-loop faces with
 outer, the importer puts first the loop whose boundary spans the largest box. A
 bound whose orientation flag is `.F.` runs its edge loop backwards, as STEP
 defines it; the KUKA has 252.
+
+**A reversed face is turned around.** STEP winds a face's loops about the face
+normal, and an `ADVANCED_FACE` whose `same_sense` is `.F.` has a face normal
+opposite its surface's. UsdSolid winds loops as seen from the surface-normal side
+and names the outward side with the faceuse. On a reversed face the importer
+reverses the loops and makes the outward faceuse `opposite`; each edgeuse enters
+the radial order from the top when it runs along its edge curve and from the
+bottom otherwise, as SMLib's own exporter writes them. The KUKA KR 640 has 4,374
+reversed faces.
 
 **Seam edges are synthesised for cylinders and cones.** UsdSolid rule 5.iv
 requires a face to have a single outer loop carrying a seam edge; STEP does not,
