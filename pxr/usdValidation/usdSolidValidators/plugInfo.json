@@ -1,0 +1,171 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Validators": {
+                    "BrepArrayStructure": {
+                        "doc": "Validates Brep-level attributes of a UsdSolid BrepArray: the three Brep attributes are authored; brep:intersectTol3d and brep:regionCount agree in size and brep:extent holds two corners per Brep; no brep:intersectTol3d entry is below 1e-11; each brep:extent box is min<=max ordered; the vertexPoint and shellPoint position arrays hold one point per BrepPointAPI vertex and per point shell; and every Brep has a region and every region a shell, with a warning for a shell that has no faceuses, wire edges or point.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayTopology": {
+                        "doc": "Validates that the flat-packed Radial Edge topology arrays of a UsdSolid BrepArray have consistent sizes: each level (region, shell, faceuse, face, loop, edgeuse, edge, wireEdge, vertex) must have array sizes derived from the counts at the level above it, and edge:range and wireEdge:range hold two entries per edge. Also checks that edgeuse:nextRadialEUIndex partitions each Brep's edgeuses into radial chains whose members all name one edge through edgeuse:edgeIndex, and that every edgeuse naming a given edge falls in a single chain.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayTokenValues": {
+                        "doc": "Validates that token-valued attributes of a UsdSolid BrepArray (region:type, shell:pointType, faceuse:orientationType, face:surfaceType, face:trimType, edgeuse:orientationType, edgeuse:thisRadialEntryType, edge:curveType, wireEdge:curveType, vertex:pointType) only contain values from their allowed token sets.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayRanges": {
+                        "doc": "Validates parameter ranges of a UsdSolid BrepArray: face:loopCount is at least one, face:range U and V intervals are non-degenerate, and edge:range / wireEdge:range pairs are ordered (min<=max). Also checks that angular parameter maxima stay in the primary period (0, 2*pi] for circle and ellipse edges and for the U direction of cylinder, cone, sphere and torus faces; that cylinder and cone faces have V-min <= V-max; and that no floating-point array holds a NaN or an Inf.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayAnalyticSurfaces": {
+                        "doc": "Validates analytic surface parameters of a UsdSolid BrepArray (plane, cylinder, cone, sphere, torus): the origin/center, axis, refDirection, radius and semiAngle arrays match the number of faces of that surface type, radii are positive, axis and refDirection are unit-length and mutually orthogonal (within 1e-4), and cone semiAngle lies in (0, pi/2), each reporting the first offending entry.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayAuthorship": {
+                        "doc": "Validates that every per-family topology attribute (region, shell, faceuse, face, loop, edgeuse, edge, vertex) is authored on a UsdSolid BrepArray prim, whether or not the family has members, counting any authored opinion (a declaration without a value included) as present and reporting each missing attribute. The wireEdge attributes are all-or-none, and required when shell:wireEdgeCount declares wire edges.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayDataTypes": {
+                        "doc": "Validates that authored attributes of a UsdSolid BrepArray use the correct USD value types: the flat-packed topology arrays and the BrepPointAPI vertexPoint/shellPoint positions (point3d[]). NURBS families are validated by BrepArrayNurbs, not here.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArraySchemaUsage": {
+                        "doc": "Validates that the applied API schemas of a UsdSolid BrepArray agree with its topology: every curve, surface or point type used in edge:curveType, wireEdge:curveType, face:surfaceType, vertex:pointType or a point shell, and any authored UV pcurve data, requires its geometry API (BA.583); and for the analytic surfaces and vertex points, a used type requires its data and an applied API requires a use.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayReferences": {
+                        "doc": "Validates that topological cross-reference indices of a UsdSolid BrepArray (faceuse->face, loop->vertex, edgeuse->edge, edgeuse->edgeuse radial, edge->vertex, wireEdge->vertex) fall within the owning Brep's partition.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayCompleteness": {
+                        "doc": "Validates Brep graph integrity of a UsdSolid BrepArray: every face is referenced by exactly two faceuses, the radial edgeuse chains close into cycles, and no edge is orphaned (every edge is referenced by at least one edgeuse). BA.720, BA.721 and BA.722 additionally require every edge:curveType, wireEdge:curveType and face:surfaceType entry to name a recognized curve or surface category, so the per-category counts sum to the total edge, wireEdge and face counts.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayContainment": {
+                        "doc": "Validates spatial containment on a UsdSolid BrepArray: each brep:extent box lies within the prim's extent, and each Brep's vertex positions and NURBS control points lie within that Brep's brep:extent box (within 1e-11). Also checks that an analytic surface's origin (a sphere's center) lies within the brep:extent union expanded by twice its diagonal, unless the face that surface carries does, and that each shell point lies within its own Brep's brep:extent box.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArraySpans": {
+                        "doc": "Validates parametric-domain limits on analytic geometry of a UsdSolid BrepArray: periodic surface/curve domains (sphere/cylinder/cone/torus faces, circle/ellipse edge and wireEdge parameter ranges) span at most one period (2*pi), and sphere latitude lies within [-pi/2, pi/2]. Each span is allowed 1e-6 past one period.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayAnalyticCurves": {
+                        "doc": "Validates analytic curve parameters of a UsdSolid BrepArray (circle, line, ellipse for edge and wireEdge instances): parameter arrays match the number of edges of that curve type, radii are positive, axis/refDirection/direction are unit-length and axis and refDirection orthogonal (within 1e-4), each reporting the first offending entry. For edges it also evaluates each analytic curve at its authored edge:range endpoints and requires the results to reach the edge's start and end vertex positions, and requires a circle edge's vertices to lie at the authored radius from its center, both within the owning Brep's brep:intersectTol3d.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayNurbs": {
+                        "doc": "Validates the NURBS strata of a UsdSolid BrepArray (edge3d, curveUv, surface, wireEdge3d): array sizes against the topology, orders positive and >= 2, order <= vertexCount, control-vertex, weight and knot vector sizes, positive weights, non-decreasing knot vectors, attribute value types, and schema/data usage consistency. BA.650-BA.658 also require every wireEdge3dNurb control vertex to lie within a brep:extent box.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayEdgeCurveVertices": {
+                        "doc": "Validates that each NURBS edge of a UsdSolid BrepArray, evaluated with de Boor's algorithm at its authored edge:range endpoints, lands on the vertices its edge:vertexIndices name, within its own Brep's brep:intersectTol3d.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayUvTrim": {
+                        "doc": "Validates the UV trim curves and periodic face domains of a UsdSolid BrepArray. BA.750: every brep:curveUv:nurb control vertex of a face lies within that face's face:range widened by half a domain span. BA.761: a full-period analytic periodic face (cylinder, cone, sphere in U; torus in U or V) repeats an edgeuse:edgeIndex within the face, the topological signal that one 3D seam edge carries two edgeuses; a heuristic, as the repeat does not prove the repeated edge is the geometric seam. BA.762: a full-period angular face:range is authored as [0, 2*pi] and not an equivalent shifted interval. BA.763: the pcurves of each loop meet head to tail in parameter space, with each pcurve's endpoints taken from a de Boor evaluation at its own parametric ends. BA.764: no pcurve collapses to a point in parameter space. BA.765: a partial-period angular face:range stays within [0, 2*pi].",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "BrepArrayGeomSubsets": {
+                        "doc": "Validates the UsdGeomSubset children of a UsdSolid BrepArray: subset indices address an existing Brep (elementType 'brep') or face (elementType 'face'), no two subsets of one elementType claim the same index, and every material:binding target names a prim on the stage.",
+                        "keywords": [
+                            "UsdSolidBrep"
+                        ],
+                        "schemaTypes": [
+                            "UsdSolidBrepArray"
+                        ]
+                    },
+                    "keywords": [
+                        "UsdSolidValidators"
+                    ]
+                }
+            },
+            "LibraryPath": "@PLUG_INFO_LIBRARY_PATH@",
+            "Name": "usdSolidValidators",
+            "ResourcePath": "@PLUG_INFO_RESOURCE_PATH@",
+            "Root": "@PLUG_INFO_ROOT@",
+            "Type": "library"
+        }
+    ]
+}
