@@ -43,9 +43,15 @@ from the file (from its `UNCERTAINTY_MEASURE`, with a bounding-box fallback).
 
 An assembly comes through as one `Xform` per placement, with the transform composed
 down the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` chains and the part's solids as `BrepArray`
-children. Geometry stays in the part's own coordinate system, and each placement
-authors its own copy of the part's `BrepArray`s. A file with no assembly structure
-maps each solid to a top-level prim in world coordinates.
+children. A placement maps the child's `ITEM_DEFINED_TRANSFORMATION` item onto the
+parent's. Writers disagree on which of a `REPRESENTATION_RELATIONSHIP`'s two
+representations is the parent's: Open CASCADE names the child's first, SolidWorks
+the parent's. The importer takes the parent from the occurrence itself, through the
+`SHAPE_DEFINITION_REPRESENTATION` that names each product definition's
+representation. Geometry stays in the part's own coordinate system, each placement
+authors its own copy of the part's `BrepArray`s, and an identity placement authors
+no transform. A solid that no placement reaches, like every solid of a file with no
+assembly structure, becomes a top-level prim in its own coordinates.
 
 A solid's prim is named after the STEP `PRODUCT` of the part it belongs to, so an
 assembly's parts keep their names (`adapter_plate`, `jaw_left`). Names become
@@ -67,11 +73,11 @@ the B-rep path:
 - **Color** (`resolve_colors`, ~80 lines) reads `STYLED_ITEM` chains to author
   `displayColor`. Color is not part of a boundary representation; it is here so
   converted assets are legible in a viewer.
-- **Assembly placement** (`assembly_placements` and its helpers, ~190 lines) composes
+- **Assembly placement** (`assembly_placements` and its helpers, ~250 lines) composes
   `NEXT_ASSEMBLY_USAGE_OCCURRENCE` transforms into `Xform` prims. Assembly structure is
   a USD composition concern, not a `UsdSolid` one.
 
-Together they are about 270 lines. They are kept because they make the output usable
+Together they are about 330 lines. They are kept because they make the output usable
 on production CAD assemblies. A reviewer who wants this sample smaller should take
 these first, ahead of anything that reads geometry.
 

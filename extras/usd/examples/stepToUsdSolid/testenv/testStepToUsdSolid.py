@@ -12,7 +12,7 @@
 # binary fixture.
 
 import math, os, shutil, sys, tempfile, unittest
-from pxr import Sdf, Usd, UsdSolid, UsdValidation
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdSolid, UsdValidation
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import stepToUsdSolid
@@ -32,15 +32,30 @@ _FACES = [([0,3,2,1], (0,0,-1), (1,0,0)),    # z = 0
           ([2,3,7,6], (0,1, 0), (-1,0,0)),   # y = S
           ([3,0,4,7], (-1,0,0), (0,-1,0))]   # x = 0
 
+# An assembly of the box: rig holds arm and one box, arm holds two boxes. Each
+# row is (parent, child, parent item, child item), the two placements an
+# ITEM_DEFINED_TRANSFORMATION maps, each (origin, axis, ref_direction) in its
+# own product's coordinates. Arm is turned a quarter turn about z and moved;
+# the direct box's own item is turned and moved too, so it has to be inverted.
+_IDENTITY_ITEM = ((0, 0, 0), (0, 0, 1), (1, 0, 0))
+_ASSEMBLY = [("rig", "arm", ((100, 0, 0), (0, 0, 1), (0, 1, 0)), _IDENTITY_ITEM),
+             ("arm", "box", ((0, 20, 0), (0, 0, 1), (1, 0, 0)), _IDENTITY_ITEM),
+             ("arm", "box", ((0, 0, 30), (0, -1, 0), (1, 0, 0)), _IDENTITY_ITEM),
+             ("rig", "box", ((-50, 0, 0), (0, 0, 1), (1, 0, 0)),
+              ((5, 5, 0), (0, 0, 1), (0, 1, 0)))]
 
-def _MakeBoxStep(reversedFaces=(), products=None):
+
+def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None):
     """Return an AP214 STEP file describing the box above, as a string. Each
     face index in reversedFaces is written as a reversed face: its plane's
     normal points into the box and its ADVANCED_FACE same_sense is .F., which
     describes the same box. With products, a list of names, the file holds one
     box per name instead, side by side along x: each the only solid of a part
     whose PRODUCT has that name, and with no name of its own, as an AP214
-    assembly's parts are written."""
+    assembly's parts are written. With rep1IsParent, True or False, the file
+    is the _ASSEMBLY above instead, its REPRESENTATION_RELATIONSHIPs naming the
+    parent's representation first (as SolidWorks writes them) or the child's
+    (as Open CASCADE does)."""
     rows, state = [], {"n": 0}
 
     def emit(text):
@@ -79,7 +94,9 @@ def _MakeBoxStep(reversedFaces=(), products=None):
                    "GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d,#%d,#%d))"
                    "REPRESENTATION_CONTEXT('',''))"
                    % (tol, lengthUnit, angleUnit, solidUnit))
-    if products is None:
+    if rep1IsParent is not None:
+        _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent)
+    elif products is None:
         emit("ADVANCED_BREP_SHAPE_REPRESENTATION('Box',(#%d,#%d),#%d)"
              % (wcs, box(0.0, "Box"), context))
     else:
@@ -154,6 +171,52 @@ def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName):
 
     shell = emit("CLOSED_SHELL('',(%s))" % ",".join("#%d" % f for f in faces))
     return emit("MANIFOLD_SOLID_BREP('%s',#%d)" % (solidName, shell))
+
+
+def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent):
+    """Emit _ASSEMBLY: a product, definition and shape representation per
+    product, then one NEXT_ASSEMBLY_USAGE_OCCURRENCE with its
+    CONTEXT_DEPENDENT_SHAPE_REPRESENTATION per row."""
+    app = emit("APPLICATION_CONTEXT('core data for automotive mechanical "
+               "design processes')")
+
+    def place(item):
+        o, z, x = item
+        return emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
+                    % (emit(point(o)), emit(direction(z)), emit(direction(x))))
+
+    items = [(place(p), place(c)) for _, _, p, c in _ASSEMBLY]
+    own = {"rig": [wcs], "arm": [wcs], "box": [wcs]}
+    for (parent, child, _, _), (pi, ci) in zip(_ASSEMBLY, items):
+        own[parent].append(pi)
+        own[child].append(ci)
+    listed = lambda ids: ",".join("#%d" % i for i in ids)
+    rep = {n: emit("SHAPE_REPRESENTATION('%s',(%s),#%d)" % (n, listed(own[n]), context))
+           for n in ("rig", "arm")}
+    rep["box"] = emit("ADVANCED_BREP_SHAPE_REPRESENTATION('box',(%s),#%d)"
+                      % (listed(own["box"] + [box(0.0, "")]), context))
+    pd = {}
+    for n in ("rig", "arm", "box"):
+        product = emit("PRODUCT('%s','%s','',(#%d))" % (
+            n, n, emit("PRODUCT_CONTEXT('',#%d,'mechanical')" % app)))
+        pd[n] = emit("PRODUCT_DEFINITION('design','',#%d,#%d)" % (
+            emit("PRODUCT_DEFINITION_FORMATION('','',#%d)" % product),
+            emit("PRODUCT_DEFINITION_CONTEXT('part definition',#%d,'design')" % app)))
+        emit("SHAPE_DEFINITION_REPRESENTATION(#%d,#%d)" % (
+            emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % pd[n]), rep[n]))
+    for k, ((parent, child, _, _), (pi, ci)) in enumerate(zip(_ASSEMBLY, items)):
+        nauo = emit("NEXT_ASSEMBLY_USAGE_OCCURRENCE('%d','','',#%d,#%d,$)"
+                    % (k + 1, pd[parent], pd[child]))
+        # transform_item_1 lies in rep_1, transform_item_2 in rep_2.
+        reps, its = (rep[parent], rep[child]), (pi, ci)
+        if not rep1IsParent:
+            reps, its = reps[::-1], its[::-1]
+        idt = emit("ITEM_DEFINED_TRANSFORMATION('','',#%d,#%d)" % its)
+        rr = emit("(REPRESENTATION_RELATIONSHIP('','',#%d,#%d)"
+                  "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#%d)"
+                  "SHAPE_REPRESENTATION_RELATIONSHIP())" % (reps + (idt,)))
+        emit("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#%d,#%d)"
+             % (rr, emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % nauo)))
 
 
 def _SolidValidators():
@@ -289,6 +352,52 @@ class TestStepToUsdSolid(unittest.TestCase):
             names, ["adapter_plate", "adapter_plate_1", "_2nd_jaw", "jaw_left"])
         self.assertTrue(all(Sdf.Path.IsValidIdentifier(n) for n in names))
         self.assertEqual(self._Brep().GetPrim().GetParent().GetName(), "Box")
+
+    def test_AssemblyPlacements(self):
+        """Each placement of an assembly's part lands where its chain of
+        NEXT_ASSEMBLY_USAGE_OCCURRENCEs puts it, whichever representation the
+        writer names first: the child's item is mapped onto the parent's, and
+        a subassembly's placement carries down to its parts. A part placed
+        three times authors three bodies."""
+        def axes(item):
+            o, z, x = (Gf.Vec3d(*v) for v in item)
+            z = z.GetNormalized()
+            x = (x - z * Gf.Dot(x, z)).GetNormalized()
+            return o, x, Gf.Cross(z, x), z
+
+        def place(row, p):
+            # into the child item's frame, then out of the parent item's
+            _, _, parentItem, childItem = row
+            o, x, y, z = axes(childItem)
+            q = Gf.Vec3d(*p) - o
+            local = Gf.Vec3d(Gf.Dot(x, q), Gf.Dot(y, q), Gf.Dot(z, q))
+            o, x, y, z = axes(parentItem)
+            return o + x * local[0] + y * local[1] + z * local[2]
+
+        arm, inArm1, inArm2, direct = _ASSEMBLY
+        expected = {"arm___box": [place(arm, place(inArm1, v)) for v in _V],
+                    "arm___box_1": [place(arm, place(inArm2, v)) for v in _V],
+                    "box": [place(direct, v) for v in _V]}
+        for rep1IsParent in (True, False):
+            stepPath = os.path.join(self._dir, "assembly_%d.step" % rep1IsParent)
+            with open(stepPath, "w") as f:
+                f.write(_MakeBoxStep(rep1IsParent=rep1IsParent))
+            usdPath = os.path.join(self._dir, "assembly_%d.usda" % rep1IsParent)
+            stepToUsdSolid.convert(stepPath, usdPath, verbose=False)
+            stage = Usd.Stage.Open(usdPath)
+            cache = UsdGeom.XformCache()
+            got = {}
+            for prim in stage.Traverse():
+                if prim.IsA(UsdSolid.BrepArray):
+                    M = cache.GetLocalToWorldTransform(prim)
+                    got[prim.GetParent().GetName()] = [
+                        M.Transform(p) for p in
+                        prim.GetAttribute("brep:vertexPoint:point:position").Get()]
+            self.assertEqual(sorted(got), sorted(expected), "rep1IsParent=%s" % rep1IsParent)
+            for name, points in expected.items():
+                self.assertEqual(len(got[name]), len(points))
+                worst = max(min((g - p).GetLength() for g in got[name]) for p in points)
+                self.assertLess(worst, 1e-9, "%s, rep1IsParent=%s" % (name, rep1IsParent))
 
     def test_PlaneWindowHoldsItsCircle(self):
         """A plane face's window (face:range) holds its whole boundary, not

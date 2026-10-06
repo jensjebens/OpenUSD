@@ -1819,24 +1819,30 @@ def _mat_mul(A, B):
 
 _IDENTITY = ((1.0,0.0,0.0), (0.0,1.0,0.0), (0.0,0.0,1.0), (0.0,0.0,0.0))
 
-def _idt_matrix(rd, idt_ref):
-    """ITEM_DEFINED_TRANSFORMATION maps its first placement onto its second, so
-    the placement is `to * from^-1`."""
-    a = rd.args(idt_ref)
+def _frame_inverse(F):
+    """The inverse of a rigid (x, y, z, origin) frame: rotation R transposed,
+    origin -R^T o."""
+    x, y, z, o = F
+    return (tuple((x[k], y[k], z[k]) for k in range(3))
+            + ((-vdot(x, o), -vdot(y, o), -vdot(z, o)),))
+
+def _is_identity(M, tol=1e-12):
+    return all(abs(M[i][k] - _IDENTITY[i][k]) <= tol for i in range(4) for k in range(3))
+
+def _idt_matrix(rd, idt_ref, rep1_is_parent):
+    """The placement an ITEM_DEFINED_TRANSFORMATION gives a child: its item in
+    the child's representation mapped onto its item in the parent's,
+    P(parent item) * P(child item)^-1. transform_item_1 lies in rep_1 and
+    transform_item_2 in rep_2 (ISO 10303-43), so rep1_is_parent says which item
+    is the parent's. None when the operator is not two AXIS2_PLACEMENT_3Ds."""
+    a = rd.args(idt_ref) if rd.typ(idt_ref) == "ITEM_DEFINED_TRANSFORMATION" else []
     frames = [x for x in a if isinstance(x, tuple) and x[0] == "ref"
               and rd.typ(x) == "AXIS2_PLACEMENT_3D"]
     if len(frames) < 2:
-        return _IDENTITY
-    F = _a2p_matrix(rd, frames[0])
-    T = _a2p_matrix(rd, frames[1])
-    fx, fy, fz, fo = F
-    inv_rot = ((fx[0], fx[1], fx[2]), (fy[0], fy[1], fy[2]), (fz[0], fz[1], fz[2]))
-    inv_o = tuple(-(inv_rot[0][k]*fo[0] + inv_rot[1][k]*fo[1] + inv_rot[2][k]*fo[2])
-                  for k in range(3))
-    Finv = (tuple(inv_rot[k][0] for k in range(3)),
-            tuple(inv_rot[k][1] for k in range(3)),
-            tuple(inv_rot[k][2] for k in range(3)), inv_o)
-    return _mat_mul(T, Finv)
+        return None
+    item1, item2 = _a2p_matrix(rd, frames[0]), _a2p_matrix(rd, frames[1])
+    parent, child = (item1, item2) if rep1_is_parent else (item2, item1)
+    return _mat_mul(parent, _frame_inverse(child))
 
 def _complex_parts(rd, ref):
     """The sub-entities of a complex instance, as {TYPE: args}."""
@@ -1845,27 +1851,70 @@ def _complex_parts(rd, ref):
         return {}
     return {name: args for name, args in t[1]}
 
+def _representations_by_definition(rd):
+    """{product_definition_id: [representation_id, ...]}: the shape each
+    SHAPE_DEFINITION_REPRESENTATION gives a part or assembly through its
+    PRODUCT_DEFINITION_SHAPE."""
+    out = {}
+    for sdr in rd.find("SHAPE_DEFINITION_REPRESENTATION"):
+        a = rd.args(("ref", sdr))
+        if len(a) < 2 or not (isinstance(a[0], tuple) and isinstance(a[1], tuple)):
+            continue
+        pds = rd.args(a[0])
+        d = pds[2] if len(pds) > 2 else None
+        if isinstance(d, tuple) and rd.typ(d) in (
+                "PRODUCT_DEFINITION", "PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS"):
+            out.setdefault(d[1], []).append(a[1][1])
+    return out
+
+def _same_space(rd):
+    """A function from a representation id to a class id, equal for
+    representations a plain SHAPE_REPRESENTATION_RELATIONSHIP joins: a part's
+    SHAPE_REPRESENTATION and the ADVANCED_BREP_SHAPE_REPRESENTATION that holds
+    its solids share one coordinate system."""
+    parent = {}
+    def find(r):
+        while parent.get(r, r) != r:
+            r = parent[r]
+        return r
+    for rel in rd.find("SHAPE_REPRESENTATION_RELATIONSHIP"):
+        refs = [x[1] for x in rd.args(("ref", rel)) if isinstance(x, tuple) and x[0] == "ref"]
+        if len(refs) >= 2:
+            a, b = find(refs[0]), find(refs[1])
+            if a != b:
+                parent[a] = b
+    return find
+
 def assembly_placements(rd):
-    """Resolve NEXT_ASSEMBLY_USAGE_OCCURRENCE placements into a flat list of
-    (shape_representation_ref, name, matrix) with matrices composed down the
-    assembly tree.
+    """Resolve NEXT_ASSEMBLY_USAGE_OCCURRENCE (NAUO) placements into a flat list
+    of (shape_representation_ref, name, matrix), one per placed part or
+    subassembly, with matrices composed down the assembly tree.
 
     The chain an AP214 export writes is
 
         CONTEXT_DEPENDENT_SHAPE_REPRESENTATION( #rr, #pds )
-        #rr  =( REPRESENTATION_RELATIONSHIP( '', '', #child_sr, #parent_sr )
+        #rr  =( REPRESENTATION_RELATIONSHIP( '', '', #rep_1, #rep_2 )
                 REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION( #idt )
                 SHAPE_REPRESENTATION_RELATIONSHIP( ) )
         #pds =  PRODUCT_DEFINITION_SHAPE( '', '', #nauo )
+        #nauo = NEXT_ASSEMBLY_USAGE_OCCURRENCE( id, '', '', #parent_pd, #child_pd, $ )
+
+    Writers disagree on which of rep_1 and rep_2 is the parent's: Open CASCADE
+    writes the child's as rep_1, as the CAx-IF recommends, and SolidWorks the
+    parent's. The NAUO settles it: SHAPE_DEFINITION_REPRESENTATION names each
+    product definition's representation. A relationship that matches neither
+    way is read the CAx-IF way.
 
     Returns [] when the file has no assembly structure, which is the single-part
     case and leaves the caller's flat path untouched."""
-    edges = []          # (parent_sr, child_sr, matrix, occurrence name)
+    reps = _representations_by_definition(rd)
+    space = _same_space(rd)
+    edges = []          # (parent_pd, child_pd, child_rep, matrix, occurrence name)
     for cd in rd.find("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"):
         a = rd.args(("ref", cd))
         rr = a[0] if a and isinstance(a[0], tuple) else None
         pds = a[1] if len(a) > 1 and isinstance(a[1], tuple) else None
-        if rr is None:
+        if rr is None or pds is None:
             continue
         parts = _complex_parts(rd, rr)
         rel = parts.get("REPRESENTATION_RELATIONSHIP")
@@ -1873,42 +1922,49 @@ def assembly_placements(rd):
         if not rel or not wt:
             continue
         srs = [x for x in rel if isinstance(x, tuple) and x[0] == "ref"]
-        if len(srs) < 2:
+        nauo = next((x for x in rd.args(pds)
+                     if isinstance(x, tuple) and x[0] == "ref"
+                     and rd.typ(x) == "NEXT_ASSEMBLY_USAGE_OCCURRENCE"), None)
+        pdrefs = [x for x in rd.args(nauo) if isinstance(x, tuple) and x[0] == "ref"] \
+            if nauo is not None else []
+        if len(srs) < 2 or len(pdrefs) < 2:
             continue
-        parent_sr, child_sr = srs[0], srs[1]
+        parent_pd, child_pd = pdrefs[0][1], pdrefs[1][1]
+        rep1, rep2 = space(srs[0][1]), space(srs[1][1])
+        child_reps = {space(r) for r in reps.get(child_pd, [])}
+        parent_reps = {space(r) for r in reps.get(parent_pd, [])}
+        rep1_is_parent = rep1 not in child_reps and (rep2 in child_reps or rep1 in parent_reps)
         idt = next((x for x in wt if isinstance(x, tuple) and x[0] == "ref"), None)
-        M = _idt_matrix(rd, idt) if idt is not None else _IDENTITY
-        name = ""
-        if pds is not None:
-            nauo = next((x for x in rd.args(pds)
-                         if isinstance(x, tuple) and x[0] == "ref"
-                         and rd.typ(x) == "NEXT_ASSEMBLY_USAGE_OCCURRENCE"), None)
-            if nauo is not None:
-                pdrefs = [x for x in rd.args(nauo)
-                          if isinstance(x, tuple) and x[0] == "ref"]
-                if len(pdrefs) > 1:
-                    name = _product_name(rd, pdrefs[1])
-        edges.append((parent_sr[1], child_sr[1], M, name))
+        M = _idt_matrix(rd, idt, rep1_is_parent) if idt is not None else None
+        if M is None:
+            print(f"  warning: CONTEXT_DEPENDENT_SHAPE_REPRESENTATION #{cd} places "
+                  f"its part with no ITEM_DEFINED_TRANSFORMATION of two "
+                  f"AXIS2_PLACEMENT_3Ds; the part is left unmoved")
+            M = _IDENTITY
+        child_rep = srs[0][1] if not rep1_is_parent else srs[1][1]
+        edges.append((parent_pd, child_pd, child_rep, M, _product_name(rd, pdrefs[1])))
     if not edges:
         return []
 
     children = {}
-    for parent, child, M, name in edges:
-        children.setdefault(parent, []).append((child, M, name))
-    all_children = {c for _, c, _, _ in edges}
+    for parent, child, rep, M, name in edges:
+        children.setdefault(parent, []).append((child, rep, M, name))
+    all_children = {c for _, c, _, _, _ in edges}
     roots = [p for p in children if p not in all_children]
 
     out = []
-    def walk(sr, M, prefix):
-        kids = children.get(sr)
-        if not kids:
-            out.append((sr, prefix, M))
-            return
-        for child, Mc, name in kids:
+    def walk(pd, M, prefix, chain):
+        for child, rep, Mc, name in children.get(pd, []):
+            if child in chain:          # a cyclic file; stop rather than recurse forever
+                continue
             label = name or f"part{len(out)}"
-            walk(child, _mat_mul(M, Mc), f"{prefix}___{label}" if prefix else label)
+            path = f"{prefix}___{label}" if prefix else label
+            Mw = _mat_mul(M, Mc)
+            out.append((rep, path, Mw))
+            walk(child, Mw, path, chain | {child})
     for r in roots:
-        walk(r, _IDENTITY, "")
+        out += [(rep, _product_name(rd, ("ref", r)), _IDENTITY) for rep in reps.get(r, [])]
+        walk(r, _IDENTITY, "", {r})
     return out
 
 def _product_name(rd, ref):
@@ -2105,19 +2161,19 @@ def _usd_matrix(M):
                        z[0], z[1], z[2], 0.0,
                        o[0], o[1], o[2], 1.0)
 
-def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verbose):
-    """One Xform per assembly placement, carrying the composed transform, with
-    that part's solids as BrepArray children.
+def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verbose, used):
+    """One Xform per assembly placement, carrying the composed transform unless
+    it is the identity, with that part's solids as BrepArray children.
 
     Geometry stays in the part's own coordinate system, where the STEP authored
     it; the placement is the only thing that moves. Each placement authors its
     own copy of the part's BrepArrays."""
     sidx = {sref: k for k, sref in enumerate(solids)}
-    used = set()
     for sr, nm, M in placed:
         name = _unique_name(_prim_name(nm) or f"part_{sr}", used)
         xf = UsdGeom.Xform.Define(stage, f"/World/{name}")
-        xf.AddTransformOp().Set(_usd_matrix(M))
+        if not _is_identity(M):
+            xf.AddTransformOp().Set(_usd_matrix(M))
         part_solids = srmap[sr]
         body = colors.get(sidx.get(part_solids[0], -1))
         if body:
@@ -2167,21 +2223,22 @@ def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
     placements = assembly_placements(rd)
     srmap = solids_by_representation(rd) if placements else {}
     placed = [(sr, nm, M) for sr, nm, M in placements if srmap.get(sr)]
+    used = set()
     if placed:
         if verbose:
             uniq = len({sr for sr, _, _ in placed})
             print(f"  assembly: {len(placed)} placements of {uniq} unique part(s), "
                   f"{sum(len(srmap[sr]) for sr, _, _ in placed)} solid(s)")
         _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids,
-                       verbose)
-        stage.Export(out)
-        if verbose:
-            print(f"wrote {out} ({len(placed)} placement(s))")
-        return
+                       verbose, used)
+    # A solid no placement reaches stays where its own representation puts it.
+    placed_solids = {s for sr, _, _ in placed for s in srmap[sr]}
+    loose = [(i, s) for i, s in enumerate(solids) if s not in placed_solids]
+    if placed and loose and verbose:
+        print(f"  {len(loose)} solid(s) outside the assembly, left unplaced")
 
-    used = set()
     products = product_names(rd)
-    for i, s in enumerate(solids):
+    for i, s in loose:
         b = extract_brep(rd, cfg, [s])
         name = _unique_name(solid_name(rd, s, i, products), used)
         xf = UsdGeom.Xform.Define(stage, f"/World/{name}")
@@ -2203,7 +2260,9 @@ def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
 
     stage.Export(out)
     if verbose:
-        print(f"wrote {out} ({len(solids)} brep prim(s))")
+        nbreps = sum(len(srmap[sr]) for sr, _, _ in placed) + len(loose)
+        print(f"wrote {out} ({nbreps} brep prim(s)"
+              + (f", {len(placed)} placement(s))" if placed else ")"))
 
 def main():
     import argparse
