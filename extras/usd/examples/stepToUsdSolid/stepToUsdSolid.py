@@ -1818,7 +1818,15 @@ def author_brep(stage, path, b, cfg, face_colors=None):
         sn.CreateSurfaceWeightsAttr(_dbl([w for g in ns for w in g["weights"]]))
 
     # ---- extent + optional per-face color ----
-    mn, mx = local_extent(verts)
+    # The vertices and every NURBS control vertex: a NURBS curve or surface
+    # with positive weights lies in its control hull, so the box holds a
+    # curved face's bulge too, which the vertices alone miss (NAPA's bilge
+    # plates), and BrepArrayContainment finds every control vertex inside it.
+    hull = list(verts)
+    for item in list(b["edges"]) + list(b["faces"]):
+        if item["geom"].get("nurb"):
+            hull += list(item["geom"]["controlVertices"])
+    mn, mx = local_extent(hull)
     ba.CreateBrepExtentAttr(_v3d([mn, mx]))
     ba.CreateExtentAttr(_v3f([mn, mx]))
     if face_colors and len(face_colors) == nfaces and len(set(face_colors)) > 1:
