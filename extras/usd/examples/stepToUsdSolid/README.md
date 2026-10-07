@@ -31,13 +31,19 @@ the file contains:
 - **Swept surfaces** — linear extrusion and revolution — lowered to NURBS with
   exact rational-arc control points.
 - **Void shells** (`BREP_WITH_VOIDS` / `ORIENTED_CLOSED_SHELL`) and **vertex loops**.
+- **Sheet bodies** (`SHELL_BASED_SURFACE_MODEL` of `OPEN_SHELL`s, as NAPA Designer
+  exports a plate), in a file with no solid: the infinite void is the only region,
+  each shell holds both faceuses of its faces, and a free edge's one edgeuse is
+  its own radial next. The proposal exempts such shells from the closed-solid rule.
 - **Face UV windows** (`face:range`): an analytic face's is derived from its
   trimming edges; a NURBS face, including a lowered swept surface, takes its
   surface's knot domain.
 - **Colors** — per-body and per-face `displayColor` read from STEP styled items.
 
-The plane-angle unit (degrees vs radians) and the intersection tolerance are read
-from the file (from its `UNCERTAINTY_MEASURE`, with a bounding-box fallback).
+The plane-angle unit (degrees vs radians), the length unit (written as the stage's
+`metersPerUnit` unless `--meters-per-unit` is given) and the intersection tolerance
+are read from the file (the tolerance from its `UNCERTAINTY_MEASURE`, with a
+bounding-box fallback).
 
 ## Scope
 

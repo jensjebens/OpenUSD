@@ -219,6 +219,55 @@ def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent):
              % (rr, emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % nauo)))
 
 
+def _MakeSheetStep():
+    """Return an AP242 STEP file holding one sheet body, as NAPA Designer
+    exports a plate: a SHELL_BASED_SURFACE_MODEL whose OPEN_SHELL holds one
+    planar face, a 3 x 2 rectangle, under a MANIFOLD_SURFACE_SHAPE_REPRESENTATION
+    whose length unit is the metre."""
+    rows = []
+
+    def emit(text):
+        rows.append("#%d=%s;" % (len(rows) + 1, text))
+        return len(rows)
+
+    V = [(0, 0, 0), (3, 0, 0), (3, 2, 0), (0, 2, 0)]
+    pts = [emit("CARTESIAN_POINT('',(%g.,%g.,%g.))" % v) for v in V]
+    vtx = [emit("VERTEX_POINT('',#%d)" % p) for p in pts]
+    edges = []
+    for k in range(4):
+        a, b = V[k], V[(k + 1) % 4]
+        d = [b[i] - a[i] for i in range(3)]
+        m = sum(c * c for c in d) ** 0.5
+        vec = emit("VECTOR('',#%d,%g.)" % (
+            emit("DIRECTION('',(%g,%g,%g))" % tuple(c / m for c in d)), m))
+        line = emit("LINE('',#%d,#%d)" % (pts[k], vec))
+        curve = emit("EDGE_CURVE('',#%d,#%d,#%d,.T.)" % (vtx[k], vtx[(k + 1) % 4], line))
+        edges.append(emit("ORIENTED_EDGE('',*,*,#%d,.T.)" % curve))
+    loop = emit("EDGE_LOOP('',(%s))" % ",".join("#%d" % e for e in edges))
+    bound = emit("FACE_OUTER_BOUND('',#%d,.T.)" % loop)
+    plane = emit("PLANE('',#%d)" % emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)" % (
+        emit("CARTESIAN_POINT('',(0.,0.,0.))"), emit("DIRECTION('',(0.,0.,1.))"),
+        emit("DIRECTION('',(1.,0.,0.))"))))
+    face = emit("ADVANCED_FACE('',(#%d),#%d,.T.)" % (bound, plane))
+    model = emit("SHELL_BASED_SURFACE_MODEL('',(#%d))" % emit("OPEN_SHELL('',(#%d))" % face))
+    length = emit("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT($,.METRE.))")
+    angle = emit("(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))")
+    solid = emit("(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())")
+    tol = emit("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-3),#%d,"
+               "'distance_accuracy_value','')" % length)
+    context = emit("(GEOMETRIC_REPRESENTATION_CONTEXT(3)"
+                   "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#%d))"
+                   "GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d,#%d,#%d))"
+                   "REPRESENTATION_CONTEXT('',''))" % (tol, length, angle, solid))
+    emit("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('',(#%d),#%d)" % (model, context))
+    return ("ISO-10303-21;\n"
+            "HEADER;\n"
+            "FILE_DESCRIPTION(('UsdSolid stepToUsdSolid test sheet'),'2;1');\n"
+            "FILE_NAME('sheet.step','2026-01-01T00:00:00',(''),(''),'','','');\n"
+            "FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));\n"
+            "ENDSEC;\nDATA;\n%s\nENDSEC;\nEND-ISO-10303-21;\n" % "\n".join(rows))
+
+
 def _SolidValidators():
     registry = UsdValidation.ValidationRegistry()
     names = [m.name for m in registry.GetAllValidatorMetadata()
@@ -417,6 +466,32 @@ class TestStepToUsdSolid(unittest.TestCase):
             "BrepSurfacePlaneAPI", plane, samples)
         self.assertLessEqual(max(ulo, vlo), -r)
         self.assertGreaterEqual(min(uhi, vhi), r)
+
+    def test_SheetBody(self):
+        """A sheet body, as NAPA Designer exports a plate, converts: a
+        SHELL_BASED_SURFACE_MODEL of one OPEN_SHELL becomes one region, the
+        infinite void, whose one shell holds both faceuses of the face; each
+        free edge has one edgeuse, radially its own next; metersPerUnit is the
+        file's metre; and every validator passes."""
+        stepPath = os.path.join(self._dir, "sheet.step")
+        usdPath = os.path.join(self._dir, "sheet.usda")
+        with open(stepPath, "w") as f:
+            f.write(_MakeSheetStep())
+        stepToUsdSolid.convert(stepPath, usdPath, verbose=False)
+        stage = Usd.Stage.Open(usdPath)
+        self.assertEqual(UsdGeom.GetStageMetersPerUnit(stage), 1.0)
+        prim = self._Brep(stage).GetPrim()
+        get = lambda name: list(prim.GetAttribute(name).Get())
+        self.assertEqual(get("region:type"), ["voidRegion"])
+        self.assertEqual(get("region:shellCount"), [1])
+        self.assertEqual(get("shell:faceuseCount"), [2])
+        self.assertEqual(sorted(get("faceuse:orientationType")), ["opposite", "same"])
+        nextRadial = get("edgeuse:nextRadialEUIndex")
+        self.assertEqual(nextRadial, list(range(4)))
+        errors = UsdValidation.ValidationContext(_SolidValidators()).Validate(stage)
+        self.assertEqual(
+            [], list(errors),
+            "\n".join("%s: %s" % (e.GetName(), e.GetMessage()) for e in errors))
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not

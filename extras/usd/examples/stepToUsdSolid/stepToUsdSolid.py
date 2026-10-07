@@ -208,6 +208,36 @@ def detect_angle_scale(rd, ents):
                     return math.pi/180.0
     return 1.0
 
+_SI_PREFIX = {"MICRO": 1e-6, "MILLI": 1e-3, "CENTI": 1e-2, "DECI": 1e-1, "KILO": 1e3}
+_LENGTH_NAMES = {"INCH": 0.0254, "FOOT": 0.3048, "FEET": 0.3048}
+
+def detect_meters_per_unit(rd, ents):
+    """Metres per model length unit from the file's LENGTH_UNIT: an SI metre
+    with its prefix (NX and SolidWorks write SI_UNIT(.MILLI.,.METRE.), NAPA
+    Designer SI_UNIT($,.METRE.)), or an inch or foot CONVERSION_BASED_UNIT.
+    Where a file declares more than one, the most common wins. None where it
+    declares none this reads."""
+    found = []
+    for i, (t, a) in ents.items():
+        if t != "__COMPLEX__" or not any(n == "LENGTH_UNIT" for n, _ in a):
+            continue
+        subs = dict(a)
+        si = subs.get("SI_UNIT")
+        if si and si[-1] == ("enum", "METRE"):
+            pre = si[0]
+            found.append(_SI_PREFIX.get(pre[1], 1.0) if isinstance(pre, tuple) else 1.0)
+            continue
+        cbu = subs.get("CONVERSION_BASED_UNIT")
+        if cbu:
+            name = (cbu[0] or "").upper()
+            for key, mpu in _LENGTH_NAMES.items():
+                if key in name:
+                    found.append(mpu)
+                    break
+    if not found:
+        return None
+    return max(set(found), key=found.count)
+
 def detect_length_uncertainty(rd, ents):
     """File's declared length uncertainty in model units (mm), the producer's real
     endpoint-agreement tolerance. Returns (value, source_str) or (None,'absent')."""
@@ -1173,6 +1203,7 @@ def extract_brep(rd, cfg, solid_refs=None):
     verts, edges, edgeuses, loops, faces = [], [], [], [], []
     loop_vidx = []
     brep_faces = []
+    sheet = []      # per body: every shell open (a SHELL_BASED_SURFACE_MODEL)
     esamples = {}   # edge index -> cached interior boundary samples (H2b)
 
     def vidx(ref):
@@ -1306,6 +1337,7 @@ def extract_brep(rd, cfg, solid_refs=None):
                                   rng=rng))
                 solid_faces[-1].append(fi)
         brep_faces.append(solid_faces)
+        sheet.append(bool(shell_refs) and all(rd.typ(sh) == "OPEN_SHELL" for sh in shell_refs))
 
     dropped = _drop_subtolerance_edges(verts, edges, edgeuses, loops, loop_vidx,
                                        faces, cfg)
@@ -1327,7 +1359,7 @@ def extract_brep(rd, cfg, solid_refs=None):
             edgeuses[idx]["entry"] = "topEntry" if edgeuses[idx]["orient"] == "same" else "bottomEntry"
 
     return dict(verts=verts, edges=edges, edgeuses=edgeuses, loops=loops, faces=faces,
-                brep_faces=brep_faces, by_edge=by_edge, loop_vidx=loop_vidx,
+                brep_faces=brep_faces, sheet=sheet, by_edge=by_edge, loop_vidx=loop_vidx,
                 dropped_edges=dropped, seam_edges=seams, reversed_faces=reversed_faces)
 
 # ================================================================ region packing
@@ -1345,6 +1377,11 @@ def pack_regions(b):
     Each face contributes one faceuse to the region on either side of it: the
     outer shell faces the infinite void and the solid, a cavity wall faces the
     solid and that cavity.
+
+    A sheet body (a SHELL_BASED_SURFACE_MODEL of OPEN_SHELLs, as NAPA Designer
+    exports a plate) encloses no material: the proposal supports it and exempts
+    its shells from the closed-solid rule. It packs as the infinite void
+    alone, each shell holding both faceuses of each of its faces.
     """
     regionCount, regionType, regionShellCount, shellFaceuseCount = [], [], [], []
     fuFaceIndex, fuOrient = [], []
@@ -1366,7 +1403,17 @@ def pack_regions(b):
             side = outward == b["faces"][fi]["sense"]
             fuOrient.append("same" if side else "opposite")
 
-    for shells in b["brep_faces"]:
+    for k, shells in enumerate(b["brep_faces"]):
+        if (b.get("sheet") or [False] * (k + 1))[k]:
+            regionCount.append(1)
+            regionType.append("voidRegion")
+            regionShellCount.append(len(shells))
+            for sh in shells:
+                shellFaceuseCount.append(2 * len(sh))
+                for fi in sh:
+                    fuFaceIndex += [fi, fi]
+                    fuOrient += ["same", "opposite"]
+            continue
         outer, voids = shells[0], shells[1:]
         regionCount.append(2 + len(voids))
         regionType += ["voidRegion", "solidRegion"] + ["voidRegion"] * len(voids)
@@ -1606,7 +1653,8 @@ def self_check(b):
     if sum(reg["shellFaceuseCount"]) != len(reg["fuFaceIndex"]): errs.append("sum(shell:faceuseCount) != #faceuses")
     if len(reg["fuFaceIndex"]) != 2*len(b["faces"]): errs.append("#faceuses != 2 x #faces")
     if any(not (0 <= fi < len(b["faces"])) for fi in reg["fuFaceIndex"]): errs.append("faceuse:faceIndex OOB")
-    bad = {ei: len(g) for ei, g in b["by_edge"].items() if len(g) != 2}
+    uses = (1, 2) if any(b.get("sheet") or []) else (2,)   # a sheet's free edges have one
+    bad = {ei: len(g) for ei, g in b["by_edge"].items() if len(g) not in uses}
     if bad: errs.append(f"non-manifold edges: {dict(list(bad.items())[:4])}")
     for e in b["edges"]:
         g = e["geom"]
@@ -2030,7 +2078,8 @@ def solids_by_representation(rd):
     an ADVANCED_BREP_SHAPE_REPRESENTATION; the assembly graph names the plain
     SHAPE_REPRESENTATION, and SHAPE_REPRESENTATION_RELATIONSHIP joins the two."""
     out = {}
-    for sr in rd.find("ADVANCED_BREP_SHAPE_REPRESENTATION", "SHAPE_REPRESENTATION"):
+    for sr in rd.find("ADVANCED_BREP_SHAPE_REPRESENTATION", "SHAPE_REPRESENTATION",
+                      "MANIFOLD_SURFACE_SHAPE_REPRESENTATION"):
         items = []
         for x in rd.args(("ref", sr)):
             if isinstance(x, tuple) and x[0] == "ref":
@@ -2039,7 +2088,8 @@ def solids_by_representation(rd):
                 items += [y[1] for y in x
                           if isinstance(y, tuple) and y[0] == "ref"]
         sol = [i for i in items
-               if rd.typ(("ref", i)) in ("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS")]
+               if rd.typ(("ref", i)) in ("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS",
+                                         "SHELL_BASED_SURFACE_MODEL")]
         if sol:
             out[sr] = sol
     for rel in rd.find("SHAPE_REPRESENTATION_RELATIONSHIP"):
@@ -2193,26 +2243,34 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
                 print(f"  {name}/{child:<8} faces={len(b['faces']):5} "
                       f"verts={len(b['verts']):6}")
 
-def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
+def convert(inp, out, up_axis="Z", meters_per_unit=None, verbose=True):
     """Convert one STEP file to a UsdSolid stage: one Xform + BrepArray prim per
     solid, or for an assembly one Xform per placement with its part's solids as
     BrepArray children, under a /World Xform. A solid's Xform is named after its
     part's PRODUCT when the part has that one solid (solid_name). Output format
-    follows the extension (.usda text or .usdc binary crate)."""
+    follows the extension (.usda text or .usdc binary crate). A file with no
+    solid but sheet bodies (SHELL_BASED_SURFACE_MODEL) converts those.
+    metersPerUnit is ``meters_per_unit``, else the file's length unit
+    (detect_meters_per_unit), else 0.001."""
     with open(inp, errors="replace") as f:
         ents = parse_step(f.read())
     rd = Reader(ents)
     angle_scale = detect_angle_scale(rd, ents)
     tol, unc, usrc = derive_tolerance(rd, ents)
     cfg = Config(angle_scale=angle_scale, intersect_tol=tol)
-    solids = rd.find("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS")
+    solids = rd.find("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS") or rd.find("SHELL_BASED_SURFACE_MODEL")
     if not solids:
-        raise SystemExit(f"{inp}: no MANIFOLD_SOLID_BREP / BREP_WITH_VOIDS solids found")
+        raise SystemExit(f"{inp}: no MANIFOLD_SOLID_BREP / BREP_WITH_VOIDS solids "
+                         "or SHELL_BASED_SURFACE_MODEL sheets found")
+    if meters_per_unit is None:
+        meters_per_unit = detect_meters_per_unit(rd, ents) or 0.001
     colors, face_col = resolve_colors(rd, ents, solids)
     if verbose:
         unit = "degrees" if abs(angle_scale - math.pi / 180) < PERIOD_TOL else "radians"
-        print(f"[{inp}] {len(ents)} entities, {len(solids)} solid(s); "
-              f"plane-angle unit = {unit}; intersectTol3d = {tol:g} mm ({usrc})")
+        kind = "sheet(s)" if rd.typ(("ref", solids[0])) == "SHELL_BASED_SURFACE_MODEL" else "solid(s)"
+        print(f"[{inp}] {len(ents)} entities, {len(solids)} {kind}; "
+              f"plane-angle unit = {unit}; metersPerUnit = {meters_per_unit:g}; "
+              f"intersectTol3d = {tol:g} model units ({usrc})")
 
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z if up_axis.upper() == "Z" else UsdGeom.Tokens.y)
@@ -2272,8 +2330,9 @@ def main():
     ap.add_argument("output", help="output USD file (.usd / .usda / .usdc)")
     ap.add_argument("--up-axis", choices=["Y", "Z"], default="Z",
                     help="stage up axis (default Z)")
-    ap.add_argument("--meters-per-unit", type=float, default=0.001,
-                    help="stage metersPerUnit (default 0.001, i.e. STEP millimetres)")
+    ap.add_argument("--meters-per-unit", type=float, default=None,
+                    help="stage metersPerUnit (default: the file's length unit, "
+                         "else 0.001, i.e. millimetres)")
     ap.add_argument("-q", "--quiet", action="store_true", help="suppress per-solid output")
     args = ap.parse_args()
     convert(args.input, args.output, args.up_axis, args.meters_per_unit, verbose=not args.quiet)
