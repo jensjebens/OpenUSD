@@ -45,7 +45,8 @@ _ASSEMBLY = [("rig", "arm", ((100, 0, 0), (0, 0, 1), (0, 1, 0)), _IDENTITY_ITEM)
               ((5, 5, 0), (0, 0, 1), (0, 1, 0)))]
 
 
-def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None):
+def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
+                 densityMetre=False, surfaceModel=False, solidWorks=False):
     """Return an AP214 STEP file describing the box above, as a string. Each
     face index in reversedFaces is written as a reversed face: its plane's
     normal points into the box and its ADVANCED_FACE same_sense is .F., which
@@ -55,7 +56,16 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None):
     assembly's parts are written. With rep1IsParent, True or False, the file
     is the _ASSEMBLY above instead, its REPRESENTATION_RELATIONSHIPs naming the
     parent's representation first (as SolidWorks writes them) or the child's
-    (as Open CASCADE does)."""
+    (as Open CASCADE does); with solidWorks too, each part's
+    SHAPE_DEFINITION_REPRESENTATION names a plain SHAPE_REPRESENTATION that a
+    SHAPE_REPRESENTATION_RELATIONSHIP joins to the
+    ADVANCED_BREP_SHAPE_REPRESENTATION holding its solid, every representation
+    in a context of its own (ISO 10303-43 WR1), as SolidWorks writes a part.
+    unit "inch" writes the length unit as an inch CONVERSION_BASED_UNIT of
+    25.4 millimetres. densityMetre adds a metre LENGTH_UNIT in a context no
+    shape uses, as a file declaring a density in kg/m3 does. surfaceModel
+    writes the single box as a SHELL_BASED_SURFACE_MODEL of its CLOSED_SHELL
+    under a MANIFOLD_SURFACE_SHAPE_REPRESENTATION."""
     rows, state = [], {"n": 0}
 
     def emit(text):
@@ -72,33 +82,47 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None):
     def direction(t):
         return "DIRECTION('',(%s,%s,%s))" % tuple(num(c) for c in t)
 
-    def unit(a, b):
+    def unitVector(a, b):
         d = [b[k] - a[k] for k in range(3)]
         m = sum(c * c for c in d) ** 0.5
         return tuple(c / m for c in d)
 
     def box(dx, solidName):
-        return _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName)
+        return _EmitBox(emit, point, direction, unitVector, reversedFaces, dx, solidName,
+                        surfaceModel=surfaceModel)
 
     wcs = emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
                % (emit(point((0, 0, 0))), emit(direction((0, 0, 1))),
                   emit(direction((1, 0, 0)))))
     lengthUnit = emit("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))")
+    if unit == "inch":
+        lengthUnit = emit("(CONVERSION_BASED_UNIT('INCH',#%d)LENGTH_UNIT()NAMED_UNIT(#%d))" % (
+            emit("LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#%d)" % lengthUnit),
+            emit("DIMENSIONAL_EXPONENTS(1.,0.,0.,0.,0.,0.,0.)")))
+    if densityMetre:
+        metre = emit("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT($,.METRE.))")
+        emit("DERIVED_UNIT((#%d))" % emit("DERIVED_UNIT_ELEMENT(#%d,-3.)" % metre))
+        emit("(GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d))REPRESENTATION_CONTEXT('material',''))"
+             % metre)
     angleUnit = emit("(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))")
     solidUnit = emit("(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())")
     # The converter derives brep:intersectTol3d from this value.
     tol = emit("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-7),#%d,"
                "'distance_accuracy_value','')" % lengthUnit)
-    context = emit("(GEOMETRIC_REPRESENTATION_CONTEXT(3)"
-                   "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#%d))"
-                   "GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d,#%d,#%d))"
-                   "REPRESENTATION_CONTEXT('',''))"
-                   % (tol, lengthUnit, angleUnit, solidUnit))
+    def newContext():
+        return emit("(GEOMETRIC_REPRESENTATION_CONTEXT(3)"
+                    "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#%d))"
+                    "GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d,#%d,#%d))"
+                    "REPRESENTATION_CONTEXT('',''))"
+                    % (tol, lengthUnit, angleUnit, solidUnit))
+    context = newContext()
     if rep1IsParent is not None:
-        _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent)
+        _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent,
+                      newContext=newContext if solidWorks else None)
     elif products is None:
-        emit("ADVANCED_BREP_SHAPE_REPRESENTATION('Box',(#%d,#%d),#%d)"
-             % (wcs, box(0.0, "Box"), context))
+        emit("%s('Box',(#%d,#%d),#%d)"
+             % ("MANIFOLD_SURFACE_SHAPE_REPRESENTATION" if surfaceModel
+                else "ADVANCED_BREP_SHAPE_REPRESENTATION", wcs, box(0.0, "Box"), context))
     else:
         app = emit("APPLICATION_CONTEXT('core data for automotive mechanical "
                    "design processes')")
@@ -123,9 +147,10 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None):
             % "\n".join(rows))
 
 
-def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName):
+def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surfaceModel=False):
     """Emit the box above, moved dx along x, as a MANIFOLD_SOLID_BREP named
-    solidName; return its id."""
+    solidName (surfaceModel: a SHELL_BASED_SURFACE_MODEL of its CLOSED_SHELL);
+    return its id."""
     V = [(x + dx, y, z) for x, y, z in _V]
     pt = {i: emit(point(v)) for i, v in enumerate(V)}
     vtx = {i: emit("VERTEX_POINT('',#%d)" % pt[i]) for i in range(len(V))}
@@ -170,13 +195,19 @@ def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName):
                           % (bound, plane, "F" if reverse else "T")))
 
     shell = emit("CLOSED_SHELL('',(%s))" % ",".join("#%d" % f for f in faces))
+    if surfaceModel:
+        return emit("SHELL_BASED_SURFACE_MODEL('%s',(#%d))" % (solidName, shell))
     return emit("MANIFOLD_SOLID_BREP('%s',#%d)" % (solidName, shell))
 
 
-def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent):
+def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent, newContext=None):
     """Emit _ASSEMBLY: a product, definition and shape representation per
     product, then one NEXT_ASSEMBLY_USAGE_OCCURRENCE with its
-    CONTEXT_DEPENDENT_SHAPE_REPRESENTATION per row."""
+    CONTEXT_DEPENDENT_SHAPE_REPRESENTATION per row. With newContext, each
+    representation gets a context of its own, and the box part's
+    SHAPE_REPRESENTATION holds only its placements, joined by a
+    SHAPE_REPRESENTATION_RELATIONSHIP to the ADVANCED_BREP_SHAPE_REPRESENTATION
+    that holds the solid (SolidWorks' layout)."""
     app = emit("APPLICATION_CONTEXT('core data for automotive mechanical "
                "design processes')")
 
@@ -191,10 +222,18 @@ def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent):
         own[parent].append(pi)
         own[child].append(ci)
     listed = lambda ids: ",".join("#%d" % i for i in ids)
-    rep = {n: emit("SHAPE_REPRESENTATION('%s',(%s),#%d)" % (n, listed(own[n]), context))
+    ctx = newContext or (lambda: context)
+    rep = {n: emit("SHAPE_REPRESENTATION('%s',(%s),#%d)" % (n, listed(own[n]), ctx()))
            for n in ("rig", "arm")}
-    rep["box"] = emit("ADVANCED_BREP_SHAPE_REPRESENTATION('box',(%s),#%d)"
-                      % (listed(own["box"] + [box(0.0, "")]), context))
+    if newContext is None:
+        rep["box"] = emit("ADVANCED_BREP_SHAPE_REPRESENTATION('box',(%s),#%d)"
+                          % (listed(own["box"] + [box(0.0, "")]), context))
+    else:
+        rep["box"] = emit("SHAPE_REPRESENTATION('box',(%s),#%d)"
+                          % (listed(own["box"]), ctx()))
+        brep = emit("ADVANCED_BREP_SHAPE_REPRESENTATION('box',(#%d,#%d),#%d)"
+                    % (wcs, box(0.0, ""), ctx()))
+        emit("SHAPE_REPRESENTATION_RELATIONSHIP('','',#%d,#%d)" % (rep["box"], brep))
     pd = {}
     for n in ("rig", "arm", "box"):
         product = emit("PRODUCT('%s','%s','',(#%d))" % (
@@ -219,47 +258,84 @@ def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent):
              % (rr, emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % nauo)))
 
 
-def _MakeSheetStep():
-    """Return an AP242 STEP file holding one sheet body, as NAPA Designer
-    exports a plate: a SHELL_BASED_SURFACE_MODEL whose OPEN_SHELL holds one
-    planar face, a 3 x 2 rectangle, under a MANIFOLD_SURFACE_SHAPE_REPRESENTATION
-    whose length unit is the metre."""
+def _MakeSheetStep(sheets=1, product=None, oriented=False, uncertainty=1.e-3, withBox=False):
+    """Return an AP242 STEP file holding sheet bodies, as NAPA Designer exports
+    a plate: each a SHELL_BASED_SURFACE_MODEL whose OPEN_SHELL holds one planar
+    face, a 3 x 2 rectangle (the k-th moved 4k along x), under one
+    MANIFOLD_SURFACE_SHAPE_REPRESENTATION whose length unit is the metre and
+    whose accuracy is uncertainty (metres). With product, the representation
+    is a part's shape, named product (as a stiffener profile's web and flange
+    are one part). oriented wraps each OPEN_SHELL in a reversed
+    ORIENTED_OPEN_SHELL. withBox adds the test box as a solid, under an
+    ADVANCED_BREP_SHAPE_REPRESENTATION of its own."""
     rows = []
 
     def emit(text):
         rows.append("#%d=%s;" % (len(rows) + 1, text))
         return len(rows)
 
-    V = [(0, 0, 0), (3, 0, 0), (3, 2, 0), (0, 2, 0)]
-    pts = [emit("CARTESIAN_POINT('',(%g.,%g.,%g.))" % v) for v in V]
-    vtx = [emit("VERTEX_POINT('',#%d)" % p) for p in pts]
-    edges = []
-    for k in range(4):
-        a, b = V[k], V[(k + 1) % 4]
-        d = [b[i] - a[i] for i in range(3)]
+    def point(v):
+        return "CARTESIAN_POINT('',(%r,%r,%r))" % tuple(float(c) for c in v)
+
+    def direction(v):
+        return "DIRECTION('',(%r,%r,%r))" % tuple(float(c) for c in v)
+
+    def unitVector(a, b):
+        d = [b[k] - a[k] for k in range(3)]
         m = sum(c * c for c in d) ** 0.5
-        vec = emit("VECTOR('',#%d,%g.)" % (
-            emit("DIRECTION('',(%g,%g,%g))" % tuple(c / m for c in d)), m))
-        line = emit("LINE('',#%d,#%d)" % (pts[k], vec))
-        curve = emit("EDGE_CURVE('',#%d,#%d,#%d,.T.)" % (vtx[k], vtx[(k + 1) % 4], line))
-        edges.append(emit("ORIENTED_EDGE('',*,*,#%d,.T.)" % curve))
-    loop = emit("EDGE_LOOP('',(%s))" % ",".join("#%d" % e for e in edges))
-    bound = emit("FACE_OUTER_BOUND('',#%d,.T.)" % loop)
-    plane = emit("PLANE('',#%d)" % emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)" % (
-        emit("CARTESIAN_POINT('',(0.,0.,0.))"), emit("DIRECTION('',(0.,0.,1.))"),
-        emit("DIRECTION('',(1.,0.,0.))"))))
-    face = emit("ADVANCED_FACE('',(#%d),#%d,.T.)" % (bound, plane))
-    model = emit("SHELL_BASED_SURFACE_MODEL('',(#%d))" % emit("OPEN_SHELL('',(#%d))" % face))
+        return tuple(c / m for c in d)
+
+    models = []
+    for k in range(sheets):
+        V = [(4 * k, 0, 0), (4 * k + 3, 0, 0), (4 * k + 3, 2, 0), (4 * k, 2, 0)]
+        pts = [emit(point(v)) for v in V]
+        vtx = [emit("VERTEX_POINT('',#%d)" % p) for p in pts]
+        edges = []
+        for e in range(4):
+            a, b = V[e], V[(e + 1) % 4]
+            m = sum((b[i] - a[i]) ** 2 for i in range(3)) ** 0.5
+            vec = emit("VECTOR('',#%d,%r)" % (emit(direction(unitVector(a, b))), float(m)))
+            line = emit("LINE('',#%d,#%d)" % (pts[e], vec))
+            curve = emit("EDGE_CURVE('',#%d,#%d,#%d,.T.)" % (vtx[e], vtx[(e + 1) % 4], line))
+            edges.append(emit("ORIENTED_EDGE('',*,*,#%d,.T.)" % curve))
+        loop = emit("EDGE_LOOP('',(%s))" % ",".join("#%d" % e for e in edges))
+        bound = emit("FACE_OUTER_BOUND('',#%d,.T.)" % loop)
+        plane = emit("PLANE('',#%d)" % emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)" % (
+            emit(point(V[0])), emit(direction((0, 0, 1))), emit(direction((1, 0, 0))))))
+        face = emit("ADVANCED_FACE('',(#%d),#%d,.T.)" % (bound, plane))
+        shell = emit("OPEN_SHELL('',(#%d))" % face)
+        if oriented:
+            shell = emit("ORIENTED_OPEN_SHELL('',*,#%d,.F.)" % shell)
+        models.append(emit("SHELL_BASED_SURFACE_MODEL('',(#%d))" % shell))
     length = emit("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT($,.METRE.))")
     angle = emit("(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))")
     solid = emit("(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())")
-    tol = emit("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-3),#%d,"
-               "'distance_accuracy_value','')" % length)
-    context = emit("(GEOMETRIC_REPRESENTATION_CONTEXT(3)"
-                   "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#%d))"
-                   "GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d,#%d,#%d))"
-                   "REPRESENTATION_CONTEXT('',''))" % (tol, length, angle, solid))
-    emit("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('',(#%d),#%d)" % (model, context))
+    tol = emit("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(%r),#%d,"
+               "'distance_accuracy_value','')" % (float(uncertainty), length))
+
+    def newContext():
+        return emit("(GEOMETRIC_REPRESENTATION_CONTEXT(3)"
+                    "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#%d))"
+                    "GLOBAL_UNIT_ASSIGNED_CONTEXT((#%d,#%d,#%d))"
+                    "REPRESENTATION_CONTEXT('',''))" % (tol, length, angle, solid))
+
+    shape = emit("MANIFOLD_SURFACE_SHAPE_REPRESENTATION('',(%s),#%d)"
+                 % (",".join("#%d" % m for m in models), newContext()))
+    if product is not None:
+        app = emit("APPLICATION_CONTEXT('core data for automotive mechanical "
+                   "design processes')")
+        prod = emit("PRODUCT('%s','%s','',(#%d))" % (
+            product, product, emit("PRODUCT_CONTEXT('',#%d,'mechanical')" % app)))
+        definition = emit("PRODUCT_DEFINITION('design','',#%d,#%d)" % (
+            emit("PRODUCT_DEFINITION_FORMATION('','',#%d)" % prod),
+            emit("PRODUCT_DEFINITION_CONTEXT('part definition',#%d,'design')" % app)))
+        emit("SHAPE_DEFINITION_REPRESENTATION(#%d,#%d)" % (
+            emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % definition), shape))
+    if withBox:
+        wcs = emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)" % (
+            emit(point((0, 0, 0))), emit(direction((0, 0, 1))), emit(direction((1, 0, 0)))))
+        emit("ADVANCED_BREP_SHAPE_REPRESENTATION('Box',(#%d,#%d),#%d)" % (
+            wcs, _EmitBox(emit, point, direction, unitVector, (), 10.0, "Box"), newContext()))
     return ("ISO-10303-21;\n"
             "HEADER;\n"
             "FILE_DESCRIPTION(('UsdSolid stepToUsdSolid test sheet'),'2;1');\n"
@@ -407,7 +483,9 @@ class TestStepToUsdSolid(unittest.TestCase):
         NEXT_ASSEMBLY_USAGE_OCCURRENCEs puts it, whichever representation the
         writer names first: the child's item is mapped onto the parent's, and
         a subassembly's placement carries down to its parts. A part placed
-        three times authors three bodies."""
+        three times authors three bodies, once each. The same holds for
+        SolidWorks' layout, where a part's shape joins the representation
+        holding its solid through a SHAPE_REPRESENTATION_RELATIONSHIP."""
         def axes(item):
             o, z, x = (Gf.Vec3d(*v) for v in item)
             z = z.GetNormalized()
@@ -427,11 +505,11 @@ class TestStepToUsdSolid(unittest.TestCase):
         expected = {"arm___box": [place(arm, place(inArm1, v)) for v in _V],
                     "arm___box_1": [place(arm, place(inArm2, v)) for v in _V],
                     "box": [place(direct, v) for v in _V]}
-        for rep1IsParent in (True, False):
-            stepPath = os.path.join(self._dir, "assembly_%d.step" % rep1IsParent)
+        for rep1IsParent, solidWorks in ((True, False), (False, False), (True, True)):
+            stepPath = os.path.join(self._dir, "assembly_%d%d.step" % (rep1IsParent, solidWorks))
             with open(stepPath, "w") as f:
-                f.write(_MakeBoxStep(rep1IsParent=rep1IsParent))
-            usdPath = os.path.join(self._dir, "assembly_%d.usda" % rep1IsParent)
+                f.write(_MakeBoxStep(rep1IsParent=rep1IsParent, solidWorks=solidWorks))
+            usdPath = os.path.join(self._dir, "assembly_%d%d.usda" % (rep1IsParent, solidWorks))
             stepToUsdSolid.convert(stepPath, usdPath, verbose=False)
             stage = Usd.Stage.Open(usdPath)
             cache = UsdGeom.XformCache()
@@ -443,6 +521,9 @@ class TestStepToUsdSolid(unittest.TestCase):
                         M.Transform(p) for p in
                         prim.GetAttribute("brep:vertexPoint:point:position").Get()]
             self.assertEqual(sorted(got), sorted(expected), "rep1IsParent=%s" % rep1IsParent)
+            # one body per placement: a duplicate would overwrite its twin in got
+            self.assertEqual(len([p for p in stage.Traverse() if p.IsA(UsdSolid.BrepArray)]),
+                             len(expected))
             for name, points in expected.items():
                 self.assertEqual(len(got[name]), len(points))
                 worst = max(min((g - p).GetLength() for g in got[name]) for p in points)
@@ -492,6 +573,104 @@ class TestStepToUsdSolid(unittest.TestCase):
         self.assertEqual(
             [], list(errors),
             "\n".join("%s: %s" % (e.GetName(), e.GetMessage()) for e in errors))
+
+    def _Convert(self, text, name, **kw):
+        stepPath = os.path.join(self._dir, name + ".step")
+        usdPath = os.path.join(self._dir, name + ".usda")
+        with open(stepPath, "w") as f:
+            f.write(text)
+        stepToUsdSolid.convert(stepPath, usdPath, verbose=False, **kw)
+        return Usd.Stage.Open(usdPath)
+
+    def _Breps(self, stage):
+        return [p for p in stage.Traverse() if p.IsA(UsdSolid.BrepArray)]
+
+    def _AssertValid(self, stage):
+        errors = UsdValidation.ValidationContext(_SolidValidators()).Validate(stage)
+        self.assertEqual(
+            [], list(errors),
+            "\n".join("%s: %s" % (e.GetName(), e.GetMessage()) for e in errors))
+
+    def test_LengthUnitFromTheBodysContext(self):
+        """metersPerUnit is the length unit of the context the body's
+        representation names. A metre the file declares for a density, in a
+        context no shape uses, does not count; an inch is read through its
+        conversion factor; an explicit meters_per_unit wins."""
+        mpu = UsdGeom.GetStageMetersPerUnit
+        self.assertEqual(mpu(self._Convert(_MakeBoxStep(densityMetre=True), "density")), 0.001)
+        self.assertAlmostEqual(mpu(self._Convert(_MakeBoxStep(unit="inch"), "inch")),
+                               0.0254, places=12)
+        self.assertEqual(mpu(self._Convert(_MakeBoxStep(unit="inch"), "inch_given",
+                                           meters_per_unit=0.01)), 0.01)
+
+    def test_ToleranceInTheFilesUnit(self):
+        """brep:intersectTol3d is the declared accuracy over 20 in the file's own
+        unit, and its millimetre floor scales with the unit: a sheet in metres
+        declaring 1 mm gets 0.05 mm, one declaring 1 nm the 5e-4 mm floor."""
+        for unc, want in ((1e-3, 5e-5), (1e-9, 5e-7)):
+            st = self._Convert(_MakeSheetStep(uncertainty=unc), "tolerance_%g" % unc)
+            tol = UsdSolid.BrepArray(self._Breps(st)[0]).GetBrepIntersectTol3dAttr().Get()
+            self.assertAlmostEqual(tol[0], want, delta=want * 1e-9)
+
+    def test_SheetPartsKeepTheirProduct(self):
+        """A sheet that is a part's only body is named after its PRODUCT. A part
+        of two sheets, as a NAPA stiffener's web and flange are, keeps the
+        bodies' own names, and each body records its part (customData
+        stepToUsdSolid:product)."""
+        st = self._Convert(_MakeSheetStep(product="P:P1/SHELL_P"), "sheet_named")
+        self.assertEqual([p.GetParent().GetName() for p in self._Breps(st)], ["P_P1_SHELL_P"])
+        st = self._Convert(_MakeSheetStep(sheets=2, product="S:ABC/SHELL_P - Profile"),
+                           "sheet_pair")
+        holders = [p.GetParent() for p in self._Breps(st)]
+        self.assertEqual([h.GetName() for h in holders], ["body_0", "body_1"])
+        for h in holders:
+            self.assertEqual(h.GetCustomDataByKey("stepToUsdSolid:product"),
+                             "S:ABC/SHELL_P - Profile")
+        self._AssertValid(st)
+
+    def test_OrientedOpenShell(self):
+        """A surface model whose shell is a reversed ORIENTED_OPEN_SHELL converts
+        as the sheet of its base shell."""
+        st = self._Convert(_MakeSheetStep(oriented=True), "oriented_open")
+        self.assertEqual(list(self._Breps(st)[0].GetAttribute("region:type").Get()),
+                         ["voidRegion"])
+        self._AssertValid(st)
+
+    def test_SurfaceModelOfAClosedShell(self):
+        """A SHELL_BASED_SURFACE_MODEL bounds no material even when its shell is
+        closed: the box written as one is a single region, the infinite void,
+        whose shell holds both faceuses of all six faces."""
+        st = self._Convert(_MakeBoxStep(surfaceModel=True), "surface_box")
+        prim = self._Breps(st)[0]
+        self.assertEqual(list(prim.GetAttribute("region:type").Get()), ["voidRegion"])
+        self.assertEqual(list(prim.GetAttribute("shell:faceuseCount").Get()), [12])
+        self._AssertValid(st)
+
+    def test_SolidAndSheetInOneFile(self):
+        """A file holding a solid and a sheet converts both."""
+        st = self._Convert(_MakeSheetStep(withBox=True), "solid_and_sheet")
+        regions = sorted(tuple(p.GetAttribute("region:type").Get()) for p in self._Breps(st))
+        self.assertEqual(regions, [("voidRegion",), ("voidRegion", "solidRegion")])
+        self._AssertValid(st)
+
+    def test_ExtentHoldsCurvedGeometry(self):
+        """brep:extent bounds the geometry, not only the vertices: a circle
+        edge's arc, a sphere face's bulge, NURBS control hulls."""
+        b = {"verts": [(10.0, 0.0, 0.0)],
+             "edges": [{"ctok": "BrepCurve3dCircleAPI", "rng": (0.0, 2 * math.pi),
+                        "geom": {"center": (0.0, 0.0, 0.0), "axis": (0.0, 0.0, 1.0),
+                                 "refDirection": (1.0, 0.0, 0.0), "radius": 10.0}},
+                       {"ctok": "BrepCurve3dNurbAPI", "rng": (0.0, 1.0),
+                        "geom": {"nurb": True, "controlVertices": [(0.0, -30.0, 0.0)]}}],
+             "faces": [{"stok": "BrepSurfaceSphereAPI",
+                        "geom": {"center": (0.0, 0.0, 50.0), "axis": (0.0, 0.0, 1.0),
+                                 "refDirection": (1.0, 0.0, 0.0), "radius": 5.0}},
+                       {"stok": "BrepSurfaceNurbAPI",
+                        "geom": {"nurb": True, "controlVertices": [(0.0, 0.0, -20.0)]}}]}
+        lo, hi = stepToUsdSolid.local_extent(stepToUsdSolid.extent_hull(b))
+        for k, (want_lo, want_hi) in enumerate(((-10.0, 10.0), (-30.0, 10.0), (-20.0, 55.0))):
+            self.assertLessEqual(lo[k], want_lo + 1e-9)
+            self.assertGreaterEqual(hi[k], want_hi - 1e-9)
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not

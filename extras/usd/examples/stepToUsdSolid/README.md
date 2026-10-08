@@ -31,19 +31,29 @@ the file contains:
 - **Swept surfaces** — linear extrusion and revolution — lowered to NURBS with
   exact rational-arc control points.
 - **Void shells** (`BREP_WITH_VOIDS` / `ORIENTED_CLOSED_SHELL`) and **vertex loops**.
-- **Sheet bodies** (`SHELL_BASED_SURFACE_MODEL` of `OPEN_SHELL`s, as NAPA Designer
-  exports a plate), in a file with no solid: the infinite void is the only region,
-  each shell holds both faceuses of its faces, and a free edge's one edgeuse is
-  its own radial next. The proposal exempts such shells from the closed-solid rule.
+- **Sheet bodies** (`SHELL_BASED_SURFACE_MODEL`, as NAPA Designer exports a plate),
+  beside any solids the file holds: the infinite void is the only region, each
+  shell holds both faceuses of its faces, and a free edge's one edgeuse is its own
+  radial next. The proposal exempts such shells from the closed-solid rule. A
+  surface model's shells are sheets whether open or closed, and an
+  `ORIENTED_OPEN_SHELL` is read through to its base shell.
 - **Face UV windows** (`face:range`): an analytic face's is derived from its
   trimming edges; a NURBS face, including a lowered swept surface, takes its
   surface's knot domain.
 - **Colors** — per-body and per-face `displayColor` read from STEP styled items.
 
-The plane-angle unit (degrees vs radians), the length unit (written as the stage's
-`metersPerUnit` unless `--meters-per-unit` is given) and the intersection tolerance
-are read from the file (the tolerance from its `UNCERTAINTY_MEASURE`, with a
-bounding-box fallback).
+The plane-angle unit (degrees vs radians), the length unit and the intersection
+tolerance are read from the file. The length unit is the one the context of the
+bodies' representations assigns, so a unit the file declares for something else
+(a density's metre) does not count; an inch or other `CONVERSION_BASED_UNIT` is
+read through its conversion factor. It becomes the stage's `metersPerUnit` unless
+`--meters-per-unit` is given. The tolerance is the file's `UNCERTAINTY_MEASURE`
+over 20, in the file's unit, with a bounding-box fallback; its floors are stated
+in millimetres and scaled to that unit.
+
+`brep:extent` bounds the geometry: the vertices, every NURBS control vertex, the
+rational poles of each circle and ellipse edge, and the box of each sphere and
+torus face. It is loose where a face trims a larger surface.
 
 ## Scope
 
@@ -56,15 +66,20 @@ the parent's. The importer takes the parent from the occurrence itself, through 
 `SHAPE_DEFINITION_REPRESENTATION` that names each product definition's
 representation. Geometry stays in the part's own coordinate system, each placement
 authors its own copy of the part's `BrepArray`s, and an identity placement authors
-no transform. A solid that no placement reaches, like every solid of a file with no
-assembly structure, becomes a top-level prim in its own coordinates.
+no transform. A part's bodies are every body its representations hold, pooled
+over the representations a plain `SHAPE_REPRESENTATION_RELATIONSHIP` joins; an
+occurrence is placed once. A body that no placement reaches, like every body of a
+file with no assembly structure, becomes a top-level prim in its own coordinates.
+When a part's bodies differ in colour, each `BrepArray` takes its own.
 
 A solid's prim is named after the STEP `PRODUCT` of the part it belongs to, so an
 assembly's parts keep their names (`adapter_plate`, `jaw_left`). Names become
 valid USD identifiers (ASCII letters, digits and underscores, no leading digit),
-and a repeated name gets `_1`, `_2`. A part with several solids keeps the solids'
-own names, since one product name cannot tell them apart; a solid with no name
-is `body_<i>`.
+and a repeated name gets `_1`, `_2`. A part with several bodies keeps the bodies'
+own names, since one product name cannot tell them apart; a body with no name
+is `body_<i>`. Each such body records its part in `customData`
+(`stepToUsdSolid:product`, the `PRODUCT` name as the file writes it), so a
+consumer can gather a part's bodies again.
 
 This is a **reference / sample importer**, in the spirit of the Gaussian-splat
 `py3dgsPlyToUsd.py` sample under `extras/imaging/examples/hdParticleField`: enough to
