@@ -46,7 +46,8 @@ _ASSEMBLY = [("rig", "arm", ((100, 0, 0), (0, 0, 1), (0, 1, 0)), _IDENTITY_ITEM)
 
 
 def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
-                 densityMetre=False, surfaceModel=False, solidWorks=False, rootBox=None):
+                 densityMetre=False, surfaceModel=False, solidWorks=False, rootBox=None,
+                 curvesAgainst=False):
     """Return an AP214 STEP file describing the box above, as a string. Each
     face index in reversedFaces is written as a reversed face: its plane's
     normal points into the box and its ADVANCED_FACE same_sense is .F., which
@@ -70,7 +71,11 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
     SHAPE_DEFINITION_REPRESENTATIONs: "joined", one to the root's
     SHAPE_REPRESENTATION and one to an ADVANCED_BREP_SHAPE_REPRESENTATION a
     SHAPE_REPRESENTATION_RELATIONSHIP joins to it; "unjoined", the same solid
-    listed in both, with no relationship."""
+    listed in both, with no relationship. curvesAgainst writes the edges
+    between vertices whose indices sum to an odd number (eight of the
+    twelve) the other way round, end vertex first with same_sense .F., so
+    that each one's LINE runs against it; their ORIENTED_EDGEs flip to
+    match, which leaves every loop running as before."""
     rows, state = [], {"n": 0}
 
     def emit(text):
@@ -94,7 +99,7 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
 
     def box(dx, solidName):
         return _EmitBox(emit, point, direction, unitVector, reversedFaces, dx, solidName,
-                        surfaceModel=surfaceModel)
+                        surfaceModel=surfaceModel, curvesAgainst=curvesAgainst)
 
     wcs = emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
                % (emit(point((0, 0, 0))), emit(direction((0, 0, 1))),
@@ -152,10 +157,11 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
             % "\n".join(rows))
 
 
-def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surfaceModel=False):
+def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surfaceModel=False,
+             curvesAgainst=False):
     """Emit the box above, moved dx along x, as a MANIFOLD_SOLID_BREP named
     solidName (surfaceModel: a SHELL_BASED_SURFACE_MODEL of its CLOSED_SHELL);
-    return its id."""
+    return its id. curvesAgainst: see _MakeBoxStep."""
     V = [(x + dx, y, z) for x, y, z in _V]
     pt = {i: emit(point(v)) for i, v in enumerate(V)}
     vtx = {i: emit("VERTEX_POINT('',#%d)" % pt[i]) for i in range(len(V))}
@@ -164,6 +170,8 @@ def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surface
     # (edge, sense). Sharing the curve is what makes the two faces either side
     # of an edge refer to one BrepArray edge rather than two coincident ones.
     curve, oriented = {}, {}
+    against = lambda key: curvesAgainst and sum(key) % 2 == 1
+    along = lambda i, key: i == (key[1] if against(key) else key[0])
     for loop, _, _ in _FACES:
         for k in range(len(loop)):
             i, j = loop[k], loop[(k + 1) % len(loop)]
@@ -172,9 +180,13 @@ def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surface
                 a, b = key
                 vec = emit("VECTOR('',#%d,1.)" % emit(direction(unit(V[a], V[b]))))
                 line = emit("LINE('',#%d,#%d)" % (pt[a], vec))
-                curve[key] = emit("EDGE_CURVE('',#%d,#%d,#%d,.T.)"
-                                  % (vtx[a], vtx[b], line))
-            sense = (i, j) == key
+                if against(key):
+                    curve[key] = emit("EDGE_CURVE('',#%d,#%d,#%d,.F.)"
+                                      % (vtx[b], vtx[a], line))
+                else:
+                    curve[key] = emit("EDGE_CURVE('',#%d,#%d,#%d,.T.)"
+                                      % (vtx[a], vtx[b], line))
+            sense = along(i, key)
             if (key, sense) not in oriented:
                 oriented[(key, sense)] = emit(
                     "ORIENTED_EDGE('',*,*,#%d,.%s.)"
@@ -189,7 +201,7 @@ def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surface
         for k in range(len(loop)):
             i, j = loop[k], loop[(k + 1) % len(loop)]
             key = (min(i, j), max(i, j))
-            oes.append(oriented[(key, (i, j) == key)])
+            oes.append(oriented[(key, along(i, key))])
         edgeLoop = emit("EDGE_LOOP('',(%s))" % ",".join("#%d" % o for o in oes))
         bound = emit("FACE_OUTER_BOUND('',#%d,.T.)" % edgeLoop)
         placement = emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
@@ -702,6 +714,48 @@ class TestStepToUsdSolid(unittest.TestCase):
             self.assertEqual(sum(1 for n in names if n.startswith("rig")), 1,
                              "%s: %s" % (layout, names))
             self.assertEqual(len(names), 4, "%s: %s" % (layout, names))
+
+    def _LoopRuns(self, stage):
+        """Per face, per loop, the (start, end) vertex positions of each
+        edgeuse in loop order, reading an edgeuse's direction from its
+        orientation against its edge."""
+        prim = self._Breps(stage)[0]
+        get = lambda name: list(prim.GetAttribute(name).Get())
+        pos = [tuple(round(c, 9) for c in p)
+               for p in get("brep:vertexPoint:point:position")]
+        ends = get("edge:vertexIndices")
+        loopCount, euCount = get("face:loopCount"), get("loop:edgeuseCount")
+        euEdge, euOrient = get("edgeuse:edgeIndex"), get("edgeuse:orientationType")
+        faces, li, eo = [], 0, 0
+        for count in loopCount:
+            loops = []
+            for _ in range(count):
+                run = []
+                for j in range(eo, eo + euCount[li]):
+                    a, b = ends[euEdge[j]]
+                    if euOrient[j] == "opposite":
+                        a, b = b, a
+                    run.append((pos[a], pos[b]))
+                loops.append(run)
+                li, eo = li + 1, eo + euCount[li]
+            faces.append(loops)
+        return faces
+
+    def test_EdgeCurveAgainstItsEdge(self):
+        """An EDGE_CURVE whose curve runs against the edge (same_sense .F.):
+        ORIENTED_EDGE's flag is relative to the edge and the USD edge runs
+        along the curve, so the two compose. Written that way, eight of the
+        box's twelve edges leave every loop closed and running as in the
+        plain box."""
+        stage = self._Convert(_MakeBoxStep(curvesAgainst=True), "box_curves_against")
+        runs = self._LoopRuns(stage)
+        for fi, loops in enumerate(runs):
+            for run in loops:
+                self.assertEqual(
+                    [], [k for k in range(len(run)) if run[k][1] != run[(k + 1) % len(run)][0]],
+                    "face %d: loop does not close" % fi)
+        self.assertEqual(runs, self._LoopRuns(self._stage))
+        self._AssertValid(stage)
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not

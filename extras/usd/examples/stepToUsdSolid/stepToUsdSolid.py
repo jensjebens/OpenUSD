@@ -1297,6 +1297,7 @@ def extract_brep(rd, cfg, solid_refs=None):
     brep_faces = []
     sheet = []      # per body: every shell open (a SHELL_BASED_SURFACE_MODEL)
     esamples = {}   # edge index -> cached interior boundary samples (H2b)
+    esense = {}     # edge index -> its EDGE_CURVE's same_sense
 
     def vidx(ref):
         vid = ref[1]
@@ -1335,6 +1336,7 @@ def extract_brep(rd, cfg, solid_refs=None):
             else:
                 rng = edge_range(ctok, cg, verts[s], verts[e])
             emap[eid] = len(edges)
+            esense[len(edges)] = same_sense
             edges.append(dict(v=(s, e), ctok=ctok, geom=cg, rng=rng))
         return emap[eid]
 
@@ -1349,7 +1351,10 @@ def extract_brep(rd, cfg, solid_refs=None):
         for oe in rd.args(loop_ref)[1]:
             a = rd.args(oe)
             ei = eidx(a[3])
-            same = (a[4] == ("enum", "T"))
+            # The flag is relative to the edge, which runs start to end; the
+            # USD edge runs along its curve (eidx), which is the other way
+            # round when the EDGE_CURVE's same_sense is .F.
+            same = (a[4] == ("enum", "T")) == esense[ei]
             edgeuses.append(dict(edge=ei, orient="same" if same else "opposite"))
             n += 1
             eis.append(ei)
