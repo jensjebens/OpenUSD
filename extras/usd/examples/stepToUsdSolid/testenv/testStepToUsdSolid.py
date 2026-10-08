@@ -47,7 +47,7 @@ _ASSEMBLY = [("rig", "arm", ((100, 0, 0), (0, 0, 1), (0, 1, 0)), _IDENTITY_ITEM)
 
 def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
                  densityMetre=False, surfaceModel=False, solidWorks=False, rootBox=None,
-                 curvesAgainst=False):
+                 curvesAgainst=False, cavity=None):
     """Return an AP214 STEP file describing the box above, as a string. Each
     face index in reversedFaces is written as a reversed face: its plane's
     normal points into the box and its ADVANCED_FACE same_sense is .F., which
@@ -75,7 +75,13 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
     between vertices whose indices sum to an odd number (eight of the
     twelve) the other way round, end vertex first with same_sense .F., so
     that each one's LINE runs against it; their ORIENTED_EDGEs flip to
-    match, which leaves every loop running as before."""
+    match, which leaves every loop running as before. cavity, a tuple
+    (normals, flag, mixed), hollows the single box out: a BREP_WITH_VOIDS
+    whose cavity, the cube from 3 to 7 on each axis, is an
+    ORIENTED_CLOSED_SHELL with that flag round a CLOSED_SHELL whose face
+    normals point into the "material" (as ISO 10303-42 writes it) or into
+    the "cavity" (as Onshape does). mixed writes every other cavity face
+    through a plane facing the other way, with same_sense .F."""
     rows, state = [], {"n": 0}
 
     def emit(text):
@@ -99,7 +105,8 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
 
     def box(dx, solidName):
         return _EmitBox(emit, point, direction, unitVector, reversedFaces, dx, solidName,
-                        surfaceModel=surfaceModel, curvesAgainst=curvesAgainst)
+                        surfaceModel=surfaceModel, curvesAgainst=curvesAgainst,
+                        cavity=cavity)
 
     wcs = emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
                % (emit(point((0, 0, 0))), emit(direction((0, 0, 1))),
@@ -158,10 +165,10 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
 
 
 def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surfaceModel=False,
-             curvesAgainst=False):
+             curvesAgainst=False, cavity=None):
     """Emit the box above, moved dx along x, as a MANIFOLD_SOLID_BREP named
     solidName (surfaceModel: a SHELL_BASED_SURFACE_MODEL of its CLOSED_SHELL);
-    return its id. curvesAgainst: see _MakeBoxStep."""
+    return its id. curvesAgainst and cavity: see _MakeBoxStep."""
     V = [(x + dx, y, z) for x, y, z in _V]
     pt = {i: emit(point(v)) for i, v in enumerate(V)}
     vtx = {i: emit("VERTEX_POINT('',#%d)" % pt[i]) for i in range(len(V))}
@@ -214,7 +221,50 @@ def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surface
     shell = emit("CLOSED_SHELL('',(%s))" % ",".join("#%d" % f for f in faces))
     if surfaceModel:
         return emit("SHELL_BASED_SURFACE_MODEL('%s',(#%d))" % (solidName, shell))
+    if cavity:
+        normals, flag, mixed = cavity
+        inner = _EmitCube(emit, point, direction, unit, 3.0, 7.0,
+                          inward=normals == "cavity", mixed=mixed)
+        return emit("BREP_WITH_VOIDS('%s',#%d,(#%d))" % (
+            solidName, shell, emit("ORIENTED_CLOSED_SHELL('',*,#%d,.%s.)" % (inner, flag))))
     return emit("MANIFOLD_SOLID_BREP('%s',#%d)" % (solidName, shell))
+
+
+def _EmitCube(emit, point, direction, unit, lo, hi, inward=False, mixed=False):
+    """Emit the cube from lo to hi on each axis as a CLOSED_SHELL, its face
+    normals pointing out of it (inward: into it); return its id. mixed
+    writes every other face through a plane facing the other way, with
+    same_sense .F."""
+    V = [tuple(lo + (hi - lo) * c / _S for c in v) for v in _V]
+    pt = {i: emit(point(v)) for i, v in enumerate(V)}
+    vtx = {i: emit("VERTEX_POINT('',#%d)" % pt[i]) for i in range(len(V))}
+    curve = {}
+
+    def oriented(i, j):
+        key = (min(i, j), max(i, j))
+        if key not in curve:
+            a, b = key
+            vec = emit("VECTOR('',#%d,1.)" % emit(direction(unit(V[a], V[b]))))
+            curve[key] = emit("EDGE_CURVE('',#%d,#%d,#%d,.T.)" % (
+                vtx[a], vtx[b], emit("LINE('',#%d,#%d)" % (pt[a], vec))))
+        return emit("ORIENTED_EDGE('',*,*,#%d,.%s.)"
+                    % (curve[key], "T" if (i, j) == key else "F"))
+
+    faces = []
+    for index, (loop, normal, udir) in enumerate(_FACES):
+        if inward:
+            loop, normal = loop[::-1], tuple(-c for c in normal)
+        reverse = mixed and index % 2 == 1
+        if reverse:
+            normal = tuple(-c for c in normal)
+        edgeLoop = emit("EDGE_LOOP('',(%s))" % ",".join(
+            "#%d" % oriented(loop[k], loop[(k + 1) % len(loop)]) for k in range(len(loop))))
+        placement = emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
+                         % (pt[loop[0]], emit(direction(normal)), emit(direction(udir))))
+        faces.append(emit("ADVANCED_FACE('',(#%d),#%d,.%s.)" % (
+            emit("FACE_OUTER_BOUND('',#%d,.T.)" % edgeLoop),
+            emit("PLANE('',#%d)" % placement), "F" if reverse else "T")))
+    return emit("CLOSED_SHELL('',(%s))" % ",".join("#%d" % f for f in faces))
 
 
 def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent, newContext=None,
@@ -372,6 +422,37 @@ def _MakeSheetStep(sheets=1, product=None, oriented=False, uncertainty=1.e-3, wi
             "FILE_NAME('sheet.step','2026-01-01T00:00:00',(''),(''),'','','');\n"
             "FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));\n"
             "ENDSEC;\nDATA;\n%s\nENDSEC;\nEND-ISO-10303-21;\n" % "\n".join(rows))
+
+
+def _Frame(axis):
+    z = tuple(c / math.sqrt(sum(a * a for a in axis)) for c in axis)
+    t = (1.0, 0.0, 0.0) if abs(z[0]) < 0.9 else (0.0, 1.0, 0.0)
+    d = sum(a * b for a, b in zip(t, z))
+    x = tuple(t[k] - d * z[k] for k in range(3))
+    x = tuple(c / math.sqrt(sum(a * a for a in x)) for c in x)
+    y = (z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0])
+    return x, y, z
+
+
+def _Circle(centre, axis, radius, reverse=False, n=360):
+    """n points round a circle, counter-clockwise about axis (reverse:
+    clockwise)."""
+    x, y, _ = _Frame(axis)
+    ts = [2.0 * math.pi * k / n for k in range(n)]
+    if reverse:
+        ts = ts[::-1]
+    return [tuple(centre[k] + radius * (math.cos(t) * x[k] + math.sin(t) * y[k])
+                  for k in range(3)) for t in ts]
+
+
+def _TorusMeridian(R, r, u, ascending, n=360):
+    """The tube's cross-section at angle u of a torus about z through the
+    origin, run with v rising (ascending) or falling."""
+    vs = [2.0 * math.pi * k / n for k in range(n)]
+    if not ascending:
+        vs = vs[::-1]
+    return [((R + r * math.cos(v)) * math.cos(u), (R + r * math.cos(v)) * math.sin(u),
+             r * math.sin(v)) for v in vs]
 
 
 def _SolidValidators():
@@ -756,6 +837,115 @@ class TestStepToUsdSolid(unittest.TestCase):
                     "face %d: loop does not close" % fi)
         self.assertEqual(runs, self._LoopRuns(self._stage))
         self._AssertValid(stage)
+
+    def _RegionVolumes(self, stage):
+        """Each region's volume, read from the sides its faceuses are on, for
+        a BrepArray of planar faces. A faceuse lies on its region's side of
+        its face, so the region's outward normal there points the other way."""
+        prim = self._Breps(stage)[0]
+        get = lambda name: list(prim.GetAttribute(name).Get())
+        axis = get("brep:surface:plane:axis")
+        runs = self._LoopRuns(stage)
+        shellCount, fuCount = get("region:shellCount"), get("shell:faceuseCount")
+        fuFace, fuOrient = get("faceuse:faceIndex"), get("faceuse:orientationType")
+
+        def flux(fi, sign):
+            # x.N over a planar face: its plane's offset times its area.
+            pts = [a for a, _ in runs[fi][0]]
+            va = [0.0, 0.0, 0.0]
+            for p, q in zip(pts, pts[1:] + pts[:1]):
+                va[0] += 0.5 * (p[1] * q[2] - p[2] * q[1])
+                va[1] += 0.5 * (p[2] * q[0] - p[0] * q[2])
+                va[2] += 0.5 * (p[0] * q[1] - p[1] * q[0])
+            area = math.sqrt(sum(c * c for c in va))
+            return sign * sum(a * b for a, b in zip(pts[0], axis[fi])) * area
+
+        vols, fu, sh = [], 0, 0
+        for count in shellCount:
+            v = 0.0
+            for _ in range(count):
+                for j in range(fu, fu + fuCount[sh]):
+                    v -= flux(fuFace[j], 1.0 if fuOrient[j] == "same" else -1.0) / 3.0
+                fu, sh = fu + fuCount[sh], sh + 1
+            vols.append(round(v, 6))
+        return vols
+
+    def test_CavityFacesTheRightWay(self):
+        """A cavity wall's sides come from the volume its face normals
+        enclose, not from its ORIENTED_CLOSED_SHELL's flag. ISO 10303-42's
+        encoding (normals into the material, .F.), Spatial InterOp's (the same
+        with .T.), Onshape's (normals into the cavity, .F.) and the fourth all
+        give the exterior, the solid and the cavity regions -1000, 936 and 64
+        mm3, with every other face written either way round or not."""
+        for normals in ("material", "cavity"):
+            for flag in ("F", "T"):
+                for mixed in (False, True):
+                    name = "hollow_%s_%s%s" % (normals, flag, "_mixed" if mixed else "")
+                    stage = self._Convert(_MakeBoxStep(cavity=(normals, flag, mixed)), name)
+                    self.assertEqual(self._RegionVolumes(stage), [-1000.0, 936.0, 64.0], name)
+                    self._AssertValid(stage)
+
+    def test_ShellVolumeOfCurvedFaces(self):
+        """shell_volume, which orients a cavity, integrates each kind of
+        surface to the volume its shell encloses, positive for normals out of
+        it and negative for normals into it: a cylinder closed by two discs, a
+        cone from its apex closed by a disc, a sphere as one face and as two
+        halves cut through its poles, and a torus as one face, as two halves cut
+        across its tube and as two cut along it. A NURBS face that is not flat
+        leaves it unknown."""
+        S = stepToUsdSolid
+        o, z = (3.0, 4.0, 0.0), (0.0, 0.0, 1.0)
+        x = (1.0, 0.0, 0.0)
+        t30 = math.tan(math.pi / 6.0)
+        sphere = dict(center=(1.0, 2.0, 3.0), axis=z, refDirection=x, radius=2.0)
+        torus = dict(origin=(0.0, 0.0, 0.0), axis=z, refDirection=x, majorRadius=5.0,
+                     minorRadius=1.0)
+        plane = lambda p, n: ("BrepSurfacePlaneAPI", dict(origin=p, axis=n, refDirection=(
+            (1.0, 0.0, 0.0) if abs(n[0]) < 0.9 else (0.0, 1.0, 0.0))))
+        at = lambda h: (o[0], o[1], h)
+        shells = {
+            "cylinder": (math.pi * 4.0 * 5.0, [
+                plane(at(1.0), (0, 0, -1)) + ([_Circle(at(1.0), z, 2.0, reverse=True)],),
+                plane(at(6.0), z) + ([_Circle(at(6.0), z, 2.0)],),
+                ("BrepSurfaceCylinderAPI", dict(origin=o, axis=z, refDirection=x, radius=2.0),
+                 [_Circle(at(1.0), z, 2.0), _Circle(at(6.0), z, 2.0, reverse=True)])]),
+            "cone": (math.pi * 3.0, [
+                ("BrepSurfaceConeAPI", dict(origin=at(3.0), axis=z, refDirection=x,
+                                            radius=3.0 * t30, semiAngle=math.pi / 6.0),
+                 [_Circle(at(3.0), z, 3.0 * t30, reverse=True)]),
+                plane(at(3.0), z) + ([_Circle(at(3.0), z, 3.0 * t30)],)]),
+            "sphere": (4.0 / 3.0 * math.pi * 8.0, [
+                ("BrepSurfaceSphereAPI", sphere, [])]),
+            "sphere halves": (4.0 / 3.0 * math.pi * 8.0, [
+                ("BrepSurfaceSphereAPI", sphere, [_Circle(sphere["center"], (0, 1, 0), 2.0)]),
+                ("BrepSurfaceSphereAPI", sphere,
+                 [_Circle(sphere["center"], (0, 1, 0), 2.0, reverse=True)])]),
+            "torus": (2.0 * math.pi ** 2 * 5.0, [("BrepSurfaceTorusAPI", torus, [])]),
+            "torus across": (2.0 * math.pi ** 2 * 5.0, [
+                ("BrepSurfaceTorusAPI", torus, [_TorusMeridian(5.0, 1.0, 0.0, False),
+                                                _TorusMeridian(5.0, 1.0, math.pi, True)]),
+                ("BrepSurfaceTorusAPI", torus, [_TorusMeridian(5.0, 1.0, math.pi, False),
+                                                _TorusMeridian(5.0, 1.0, 0.0, True)])]),
+            "torus along": (2.0 * math.pi ** 2 * 5.0, [
+                ("BrepSurfaceTorusAPI", torus, [_Circle((0, 0, -1.0), z, 5.0),
+                                                _Circle((0, 0, 1.0), z, 5.0, reverse=True)]),
+                ("BrepSurfaceTorusAPI", torus, [_Circle((0, 0, 1.0), z, 5.0),
+                                                _Circle((0, 0, -1.0), z, 5.0, reverse=True)])]),
+        }
+        for name, (volume, faces) in shells.items():
+            for sense in (True, False):
+                b = dict(faces=[dict(flux=S.face_flux(
+                    stok, sg, sense, loops if sense else [lp[::-1] for lp in loops]))
+                    for stok, sg, loops in faces])
+                got = S.shell_volume(b, range(len(faces)))
+                self.assertIsNotNone(got, name)
+                self.assertAlmostEqual(got / volume, 1.0 if sense else -1.0, 3,
+                                       "%s %s: %s" % (name, sense, got))
+        square = [[(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]]
+        flat, saddle = ([(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, h)] for h in (0.0, 1.0))
+        nurb = lambda cvs: dict(nurb=True, controlVertices=cvs)
+        self.assertIsNotNone(S.face_flux("BrepSurfaceNurbAPI", nurb(flat), True, square))
+        self.assertIsNone(S.face_flux("BrepSurfaceNurbAPI", nurb(saddle), True, square))
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not
