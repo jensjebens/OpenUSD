@@ -4,8 +4,8 @@
 stepToUsdSolid -- convert a STEP (ISO 10303-21/-42) file to a UsdSolid B-rep stage.
 
 A reference importer for the UsdSolid schema: it reads a STEP part or assembly and
-writes one Xform + BrepArray prim per solid, authored through the pxr UsdSolid
-schema API. It is pure Python plus USD -- no CAD kernel is involved -- so it
+writes one Xform + BrepArray prim per body (solid or sheet), authored through the
+pxr UsdSolid schema API. It is pure Python plus USD -- no CAD kernel is involved -- so it
 doubles as a self-contained way to produce B-rep test data for the schema and its
 validators.
 
@@ -15,16 +15,20 @@ The converter has no modes to choose. It handles planar/cylindrical/conical/
 spherical/toroidal analytic surfaces, line/circle/ellipse curves (bare or wrapped in
 SURFACE_CURVE / SEAM_CURVE), and NURBS surfaces and curves; lowers swept surfaces
 (linear extrusion, revolution) to NURBS; resolves void shells (BREP_WITH_VOIDS /
-ORIENTED_CLOSED_SHELL) and vertex loops; derives the parametric UV window of each
+ORIENTED_CLOSED_SHELL) and vertex loops; converts sheet bodies
+(SHELL_BASED_SURFACE_MODEL) beside solids; derives the parametric UV window of each
 analytic face from its trimming edges (a NURBS face takes its surface's knot
 domain); and reads per-body / per-face colors from STEP styled items. The
-plane-angle unit and the tolerance are read from the file.
+plane-angle unit, the length unit (from the context of the bodies'
+representations) and the tolerance are read from the file.
 
 Scope: an assembly comes through as one Xform per NEXT_ASSEMBLY_USAGE_OCCURRENCE
-placement, with the part's solids as BrepArray children; a file with no assembly
-structure maps each solid to a top-level prim in world coordinates. A solid
-that is its part's only solid is named after the part's STEP PRODUCT; every
-name is made a valid, unique USD name (product_names, _prim_name). This is a
+placement, with the part's bodies as BrepArray children; a body no placement
+reaches, like every body of a file with no assembly structure, is a top-level
+prim in its own coordinates. A body that is its part's only body is named after
+the part's STEP PRODUCT, and a body of a part with several records the part in
+its customData (body_products); every name is made a valid, unique USD name
+(product_names, _prim_name). This is a
 reference/sample importer, like the gsplat ply-to-usd sample -- not a production
 STEP importer.
 """
@@ -141,7 +145,8 @@ PAD_MIN = 1e-4
 # MIN_INTERSECT_TOL floors the tolerance derived from a file's own
 # UNCERTAINTY_MEASURE. Real CAD vertices meet to about 1e-6 of model scale;
 # a file declaring far tighter agreement than it delivers would otherwise
-# make every endpoint check fail.
+# make every endpoint check fail. It is a length in millimetres, scaled to the
+# file's length unit (derive_tolerance), as is Config's NURBS end-weld floor.
 MIN_INTERSECT_TOL = 5e-4        # millimetres
 
 class Reader:
@@ -170,15 +175,23 @@ class Config:
     There are no behavior modes. Every correctness fix in this reader is applied
     unconditionally; each one is a no-op when the STEP construct it handles is
     absent (a file with no swept surfaces never lowers one, a file with no void
-    shells never resolves one, and so on). The only things that legitimately vary
-    from file to file are the plane-angle unit and the tolerance ladder, and both
-    are derived from the file (see detect_angle_scale / derive_tolerance).
+    shells never resolves one, and so on). The things that legitimately vary from
+    file to file are the plane-angle unit, the length unit and the tolerance
+    ladder, all derived from the file (detect_angle_scale,
+    detect_meters_per_unit, derive_tolerance). Absolute lengths are stated in
+    millimetres and scaled to the file's unit (``mm``).
     """
-    def __init__(self, angle_scale=1.0, intersect_tol=1e-6):
+    def __init__(self, angle_scale=1.0, intersect_tol=1e-6, meters_per_unit=0.001,
+                 accuracy=None):
         self.angle_scale = angle_scale        # raw STEP plane-angle -> radians
         self.intersect_tol = intersect_tol    # brep:intersectTol3d
         self.edge_degen_tol = intersect_tol   # degenerate-edge stub tolerance
-        self.inv_accept = max(1e-3, intersect_tol * 10.0)  # NURBS endpoint weld
+        # Model units per millimetre: the lengths below are stated in mm.
+        self.mm = 0.001 / float(meters_per_unit or 0.001)
+        # NURBS endpoint weld: an authored hull end this close to its vertex is
+        # moved onto it. Never less than the accuracy the file declares
+        # (accuracy, model units): points the producer calls the same are.
+        self.inv_accept = max(1e-3 * self.mm, intersect_tol * 10.0, accuracy or 0.0)
         # Distance at which an authored control hull end is deemed already at a
         # vertex (skip the trim). A fixed geometric snap, independent of the
         # per-file tolerance, so which edges get hull-trimmed stays stable.
@@ -208,9 +221,109 @@ def detect_angle_scale(rd, ents):
                     return math.pi/180.0
     return 1.0
 
-def detect_length_uncertainty(rd, ents):
-    """File's declared length uncertainty in model units (mm), the producer's real
-    endpoint-agreement tolerance. Returns (value, source_str) or (None,'absent')."""
+_SI_PREFIX = {"EXA": 1e18, "PETA": 1e15, "TERA": 1e12, "GIGA": 1e9, "MEGA": 1e6,
+              "KILO": 1e3, "HECTO": 1e2, "DECA": 1e1, "DECI": 1e-1, "CENTI": 1e-2,
+              "MILLI": 1e-3, "MICRO": 1e-6, "NANO": 1e-9, "PICO": 1e-12,
+              "FEMTO": 1e-15, "ATTO": 1e-18}
+
+#: The representations a body (MANIFOLD_SOLID_BREP, BREP_WITH_VOIDS,
+#: SHELL_BASED_SURFACE_MODEL) hangs off; each names its context, and the
+#: context its units.
+_BODY_REPRESENTATIONS = ("ADVANCED_BREP_SHAPE_REPRESENTATION",
+                         "MANIFOLD_SURFACE_SHAPE_REPRESENTATION", "SHAPE_REPRESENTATION")
+_BODY_TYPES = ("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS", "SHELL_BASED_SURFACE_MODEL")
+
+def _measure_value(x):
+    """The number in a typed measure parameter, LENGTH_MEASURE(25.4) as the
+    parser keeps it, or a bare number; None otherwise."""
+    if isinstance(x, (int, float)):
+        return float(x)
+    if isinstance(x, str) and "(" in x:
+        try:
+            return float(x[x.index("(") + 1:x.rindex(")")])
+        except ValueError:
+            return None
+    return None
+
+def length_unit_mpu(rd, ref, depth=0):
+    """Metres per unit of the LENGTH_UNIT at ref: an SI metre with its prefix,
+    or a CONVERSION_BASED_UNIT through the measure it names (an inch is read
+    as 25.4 of the millimetre it is defined against, never assumed from its
+    name). None for anything else."""
+    e = rd.get(ref)
+    if not e or e[0] != "__COMPLEX__" or depth > 8:
+        return None
+    subs = dict(e[1])
+    if "LENGTH_UNIT" not in subs:
+        return None
+    si = subs.get("SI_UNIT")
+    if si and si[-1] == ("enum", "METRE"):
+        pre = si[0]
+        return _SI_PREFIX.get(pre[1]) if isinstance(pre, tuple) else 1.0
+    cbu = subs.get("CONVERSION_BASED_UNIT")
+    if cbu and len(cbu) > 1 and isinstance(cbu[1], tuple):
+        m = rd.get(cbu[1])
+        margs = None
+        if m and m[0] in ("LENGTH_MEASURE_WITH_UNIT", "MEASURE_WITH_UNIT"):
+            margs = m[1]
+        elif m and m[0] == "__COMPLEX__":
+            margs = dict(m[1]).get("MEASURE_WITH_UNIT")
+        if margs and len(margs) > 1:
+            v = _measure_value(margs[0])
+            base = length_unit_mpu(rd, margs[1], depth + 1)
+            if v and base:
+                return v * base
+    return None
+
+def _context_length_mpu(rd, ctx):
+    """Metres per unit of the length unit a representation context assigns
+    (GLOBAL_UNIT_ASSIGNED_CONTEXT), or None."""
+    units = _complex_parts(rd, ctx).get("GLOBAL_UNIT_ASSIGNED_CONTEXT")
+    for u in (units[0] if units and isinstance(units[0], list) else []):
+        mpu = length_unit_mpu(rd, u)
+        if mpu:
+            return mpu
+    return None
+
+def detect_meters_per_unit(rd, ents, body_ids=None):
+    """Metres per model length unit: the length unit of the context of the
+    representations that hold the bodies converted (body_ids; every body of
+    the file when None). A unit the file declares for anything else, such as
+    the metre of a material density, does not count. Where those
+    representations disagree, the first body's wins, with a warning: each part
+    would need its own scale. Without a body representation that names one,
+    the length unit of the file's geometric contexts, if they agree. None
+    where neither gives a unit."""
+    if body_ids is None:
+        body_ids = rd.find(*_BODY_TYPES)
+    ids = set(body_ids)
+    found = []
+    for r in rd.find(*_BODY_REPRESENTATIONS):
+        a = rd.args(("ref", r))
+        items = a[1] if len(a) > 1 and isinstance(a[1], list) else []
+        if len(a) > 2 and isinstance(a[2], tuple) and any(
+                isinstance(x, tuple) and x[0] == "ref" and x[1] in ids for x in items):
+            mpu = _context_length_mpu(rd, a[2])
+            if mpu:
+                found.append(mpu)
+    if not found:
+        found = sorted({m for i, (t, a) in ents.items()
+                        if t == "__COMPLEX__" and any(n == "GEOMETRIC_REPRESENTATION_CONTEXT"
+                                                      for n, _ in a)
+                        for m in [_context_length_mpu(rd, ("ref", i))] if m})
+        if len(found) != 1:
+            return None
+    if len(set(found)) > 1:
+        print(f"  warning: the bodies' representations declare different length units "
+              f"({', '.join(f'{m:g} m' for m in sorted(set(found)))}); using the first, "
+              f"{found[0]:g} m")
+    return found[0]
+
+def detect_length_uncertainty(rd, ents, meters_per_unit=None):
+    """File's declared length uncertainty in model units, the producer's real
+    endpoint-agreement tolerance: its UNCERTAINTY_MEASURE_WITH_UNIT, converted
+    from the length unit it names when that is not the model's
+    (meters_per_unit). Returns (value, source_str) or (None,'absent')."""
     best = None
     for i, (t, a) in ents.items():
         if t == "UNCERTAINTY_MEASURE_WITH_UNIT":
@@ -222,6 +335,9 @@ def detect_length_uncertainty(rd, ents):
             elif isinstance(raw, (int, float)):
                 val = float(raw)
             if val is not None and val > 0:
+                umpu = length_unit_mpu(rd, a[1]) if len(a) > 1 and isinstance(a[1], tuple) else None
+                if umpu and meters_per_unit:
+                    val = val * umpu / float(meters_per_unit)
                 nm = ""
                 for x in a[1:]:
                     if isinstance(x, str) and "ACCURACY" in x.upper():
@@ -1091,10 +1207,16 @@ def _edge_interior_samples(edge, verts, n_nurb=9):
     return []
 
 # ================================================================ shell resolution
+#: Every shell a body's boundary may name.
+_SHELL_TYPES = ("CLOSED_SHELL", "OPEN_SHELL", "ORIENTED_CLOSED_SHELL", "ORIENTED_OPEN_SHELL")
+
 def _resolve_shell_faces(rd, sh_ref):
     """Return the ADVANCED_FACE refs for a shell, unwrapping an
-    ORIENTED_CLOSED_SHELL (a void boundary) to its base CLOSED_SHELL."""
-    if rd.typ(sh_ref) == "ORIENTED_CLOSED_SHELL":
+    ORIENTED_CLOSED_SHELL (a void boundary) or an ORIENTED_OPEN_SHELL to its
+    base shell. The orientation flag is not applied here: a sheet's shell
+    carries both faceuses of every face (pack_regions), so in UsdSolid a
+    reversed open shell is the same sheet."""
+    if rd.typ(sh_ref) in ("ORIENTED_CLOSED_SHELL", "ORIENTED_OPEN_SHELL"):
         base = rd.args(sh_ref)[2]
         return rd.args(base)[1]
     return rd.args(sh_ref)[1]
@@ -1166,13 +1288,14 @@ def extract_brep(rd, cfg, solid_refs=None):
     top-level solids; pass a single ref to extract one body of an assembly. cfg
     carries the per-file plane-angle scale and tolerances."""
     if solid_refs is None:
-        solid_refs = rd.find("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS") or rd.find("SHELL_BASED_SURFACE_MODEL")
+        solid_refs = rd.find(*_BODY_TYPES)
     if not solid_refs:
         raise SystemExit("no MANIFOLD_SOLID_BREP / shell model found")
     vmap, emap = {}, {}
     verts, edges, edgeuses, loops, faces = [], [], [], [], []
     loop_vidx = []
     brep_faces = []
+    sheet = []      # per body: every shell open (a SHELL_BASED_SURFACE_MODEL)
     esamples = {}   # edge index -> cached interior boundary samples (H2b)
 
     def vidx(ref):
@@ -1235,9 +1358,8 @@ def extract_brep(rd, cfg, solid_refs=None):
     for solid in solid_refs:
         sa = rd.args(("ref", solid))
         shell_refs = []
-        shell_types = ("CLOSED_SHELL", "OPEN_SHELL", "ORIENTED_CLOSED_SHELL")
         for x in sa[1:]:
-            if isinstance(x, tuple) and x[0] == "ref" and rd.typ(x) in shell_types:
+            if isinstance(x, tuple) and x[0] == "ref" and rd.typ(x) in _SHELL_TYPES:
                 shell_refs.append(x)
             elif isinstance(x, list):
                 shell_refs += [y for y in x if isinstance(y, tuple) and y[0] == "ref"]
@@ -1306,6 +1428,9 @@ def extract_brep(rd, cfg, solid_refs=None):
                                   rng=rng))
                 solid_faces[-1].append(fi)
         brep_faces.append(solid_faces)
+        # A surface model is a sheet whatever its shells are: a CLOSED_SHELL in
+        # it bounds no material (ISO 10303-42 shell_based_surface_model).
+        sheet.append(rd.typ(("ref", solid)) == "SHELL_BASED_SURFACE_MODEL")
 
     dropped = _drop_subtolerance_edges(verts, edges, edgeuses, loops, loop_vidx,
                                        faces, cfg)
@@ -1327,7 +1452,7 @@ def extract_brep(rd, cfg, solid_refs=None):
             edgeuses[idx]["entry"] = "topEntry" if edgeuses[idx]["orient"] == "same" else "bottomEntry"
 
     return dict(verts=verts, edges=edges, edgeuses=edgeuses, loops=loops, faces=faces,
-                brep_faces=brep_faces, by_edge=by_edge, loop_vidx=loop_vidx,
+                brep_faces=brep_faces, sheet=sheet, by_edge=by_edge, loop_vidx=loop_vidx,
                 dropped_edges=dropped, seam_edges=seams, reversed_faces=reversed_faces)
 
 # ================================================================ region packing
@@ -1345,6 +1470,11 @@ def pack_regions(b):
     Each face contributes one faceuse to the region on either side of it: the
     outer shell faces the infinite void and the solid, a cavity wall faces the
     solid and that cavity.
+
+    A sheet body (a SHELL_BASED_SURFACE_MODEL, of open shells as NAPA Designer
+    exports a plate, or of closed ones) encloses no material: the proposal supports it and exempts
+    its shells from the closed-solid rule. It packs as the infinite void
+    alone, each shell holding both faceuses of each of its faces.
     """
     regionCount, regionType, regionShellCount, shellFaceuseCount = [], [], [], []
     fuFaceIndex, fuOrient = [], []
@@ -1366,7 +1496,17 @@ def pack_regions(b):
             side = outward == b["faces"][fi]["sense"]
             fuOrient.append("same" if side else "opposite")
 
-    for shells in b["brep_faces"]:
+    for k, shells in enumerate(b["brep_faces"]):
+        if (b.get("sheet") or [False] * (k + 1))[k]:
+            regionCount.append(1)
+            regionType.append("voidRegion")
+            regionShellCount.append(len(shells))
+            for sh in shells:
+                shellFaceuseCount.append(2 * len(sh))
+                for fi in sh:
+                    fuFaceIndex += [fi, fi]
+                    fuOrient += ["same", "opposite"]
+            continue
         outer, voids = shells[0], shells[1:]
         regionCount.append(2 + len(voids))
         regionType += ["voidRegion", "solidRegion"] + ["voidRegion"] * len(voids)
@@ -1606,7 +1746,8 @@ def self_check(b):
     if sum(reg["shellFaceuseCount"]) != len(reg["fuFaceIndex"]): errs.append("sum(shell:faceuseCount) != #faceuses")
     if len(reg["fuFaceIndex"]) != 2*len(b["faces"]): errs.append("#faceuses != 2 x #faces")
     if any(not (0 <= fi < len(b["faces"])) for fi in reg["fuFaceIndex"]): errs.append("faceuse:faceIndex OOB")
-    bad = {ei: len(g) for ei, g in b["by_edge"].items() if len(g) != 2}
+    uses = (1, 2) if any(b.get("sheet") or []) else (2,)   # a sheet's free edges have one
+    bad = {ei: len(g) for ei, g in b["by_edge"].items() if len(g) not in uses}
     if bad: errs.append(f"non-manifold edges: {dict(list(bad.items())[:4])}")
     for e in b["edges"]:
         g = e["geom"]
@@ -1620,6 +1761,42 @@ def self_check(b):
     return errs
 
 # ================================================================ extent
+def extent_hull(b):
+    """Points whose box bounds every edge and face of the brep dict b: its
+    vertices; every NURBS control vertex (a NURBS curve or surface with
+    positive weights lies in its control hull, and BrepArrayContainment
+    checks the control vertices against the extent); the rational poles of
+    each circle and ellipse edge over its range, which hold the arc the same
+    way; and the box of each sphere and torus face, whose surface can bulge
+    past its boundary. A plane, cylinder or cone face lies within the hull of
+    its boundary edges, so these cover it."""
+    hull = list(b["verts"])
+    for e in b["edges"]:
+        g = e["geom"]
+        if g.get("nurb"):
+            hull += list(g["controlVertices"])
+        elif e["ctok"] in ("BrepCurve3dCircleAPI", "BrepCurve3dEllipseAPI") and e.get("rng"):
+            z, x = vnorm(g["axis"]), vnorm(g["refDirection"])
+            y = vcross(z, x)
+            rx = g.get("radius", g.get("xRadius"))
+            ry = g.get("radius", g.get("yRadius"))
+            a0, a1 = e["rng"]
+            if a1 > a0:
+                hull += _arc_poles(g["center"], x, y, rx, ry, a0, a1)["poles"]
+    for f in b["faces"]:
+        g, stok = f["geom"], f["stok"]
+        if g.get("nurb"):
+            hull += list(g["controlVertices"])
+        elif stok in ("BrepSurfaceSphereAPI", "BrepSurfaceTorusAPI"):
+            o = g.get("center", g.get("origin"))
+            z, x = vnorm(g["axis"]), vnorm(g["refDirection"])
+            y = vcross(z, x)
+            r = g["radius"] if stok == "BrepSurfaceSphereAPI" else g["majorRadius"] + g["minorRadius"]
+            h = g["radius"] if stok == "BrepSurfaceSphereAPI" else g["minorRadius"]
+            hull += [tuple(o[k] + sx * r * x[k] + sy * r * y[k] + sz * h * z[k] for k in range(3))
+                     for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]
+    return hull
+
 def local_extent(verts):
     if not verts: return ((0., 0., 0.), (0., 0., 0.))
     mn = [min(v[k] for v in verts) for k in range(3)]
@@ -1770,7 +1947,7 @@ def author_brep(stage, path, b, cfg, face_colors=None):
         sn.CreateSurfaceWeightsAttr(_dbl([w for g in ns for w in g["weights"]]))
 
     # ---- extent + optional per-face color ----
-    mn, mx = local_extent(verts)
+    mn, mx = local_extent(extent_hull(b))
     ba.CreateBrepExtentAttr(_v3d([mn, mx]))
     ba.CreateExtentAttr(_v3f([mn, mx]))
     if face_colors and len(face_colors) == nfaces and len(set(face_colors)) > 1:
@@ -1780,12 +1957,15 @@ def author_brep(stage, path, b, cfg, face_colors=None):
     return ba
 
 # ================================================================ per-file setup
-def derive_tolerance(rd, ents):
-    """The brep:intersectTol3d for a file: the producer's declared endpoint
-    agreement (UNCERTAINTY_MEASURE) divided by 20 and floored at MIN_INTERSECT_TOL. When the
-    file declares no uncertainty, fall back to 1e-5 x the model bounding-box
-    diagonal, then to 1e-3. Returns (tol, uncertainty, source_string)."""
-    unc, usrc = detect_length_uncertainty(rd, ents)
+def derive_tolerance(rd, ents, meters_per_unit=0.001):
+    """The brep:intersectTol3d for a file, in its model units: the producer's
+    declared endpoint agreement (UNCERTAINTY_MEASURE) divided by 20 and floored
+    at MIN_INTERSECT_TOL. When the file declares no uncertainty, fall back to
+    1e-5 x the model bounding-box diagonal, then to 1e-3 mm. The millimetre
+    floors scale with the file's length unit (meters_per_unit). Returns (tol,
+    uncertainty, source_string)."""
+    mm = 0.001 / float(meters_per_unit or 0.001)       # model units per millimetre
+    unc, usrc = detect_length_uncertainty(rd, ents, meters_per_unit)
     if unc is None:
         pts = [rd.point(("ref", i)) for i, (t, a) in ents.items()
                if t == "CARTESIAN_POINT" and len(a) > 1 and isinstance(a[1], list) and len(a[1]) == 3]
@@ -1796,9 +1976,9 @@ def derive_tolerance(rd, ents):
             unc = 1e-5 * diag
             usrc = f"fallback 1e-5*bboxDiag({diag:.0f})"
         else:
-            unc = 1e-3
+            unc = 1e-3 * mm
             usrc = "fallback default"
-    return max(MIN_INTERSECT_TOL, unc / 20.0), unc, usrc
+    return max(MIN_INTERSECT_TOL * mm, unc / 20.0), unc, usrc
 
 # ================================================================ assembly graph
 def _a2p_matrix(rd, ref):
@@ -1819,24 +1999,30 @@ def _mat_mul(A, B):
 
 _IDENTITY = ((1.0,0.0,0.0), (0.0,1.0,0.0), (0.0,0.0,1.0), (0.0,0.0,0.0))
 
-def _idt_matrix(rd, idt_ref):
-    """ITEM_DEFINED_TRANSFORMATION maps its first placement onto its second, so
-    the placement is `to * from^-1`."""
-    a = rd.args(idt_ref)
+def _frame_inverse(F):
+    """The inverse of a rigid (x, y, z, origin) frame: rotation R transposed,
+    origin -R^T o."""
+    x, y, z, o = F
+    return (tuple((x[k], y[k], z[k]) for k in range(3))
+            + ((-vdot(x, o), -vdot(y, o), -vdot(z, o)),))
+
+def _is_identity(M, tol=1e-12):
+    return all(abs(M[i][k] - _IDENTITY[i][k]) <= tol for i in range(4) for k in range(3))
+
+def _idt_matrix(rd, idt_ref, rep1_is_parent):
+    """The placement an ITEM_DEFINED_TRANSFORMATION gives a child: its item in
+    the child's representation mapped onto its item in the parent's,
+    P(parent item) * P(child item)^-1. transform_item_1 lies in rep_1 and
+    transform_item_2 in rep_2 (ISO 10303-43), so rep1_is_parent says which item
+    is the parent's. None when the operator is not two AXIS2_PLACEMENT_3Ds."""
+    a = rd.args(idt_ref) if rd.typ(idt_ref) == "ITEM_DEFINED_TRANSFORMATION" else []
     frames = [x for x in a if isinstance(x, tuple) and x[0] == "ref"
               and rd.typ(x) == "AXIS2_PLACEMENT_3D"]
     if len(frames) < 2:
-        return _IDENTITY
-    F = _a2p_matrix(rd, frames[0])
-    T = _a2p_matrix(rd, frames[1])
-    fx, fy, fz, fo = F
-    inv_rot = ((fx[0], fx[1], fx[2]), (fy[0], fy[1], fy[2]), (fz[0], fz[1], fz[2]))
-    inv_o = tuple(-(inv_rot[0][k]*fo[0] + inv_rot[1][k]*fo[1] + inv_rot[2][k]*fo[2])
-                  for k in range(3))
-    Finv = (tuple(inv_rot[k][0] for k in range(3)),
-            tuple(inv_rot[k][1] for k in range(3)),
-            tuple(inv_rot[k][2] for k in range(3)), inv_o)
-    return _mat_mul(T, Finv)
+        return None
+    item1, item2 = _a2p_matrix(rd, frames[0]), _a2p_matrix(rd, frames[1])
+    parent, child = (item1, item2) if rep1_is_parent else (item2, item1)
+    return _mat_mul(parent, _frame_inverse(child))
 
 def _complex_parts(rd, ref):
     """The sub-entities of a complex instance, as {TYPE: args}."""
@@ -1845,27 +2031,75 @@ def _complex_parts(rd, ref):
         return {}
     return {name: args for name, args in t[1]}
 
+def _representations_by_definition(rd):
+    """{product_definition_id: [representation_id, ...]}: the shape each
+    SHAPE_DEFINITION_REPRESENTATION gives a part or assembly through its
+    PRODUCT_DEFINITION_SHAPE."""
+    out = {}
+    for sdr in rd.find("SHAPE_DEFINITION_REPRESENTATION"):
+        a = rd.args(("ref", sdr))
+        if len(a) < 2 or not (isinstance(a[0], tuple) and isinstance(a[1], tuple)):
+            continue
+        pds = rd.args(a[0])
+        d = pds[2] if len(pds) > 2 else None
+        if isinstance(d, tuple) and rd.typ(d) in (
+                "PRODUCT_DEFINITION", "PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS"):
+            out.setdefault(d[1], []).append(a[1][1])
+    return out
+
+def _same_space(rd):
+    """A function from a representation id to a class id, equal for
+    representations a plain SHAPE_REPRESENTATION_RELATIONSHIP joins: a part's
+    SHAPE_REPRESENTATION and the ADVANCED_BREP_SHAPE_REPRESENTATION that holds
+    its solids share one coordinate system."""
+    parent = {}
+    def find(r):
+        while parent.get(r, r) != r:
+            r = parent[r]
+        return r
+    for rel in rd.find("SHAPE_REPRESENTATION_RELATIONSHIP"):
+        refs = [x[1] for x in rd.args(("ref", rel)) if isinstance(x, tuple) and x[0] == "ref"]
+        if len(refs) >= 2:
+            a, b = find(refs[0]), find(refs[1])
+            if a != b:
+                parent[a] = b
+    return find
+
 def assembly_placements(rd):
-    """Resolve NEXT_ASSEMBLY_USAGE_OCCURRENCE placements into a flat list of
-    (shape_representation_ref, name, matrix) with matrices composed down the
-    assembly tree.
+    """Resolve NEXT_ASSEMBLY_USAGE_OCCURRENCE (NAUO) placements into a flat list
+    of (shape_representation_ref, name, matrix), one per placed part or
+    subassembly, with matrices composed down the assembly tree.
 
     The chain an AP214 export writes is
 
         CONTEXT_DEPENDENT_SHAPE_REPRESENTATION( #rr, #pds )
-        #rr  =( REPRESENTATION_RELATIONSHIP( '', '', #child_sr, #parent_sr )
+        #rr  =( REPRESENTATION_RELATIONSHIP( '', '', #rep_1, #rep_2 )
                 REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION( #idt )
                 SHAPE_REPRESENTATION_RELATIONSHIP( ) )
         #pds =  PRODUCT_DEFINITION_SHAPE( '', '', #nauo )
+        #nauo = NEXT_ASSEMBLY_USAGE_OCCURRENCE( id, '', '', #parent_pd, #child_pd, $ )
+
+    Writers disagree on which of rep_1 and rep_2 is the parent's: Open CASCADE
+    writes the child's as rep_1, as the CAx-IF recommends, and SolidWorks the
+    parent's. The NAUO settles it: SHAPE_DEFINITION_REPRESENTATION names each
+    product definition's representation. A relationship that matches neither
+    way is read the CAx-IF way.
+
+    An occurrence is placed once, by the first CONTEXT_DEPENDENT_SHAPE_REPRESENTATION
+    that names it, and a root's own bodies once, however many of its
+    SHAPE_DEFINITION_REPRESENTATIONs reach them.
 
     Returns [] when the file has no assembly structure, which is the single-part
     case and leaves the caller's flat path untouched."""
-    edges = []          # (parent_sr, child_sr, matrix, occurrence name)
+    reps = _representations_by_definition(rd)
+    space = _same_space(rd)
+    edges = []          # (parent_pd, child_pd, child_rep, matrix, occurrence name)
+    seen = set()        # occurrences placed already: one placement each
     for cd in rd.find("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"):
         a = rd.args(("ref", cd))
         rr = a[0] if a and isinstance(a[0], tuple) else None
         pds = a[1] if len(a) > 1 and isinstance(a[1], tuple) else None
-        if rr is None:
+        if rr is None or pds is None:
             continue
         parts = _complex_parts(rd, rr)
         rel = parts.get("REPRESENTATION_RELATIONSHIP")
@@ -1873,46 +2107,70 @@ def assembly_placements(rd):
         if not rel or not wt:
             continue
         srs = [x for x in rel if isinstance(x, tuple) and x[0] == "ref"]
-        if len(srs) < 2:
+        nauo = next((x for x in rd.args(pds)
+                     if isinstance(x, tuple) and x[0] == "ref"
+                     and rd.typ(x) == "NEXT_ASSEMBLY_USAGE_OCCURRENCE"), None)
+        pdrefs = [x for x in rd.args(nauo) if isinstance(x, tuple) and x[0] == "ref"] \
+            if nauo is not None else []
+        if len(srs) < 2 or len(pdrefs) < 2 or nauo[1] in seen:
             continue
-        parent_sr, child_sr = srs[0], srs[1]
+        seen.add(nauo[1])
+        parent_pd, child_pd = pdrefs[0][1], pdrefs[1][1]
+        rep1, rep2 = space(srs[0][1]), space(srs[1][1])
+        child_reps = {space(r) for r in reps.get(child_pd, [])}
+        parent_reps = {space(r) for r in reps.get(parent_pd, [])}
+        rep1_is_parent = rep1 not in child_reps and (rep2 in child_reps or rep1 in parent_reps)
         idt = next((x for x in wt if isinstance(x, tuple) and x[0] == "ref"), None)
-        M = _idt_matrix(rd, idt) if idt is not None else _IDENTITY
-        name = ""
-        if pds is not None:
-            nauo = next((x for x in rd.args(pds)
-                         if isinstance(x, tuple) and x[0] == "ref"
-                         and rd.typ(x) == "NEXT_ASSEMBLY_USAGE_OCCURRENCE"), None)
-            if nauo is not None:
-                pdrefs = [x for x in rd.args(nauo)
-                          if isinstance(x, tuple) and x[0] == "ref"]
-                if len(pdrefs) > 1:
-                    name = _product_name(rd, pdrefs[1])
-        edges.append((parent_sr[1], child_sr[1], M, name))
+        M = _idt_matrix(rd, idt, rep1_is_parent) if idt is not None else None
+        if M is None:
+            print(f"  warning: CONTEXT_DEPENDENT_SHAPE_REPRESENTATION #{cd} places "
+                  f"its part with no ITEM_DEFINED_TRANSFORMATION of two "
+                  f"AXIS2_PLACEMENT_3Ds; the part is left unmoved")
+            M = _IDENTITY
+        child_rep = srs[0][1] if not rep1_is_parent else srs[1][1]
+        edges.append((parent_pd, child_pd, child_rep, M, _product_name(rd, pdrefs[1])))
     if not edges:
         return []
 
     children = {}
-    for parent, child, M, name in edges:
-        children.setdefault(parent, []).append((child, M, name))
-    all_children = {c for _, c, _, _ in edges}
+    for parent, child, rep, M, name in edges:
+        children.setdefault(parent, []).append((child, rep, M, name))
+    all_children = {c for _, c, _, _, _ in edges}
     roots = [p for p in children if p not in all_children]
 
     out = []
-    def walk(sr, M, prefix):
-        kids = children.get(sr)
-        if not kids:
-            out.append((sr, prefix, M))
-            return
-        for child, Mc, name in kids:
+    def walk(pd, M, prefix, chain):
+        for child, rep, Mc, name in children.get(pd, []):
+            if child in chain:          # a cyclic file; stop rather than recurse forever
+                continue
             label = name or f"part{len(out)}"
-            walk(child, _mat_mul(M, Mc), f"{prefix}___{label}" if prefix else label)
+            path = f"{prefix}___{label}" if prefix else label
+            Mw = _mat_mul(M, Mc)
+            out.append((rep, path, Mw))
+            walk(child, Mw, path, chain | {child})
+    bodies_of = solids_by_representation(rd)
     for r in roots:
-        walk(r, _IDENTITY, "")
+        # A root's own bodies, once, however its SHAPE_DEFINITION_REPRESENTATIONs
+        # reach them. Largest first, a representation is dropped when the kept
+        # ones already hold all its bodies, and a body-less one when a kept one
+        # shares its coordinate space. The kept ones stay in file order.
+        cands = reps.get(r, [])
+        keep, held = [], set()
+        for rep in sorted(cands, key=lambda x: -len(bodies_of.get(x, ()))):   # largest first
+            bodies = set(bodies_of.get(rep, ()))
+            if bodies and bodies <= held:
+                continue
+            if not bodies and any(space(k) == space(rep) for k in keep):
+                continue
+            held |= bodies
+            keep.append(rep)
+        out += [(rep, _product_name(rd, ("ref", r)), _IDENTITY) for rep in cands if rep in keep]
+        walk(r, _IDENTITY, "", {r})
     return out
 
-def _product_name(rd, ref):
-    """The readable name behind a PRODUCT_DEFINITION, via PRODUCT_DEFINITION_FORMATION."""
+def _product_name(rd, ref, raw=False):
+    """The readable name behind a PRODUCT_DEFINITION, via PRODUCT_DEFINITION_FORMATION:
+    the PRODUCT's name, else its id, as a prim name (raw: as the file writes it)."""
     seen = set()
     stack = [ref]
     while stack:
@@ -1925,7 +2183,7 @@ def _product_name(rd, ref):
             a = rd.args(r)
             for nm in (a[1] if len(a) > 1 else "", a[0] if a else ""):  # name, then id
                 if isinstance(nm, str) and _prim_name(nm):
-                    return _prim_name(nm)
+                    return nm.strip() if raw else _prim_name(nm)
         for x in rd.args(r):
             if isinstance(x, tuple) and x[0] == "ref":
                 stack.append(x)
@@ -1969,12 +2227,39 @@ def product_names(rd):
             out.setdefault(solids[0], nm)
     return out
 
-def solids_by_representation(rd):
-    """{shape_representation_ref: [solid_ref, ...]}. A part's geometry hangs off
-    an ADVANCED_BREP_SHAPE_REPRESENTATION; the assembly graph names the plain
-    SHAPE_REPRESENTATION, and SHAPE_REPRESENTATION_RELATIONSHIP joins the two."""
+def body_products(rd):
+    """{body_ref: (product, bodies)} for every body a part's shape holds: the
+    PRODUCT name (else id) as the file writes it, through the same
+    SHAPE_DEFINITION_REPRESENTATIONs as product_names, and how many bodies
+    that part holds."""
+    srmap = solids_by_representation(rd)
     out = {}
-    for sr in rd.find("ADVANCED_BREP_SHAPE_REPRESENTATION", "SHAPE_REPRESENTATION"):
+    for sdr in rd.find("SHAPE_DEFINITION_REPRESENTATION"):
+        a = rd.args(("ref", sdr))
+        if len(a) < 2 or not (isinstance(a[0], tuple) and isinstance(a[1], tuple)):
+            continue
+        pds = rd.args(a[0])
+        definition = pds[2] if len(pds) > 2 else None
+        if not isinstance(definition, tuple) \
+                or rd.typ(definition) == "NEXT_ASSEMBLY_USAGE_OCCURRENCE":
+            continue
+        label = _product_name(rd, definition, raw=True)
+        bodies = srmap.get(a[1][1], []) if label else []
+        for b in bodies:
+            out.setdefault(b, (label, len(bodies)))
+    return out
+
+def solids_by_representation(rd):
+    """{shape_representation_ref: [body_ref, ...]}: the solids and sheets each
+    representation holds, pooled over every representation a plain
+    SHAPE_REPRESENTATION_RELATIONSHIP joins to it (_same_space). A part's
+    bodies hang off an ADVANCED_BREP_SHAPE_REPRESENTATION or a
+    MANIFOLD_SURFACE_SHAPE_REPRESENTATION, while the assembly graph names the
+    part's plain SHAPE_REPRESENTATION; a part may join several. The bodies keep
+    file order, so the result does not depend on the order of the
+    relationships."""
+    own = {}
+    for sr in rd.find(*_BODY_REPRESENTATIONS):
         items = []
         for x in rd.args(("ref", sr)):
             if isinstance(x, tuple) and x[0] == "ref":
@@ -1982,21 +2267,18 @@ def solids_by_representation(rd):
             elif isinstance(x, list):
                 items += [y[1] for y in x
                           if isinstance(y, tuple) and y[0] == "ref"]
-        sol = [i for i in items
-               if rd.typ(("ref", i)) in ("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS")]
+        sol = [i for i in items if rd.typ(("ref", i)) in _BODY_TYPES]
         if sol:
-            out[sr] = sol
+            own[sr] = sol
+    space = _same_space(rd)
+    pooled = {}
+    for sr in sorted(own):
+        cls = pooled.setdefault(space(sr), [])
+        cls += [b for b in own[sr] if b not in cls]
+    reps = set(own)
     for rel in rd.find("SHAPE_REPRESENTATION_RELATIONSHIP"):
-        refs = [x[1] for x in rd.args(("ref", rel))
-                if isinstance(x, tuple) and x[0] == "ref"]
-        if len(refs) < 2:
-            continue
-        a, b = refs[0], refs[1]
-        if a in out and b not in out:
-            out[b] = out[a]
-        elif b in out and a not in out:
-            out[a] = out[b]
-    return out
+        reps.update(x[1] for x in rd.args(("ref", rel)) if isinstance(x, tuple) and x[0] == "ref")
+    return {r: pooled[space(r)] for r in reps if pooled.get(space(r))}
 
 def solid_name(rd, solid_ref, i, products=None):
     """The prim name of solid i: its part's PRODUCT name when it is the part's
@@ -2022,7 +2304,7 @@ def resolve_colors(rd, ents, solid_refs):
                 shells += [y[1] for y in x if isinstance(y, tuple) and y[0] == "ref"]
         for sh in shells:
             t = ents[sh][0]
-            if t == "ORIENTED_CLOSED_SHELL":
+            if t in ("ORIENTED_CLOSED_SHELL", "ORIENTED_OPEN_SHELL"):
                 sh = ents[sh][1][2][1]
             elif t not in ("CLOSED_SHELL", "OPEN_SHELL"):
                 continue
@@ -2087,7 +2369,7 @@ def face_refs_for_solid(rd, solid):
     sa = rd.args(("ref", solid))
     shell_refs = []
     for x in sa[1:]:
-        if isinstance(x, tuple) and x[0] == "ref" and rd.typ(x) in ("CLOSED_SHELL", "OPEN_SHELL", "ORIENTED_CLOSED_SHELL"):
+        if isinstance(x, tuple) and x[0] == "ref" and rd.typ(x) in _SHELL_TYPES:
             shell_refs.append(x)
         elif isinstance(x, list):
             shell_refs += [y for y in x if isinstance(y, tuple) and y[0] == "ref"]
@@ -2105,58 +2387,90 @@ def _usd_matrix(M):
                        z[0], z[1], z[2], 0.0,
                        o[0], o[1], o[2], 1.0)
 
-def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verbose):
-    """One Xform per assembly placement, carrying the composed transform, with
-    that part's solids as BrepArray children.
+def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verbose, used,
+                   products=None):
+    """One Xform per placement, carrying the composed transform unless it is
+    the identity, with that part's bodies as BrepArray children: ``brep`` for a
+    part with one body, ``brep_<j>`` for several. convert passes every body no
+    assembly placement reaches as an identity placement of its own.
 
     Geometry stays in the part's own coordinate system, where the STEP authored
     it; the placement is the only thing that moves. Each placement authors its
-    own copy of the part's BrepArrays."""
+    own copy of the part's BrepArrays. The Xform takes the bodies' colour when
+    they share one; otherwise each BrepArray takes its own. ``products``
+    (body_products) records, on a lone body that is one of several of its
+    part, the part it belongs to (customData stepToUsdSolid:product), since
+    its prim cannot be named after it."""
     sidx = {sref: k for k, sref in enumerate(solids)}
-    used = set()
     for sr, nm, M in placed:
         name = _unique_name(_prim_name(nm) or f"part_{sr}", used)
         xf = UsdGeom.Xform.Define(stage, f"/World/{name}")
-        xf.AddTransformOp().Set(_usd_matrix(M))
+        if not _is_identity(M):
+            xf.AddTransformOp().Set(_usd_matrix(M))
         part_solids = srmap[sr]
-        body = colors.get(sidx.get(part_solids[0], -1))
-        if body:
+        body_cols = [colors.get(sidx.get(sref, -1)) for sref in part_solids]
+        common = body_cols[0] if all(c == body_cols[0] for c in body_cols) else None
+        if common:
             cpv = UsdGeom.PrimvarsAPI(xf.GetPrim()).CreatePrimvar(
                 "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant)
-            cpv.Set(Vt.Vec3fArray([Gf.Vec3f(*body)]))
+            cpv.Set(Vt.Vec3fArray([Gf.Vec3f(*common)]))
+        label, nbodies = (products or {}).get(part_solids[0], (None, 0)) \
+            if len(part_solids) == 1 else (None, 0)
+        if label and nbodies > 1:
+            xf.GetPrim().SetCustomDataByKey("stepToUsdSolid:product", label)
         for j, sref in enumerate(part_solids):
             b = extract_brep(rd, cfg, [sref])
+            body = body_cols[j]
             fcolors = None
             frefs = face_refs_for_solid(rd, sref)
             if len(frefs) == len(b["faces"]):
                 base = body or (0.6, 0.6, 0.6)
                 fcolors = [face_col.get(fr[1], base) for fr in frefs]
             child = "brep" if len(part_solids) == 1 else f"brep_{j}"
-            author_brep(stage, f"/World/{name}/{child}", b, cfg, face_colors=fcolors)
+            path = f"/World/{name}/{child}"
+            author_brep(stage, path, b, cfg, face_colors=fcolors)
+            if body and common is None:
+                cpv = UsdGeom.PrimvarsAPI(stage.GetPrimAtPath(path)).CreatePrimvar(
+                    "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant)
+                if not cpv.HasAuthoredValue():
+                    cpv.Set(Vt.Vec3fArray([Gf.Vec3f(*body)]))
             if verbose:
-                print(f"  {name}/{child:<8} faces={len(b['faces']):5} "
-                      f"verts={len(b['verts']):6}")
+                errs = self_check(b)
+                print(f"  {name + '/' + child:32} faces={len(b['faces']):5} "
+                      f"verts={len(b['verts']):6} "
+                      f"selfcheck={'OK' if not errs else str(len(errs)) + 'err'}")
 
-def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
+def convert(inp, out, up_axis="Z", meters_per_unit=None, verbose=True):
     """Convert one STEP file to a UsdSolid stage: one Xform + BrepArray prim per
-    solid, or for an assembly one Xform per placement with its part's solids as
-    BrepArray children, under a /World Xform. A solid's Xform is named after its
-    part's PRODUCT when the part has that one solid (solid_name). Output format
-    follows the extension (.usda text or .usdc binary crate)."""
+    body, solids and sheets (SHELL_BASED_SURFACE_MODEL) alike, or for an
+    assembly one Xform per placement with its part's bodies as BrepArray
+    children, under a /World Xform (_emit_assembly writes both). A body's Xform
+    is named after its part's PRODUCT when the part has that one body
+    (solid_name). Output format follows the extension (.usda text or .usdc
+    binary crate). metersPerUnit is ``meters_per_unit``, else the file's length
+    unit (detect_meters_per_unit), else 0.001; the tolerances follow it."""
     with open(inp, errors="replace") as f:
         ents = parse_step(f.read())
     rd = Reader(ents)
     angle_scale = detect_angle_scale(rd, ents)
-    tol, unc, usrc = derive_tolerance(rd, ents)
-    cfg = Config(angle_scale=angle_scale, intersect_tol=tol)
-    solids = rd.find("MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS")
+    # Solids and sheets alike, in file order.
+    solids = rd.find(*_BODY_TYPES)
     if not solids:
-        raise SystemExit(f"{inp}: no MANIFOLD_SOLID_BREP / BREP_WITH_VOIDS solids found")
+        raise SystemExit(f"{inp}: no MANIFOLD_SOLID_BREP / BREP_WITH_VOIDS solids "
+                         "or SHELL_BASED_SURFACE_MODEL sheets found")
+    if meters_per_unit is None:
+        meters_per_unit = detect_meters_per_unit(rd, ents, solids) or 0.001
+    tol, unc, usrc = derive_tolerance(rd, ents, meters_per_unit)
+    cfg = Config(angle_scale=angle_scale, intersect_tol=tol, meters_per_unit=meters_per_unit,
+                 accuracy=unc if usrc.startswith("UNCERTAINTY") else None)
     colors, face_col = resolve_colors(rd, ents, solids)
     if verbose:
         unit = "degrees" if abs(angle_scale - math.pi / 180) < PERIOD_TOL else "radians"
-        print(f"[{inp}] {len(ents)} entities, {len(solids)} solid(s); "
-              f"plane-angle unit = {unit}; intersectTol3d = {tol:g} mm ({usrc})")
+        nsheet = sum(1 for x in solids if rd.typ(("ref", x)) == "SHELL_BASED_SURFACE_MODEL")
+        print(f"[{inp}] {len(ents)} entities, {len(solids) - nsheet} solid(s), "
+              f"{nsheet} sheet(s); plane-angle unit = {unit}; "
+              f"metersPerUnit = {meters_per_unit:g}; "
+              f"intersectTol3d = {tol:g} model units ({usrc})")
 
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z if up_axis.upper() == "Z" else UsdGeom.Tokens.y)
@@ -2165,45 +2479,31 @@ def convert(inp, out, up_axis="Z", meters_per_unit=0.001, verbose=True):
     stage.SetDefaultPrim(world.GetPrim())
 
     placements = assembly_placements(rd)
-    srmap = solids_by_representation(rd) if placements else {}
+    srmap = solids_by_representation(rd)
     placed = [(sr, nm, M) for sr, nm, M in placements if srmap.get(sr)]
-    if placed:
-        if verbose:
-            uniq = len({sr for sr, _, _ in placed})
-            print(f"  assembly: {len(placed)} placements of {uniq} unique part(s), "
-                  f"{sum(len(srmap[sr]) for sr, _, _ in placed)} solid(s)")
-        _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids,
-                       verbose)
-        stage.Export(out)
-        if verbose:
-            print(f"wrote {out} ({len(placed)} placement(s))")
-        return
-
-    used = set()
-    products = product_names(rd)
-    for i, s in enumerate(solids):
-        b = extract_brep(rd, cfg, [s])
-        name = _unique_name(solid_name(rd, s, i, products), used)
-        xf = UsdGeom.Xform.Define(stage, f"/World/{name}")
-        body = colors.get(i)
-        if body:
-            cpv = UsdGeom.PrimvarsAPI(xf.GetPrim()).CreatePrimvar(
-                "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant)
-            cpv.Set(Vt.Vec3fArray([Gf.Vec3f(*body)]))
-        fcolors = None
-        frefs = face_refs_for_solid(rd, s)
-        if len(frefs) == len(b["faces"]):
-            base = body or (0.6, 0.6, 0.6)
-            fcolors = [face_col.get(fr[1], base) for fr in frefs]
-        author_brep(stage, f"/World/{name}/brep", b, cfg, face_colors=fcolors)
-        if verbose:
-            errs = self_check(b)
-            print(f"  [{i:3}] {name:24} faces={len(b['faces']):5} verts={len(b['verts']):6} "
-                  f"selfcheck={'OK' if not errs else str(len(errs)) + 'err'}")
+    nplaced = len(placed)
+    if placed and verbose:
+        uniq = len({sr for sr, _, _ in placed})
+        print(f"  assembly: {len(placed)} placements of {uniq} unique part(s), "
+              f"{sum(len(srmap[sr]) for sr, _, _ in placed)} bodies")
+    # A body no placement reaches stays where its own representation puts it:
+    # an identity placement of its own, named by solid_name.
+    placed_solids = {s for sr, _, _ in placed for s in srmap[sr]}
+    names = product_names(rd)
+    loose = [(i, s) for i, s in enumerate(solids) if s not in placed_solids]
+    if placed and loose and verbose:
+        print(f"  {len(loose)} body(ies) outside the assembly, left unplaced")
+    for i, s in loose:
+        srmap[("loose", s)] = [s]
+        placed.append((("loose", s), solid_name(rd, s, i, names), _IDENTITY))
+    _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verbose,
+                   set(), products=body_products(rd))
 
     stage.Export(out)
     if verbose:
-        print(f"wrote {out} ({len(solids)} brep prim(s))")
+        nbreps = sum(len(srmap[sr]) for sr, _, _ in placed)
+        print(f"wrote {out} ({nbreps} brep prim(s)"
+              + (f", {nplaced} placement(s))" if nplaced else ")"))
 
 def main():
     import argparse
@@ -2213,8 +2513,9 @@ def main():
     ap.add_argument("output", help="output USD file (.usd / .usda / .usdc)")
     ap.add_argument("--up-axis", choices=["Y", "Z"], default="Z",
                     help="stage up axis (default Z)")
-    ap.add_argument("--meters-per-unit", type=float, default=0.001,
-                    help="stage metersPerUnit (default 0.001, i.e. STEP millimetres)")
+    ap.add_argument("--meters-per-unit", type=float, default=None,
+                    help="stage metersPerUnit (default: the file's length unit, "
+                         "else 0.001, i.e. millimetres)")
     ap.add_argument("-q", "--quiet", action="store_true", help="suppress per-solid output")
     args = ap.parse_args()
     convert(args.input, args.output, args.up_axis, args.meters_per_unit, verbose=not args.quiet)

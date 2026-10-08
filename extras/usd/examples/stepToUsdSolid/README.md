@@ -31,28 +31,55 @@ the file contains:
 - **Swept surfaces** — linear extrusion and revolution — lowered to NURBS with
   exact rational-arc control points.
 - **Void shells** (`BREP_WITH_VOIDS` / `ORIENTED_CLOSED_SHELL`) and **vertex loops**.
+- **Sheet bodies** (`SHELL_BASED_SURFACE_MODEL`, as NAPA Designer exports a plate),
+  beside any solids the file holds: the infinite void is the only region, each
+  shell holds both faceuses of its faces, and a free edge's one edgeuse is its own
+  radial next. The proposal exempts such shells from the closed-solid rule. A
+  surface model's shells are sheets whether open or closed, and an
+  `ORIENTED_OPEN_SHELL` is read through to its base shell.
 - **Face UV windows** (`face:range`): an analytic face's is derived from its
   trimming edges; a NURBS face, including a lowered swept surface, takes its
   surface's knot domain.
 - **Colors** — per-body and per-face `displayColor` read from STEP styled items.
 
-The plane-angle unit (degrees vs radians) and the intersection tolerance are read
-from the file (from its `UNCERTAINTY_MEASURE`, with a bounding-box fallback).
+The plane-angle unit (degrees vs radians), the length unit and the intersection
+tolerance are read from the file. The length unit is the one the context of the
+bodies' representations assigns, so a unit the file declares for something else
+(a density's metre) does not count; an inch or other `CONVERSION_BASED_UNIT` is
+read through its conversion factor. It becomes the stage's `metersPerUnit` unless
+`--meters-per-unit` is given. The tolerance is the file's `UNCERTAINTY_MEASURE`
+over 20, in the file's unit, with a bounding-box fallback; its floors are stated
+in millimetres and scaled to that unit.
+
+`brep:extent` bounds the geometry: the vertices, every NURBS control vertex, the
+rational poles of each circle and ellipse edge, and the box of each sphere and
+torus face. It is loose where a face trims a larger surface.
 
 ## Scope
 
 An assembly comes through as one `Xform` per placement, with the transform composed
 down the `NEXT_ASSEMBLY_USAGE_OCCURRENCE` chains and the part's solids as `BrepArray`
-children. Geometry stays in the part's own coordinate system, and each placement
-authors its own copy of the part's `BrepArray`s. A file with no assembly structure
-maps each solid to a top-level prim in world coordinates.
+children. A placement maps the child's `ITEM_DEFINED_TRANSFORMATION` item onto the
+parent's. Writers disagree on which of a `REPRESENTATION_RELATIONSHIP`'s two
+representations is the parent's: Open CASCADE names the child's first, SolidWorks
+the parent's. The importer takes the parent from the occurrence itself, through the
+`SHAPE_DEFINITION_REPRESENTATION` that names each product definition's
+representation. Geometry stays in the part's own coordinate system, each placement
+authors its own copy of the part's `BrepArray`s, and an identity placement authors
+no transform. A part's bodies are every body its representations hold, pooled
+over the representations a plain `SHAPE_REPRESENTATION_RELATIONSHIP` joins; an
+occurrence is placed once. A body that no placement reaches, like every body of a
+file with no assembly structure, becomes a top-level prim in its own coordinates.
+When a part's bodies differ in colour, each `BrepArray` takes its own.
 
 A solid's prim is named after the STEP `PRODUCT` of the part it belongs to, so an
 assembly's parts keep their names (`adapter_plate`, `jaw_left`). Names become
 valid USD identifiers (ASCII letters, digits and underscores, no leading digit),
-and a repeated name gets `_1`, `_2`. A part with several solids keeps the solids'
-own names, since one product name cannot tell them apart; a solid with no name
-is `body_<i>`.
+and a repeated name gets `_1`, `_2`. A part with several bodies keeps the bodies'
+own names, since one product name cannot tell them apart; a body with no name
+is `body_<i>`. Each such body records its part in `customData`
+(`stepToUsdSolid:product`, the `PRODUCT` name as the file writes it), so a
+consumer can gather a part's bodies again.
 
 This is a **reference / sample importer**, in the spirit of the Gaussian-splat
 `py3dgsPlyToUsd.py` sample under `extras/imaging/examples/hdParticleField`: enough to
@@ -67,11 +94,11 @@ the B-rep path:
 - **Color** (`resolve_colors`, ~80 lines) reads `STYLED_ITEM` chains to author
   `displayColor`. Color is not part of a boundary representation; it is here so
   converted assets are legible in a viewer.
-- **Assembly placement** (`assembly_placements` and its helpers, ~190 lines) composes
+- **Assembly placement** (`assembly_placements` and its helpers, ~250 lines) composes
   `NEXT_ASSEMBLY_USAGE_OCCURRENCE` transforms into `Xform` prims. Assembly structure is
   a USD composition concern, not a `UsdSolid` one.
 
-Together they are about 270 lines. They are kept because they make the output usable
+Together they are about 330 lines. They are kept because they make the output usable
 on production CAD assemblies. A reviewer who wants this sample smaller should take
 these first, ahead of anything that reads geometry.
 
