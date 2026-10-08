@@ -25,12 +25,17 @@ The converter takes no modes or presets; it converts every construct below that
 the file contains:
 
 - **Analytic surfaces** — plane, cylinder, cone, sphere, torus — and **NURBS**
-  surfaces, authored to the matching `BrepSurface*API`.
+  surfaces, authored to the matching `BrepSurface*API`. A degenerate torus
+  (`DEGENERATE_TOROIDAL_SURFACE`, its major radius below its minor) is a torus
+  when its outer, apple-shaped portion is selected; its inner, lemon-shaped
+  portion, whose normal ISO 10303-42 points against the torus formula's, is
+  lowered to an exact NURBS surface of revolution.
 - **Analytic curves** — line, circle, ellipse — and **NURBS** curves, bare or
   wrapped in `SURFACE_CURVE` / `SEAM_CURVE`.
 - **Swept surfaces** — linear extrusion and revolution — lowered to NURBS with
   exact rational-arc control points.
-- **Void shells** (`BREP_WITH_VOIDS` / `ORIENTED_CLOSED_SHELL`) and **vertex loops**.
+- **Void shells** (`BREP_WITH_VOIDS` / `ORIENTED_CLOSED_SHELL`), each cavity's
+  sides read from its geometry, and **vertex loops**.
 - **Sheet bodies** (`SHELL_BASED_SURFACE_MODEL`, as NAPA Designer exports a plate),
   beside any solids the file holds: the infinite void is the only region, each
   shell holds both faceuses of its faces, and a free edge's one edgeuse is its own
@@ -135,6 +140,23 @@ reverses the loops and makes the outward faceuse `opposite`; each edgeuse enters
 the radial order from the top when it runs along its edge curve and from the
 bottom otherwise, as SMLib's own exporter writes them. The KUKA KR 640 has 4,374
 reversed faces.
+
+**An edge whose curve runs against it keeps its loops closed.** An `EDGE_CURVE`
+whose `same_sense` is `.F.` has its curve running from its end vertex to its
+start. The USD edge runs along the curve, so an `ORIENTED_EDGE`'s flag, which is
+relative to the STEP edge, is flipped for such an edge. Onshape's suspension
+export has 657.
+
+**A cavity's sides come from its geometry.** A cavity is an
+`ORIENTED_CLOSED_SHELL` round a base `CLOSED_SHELL`. ISO 10303-42 points the base
+shell's face normals out of the cavity, into the material, and sets the flag
+`.F.`. Writers differ: Open CASCADE and NX write exactly that, Spatial InterOp
+writes `.T.` round the same base shell, and Onshape writes `.F.` round a base
+shell whose normals point into the cavity. The importer ignores the flag and
+integrates the volume the face normals enclose; a positive volume puts the
+cavity against them. Planes, cylinders, cones, spheres, tori and flat NURBS faces
+integrate exactly from their boundaries. A cavity with a curved NURBS face is
+read the ISO way. All 50 cavities on the KUKA KR 640 are written the ISO way.
 
 **Seam edges are synthesised for cylinders and cones.** UsdSolid rule 5.iv
 requires a face to have a single outer loop carrying a seam edge; STEP does not,

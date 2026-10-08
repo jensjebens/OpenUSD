@@ -15,7 +15,8 @@ The converter has no modes to choose. It handles planar/cylindrical/conical/
 spherical/toroidal analytic surfaces, line/circle/ellipse curves (bare or wrapped in
 SURFACE_CURVE / SEAM_CURVE), and NURBS surfaces and curves; lowers swept surfaces
 (linear extrusion, revolution) to NURBS; resolves void shells (BREP_WITH_VOIDS /
-ORIENTED_CLOSED_SHELL) and vertex loops; converts sheet bodies
+ORIENTED_CLOSED_SHELL), each cavity's sides from the volume its face normals
+enclose, and vertex loops; converts sheet bodies
 (SHELL_BASED_SURFACE_MODEL) beside solids; derives the parametric UV window of each
 analytic face from its trimming edges (a NURBS face takes its surface's knot
 domain); and reads per-body / per-face colors from STEP styled items. The
@@ -439,6 +440,12 @@ def lower_revolution(rd, ref, a0=0.0, a1=2*math.pi):
     ap = rd.args(a[2])
     axp = rd.point(ap[1])
     axd = vnorm(rd.direction(ap[2])) if len(ap) > 2 and isinstance(ap[2], tuple) else (0.,0.,1.)
+    return _revolve(basis, axp, axd, a0, a1)
+
+def _revolve(basis, axp, axd, a0=0.0, a1=2*math.pi):
+    """The NURBS surface sweeping the profile basis (a poles dict) round the
+    axis through axp along axd, from angle a0 to a1: u runs round the axis
+    and v along the profile."""
     span = a1 - a0
     nseg = max(1, int(math.ceil(span/(math.pi/2) - DEGENERATE_TOL)))
     seg = span/nseg
@@ -504,9 +511,22 @@ def surface_geom(rd, ref, cfg, fpts=None):
     if t == "SPHERICAL_SURFACE":
         o, z, x = rd.placement(a[1])
         return ("BrepSurfaceSphereAPI", dict(center=o, axis=z, refDirection=x, radius=float(a[2])))
-    if t == "TOROIDAL_SURFACE":
+    if t in ("TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE"):
         o, z, x = rd.placement(a[1])
-        return ("BrepSurfaceTorusAPI", dict(origin=o, axis=z, refDirection=x, majorRadius=float(a[2]), minorRadius=float(a[3])))
+        R, r = float(a[2]), float(a[3])
+        if t == "DEGENERATE_TOROIDAL_SURFACE" and a[4] == ("enum", "F"):
+            # The inner, lemon-shaped portion: the torus formula with v from phi
+            # to 2*pi - phi, where r cos(phi) = -R, its normal pointing out of
+            # the lemon and so against the formula's (ISO 10303-42). A UsdSolid
+            # torus cannot turn its normal, so this revolves the tube circle's
+            # arc across the axis, run upwards, whose normal points out.
+            half = math.pi - math.acos(max(-1.0, min(1.0, -R / r)))
+            centre = tuple(o[k] - R * x[k] for k in range(3))
+            return ("BrepSurfaceNurbAPI",
+                    _revolve(_arc_poles(centre, x, z, r, r, -half, half), o, z))
+        # A torus, or a degenerate torus's outer, apple-shaped portion: the
+        # same formula with v from -phi to phi, and the same normal.
+        return ("BrepSurfaceTorusAPI", dict(origin=o, axis=z, refDirection=x, majorRadius=R, minorRadius=r))
     if t == "SURFACE_OF_LINEAR_EXTRUSION":
         # face:range is the lowered surface's whole knot domain, so the surface
         # has to reach every boundary point: P = curve(u) + v*vector bounds v by
@@ -1297,6 +1317,7 @@ def extract_brep(rd, cfg, solid_refs=None):
     brep_faces = []
     sheet = []      # per body: every shell open (a SHELL_BASED_SURFACE_MODEL)
     esamples = {}   # edge index -> cached interior boundary samples (H2b)
+    esense = {}     # edge index -> its EDGE_CURVE's same_sense
 
     def vidx(ref):
         vid = ref[1]
@@ -1335,6 +1356,7 @@ def extract_brep(rd, cfg, solid_refs=None):
             else:
                 rng = edge_range(ctok, cg, verts[s], verts[e])
             emap[eid] = len(edges)
+            esense[len(edges)] = same_sense
             edges.append(dict(v=(s, e), ctok=ctok, geom=cg, rng=rng))
         return emap[eid]
 
@@ -1349,7 +1371,10 @@ def extract_brep(rd, cfg, solid_refs=None):
         for oe in rd.args(loop_ref)[1]:
             a = rd.args(oe)
             ei = eidx(a[3])
-            same = (a[4] == ("enum", "T"))
+            # The flag is relative to the edge, which runs start to end; the
+            # USD edge runs along its curve (eidx), which is the other way
+            # round when the EDGE_CURVE's same_sense is .F.
+            same = (a[4] == ("enum", "T")) == esense[ei]
             edgeuses.append(dict(edge=ei, orient="same" if same else "opposite"))
             n += 1
             eis.append(ei)
@@ -1420,12 +1445,16 @@ def extract_brep(rd, cfg, solid_refs=None):
                 rng = face_range(stok, sg, fsamples, loop_pts=floop_pts,
                                  sense=sense)
                 sg, rng = rebase_periodic_u(stok, sg, rng)
+                # A curved edge with no samples would stand in as its chord.
+                chords = any(not esamples[ei] and edges[ei]["ctok"] != "BrepCurve3dLineAPI"
+                             for eis, _ in floop_edges for ei in eis)
+                flux = None if chords else face_flux(stok, sg, sense, floop_pts)
                 for n, vi in loop_specs:
                     loops.append(n)
                     loop_vidx.append(vi)
                 fi = len(faces)
                 faces.append(dict(loopCount=lc, stok=stok, geom=sg, sense=sense,
-                                  rng=rng))
+                                  rng=rng, flux=flux))
                 solid_faces[-1].append(fi)
         brep_faces.append(solid_faces)
         # A surface model is a sheet whatever its shells are: a CLOSED_SHELL in
@@ -1455,6 +1484,223 @@ def extract_brep(rd, cfg, solid_refs=None):
                 brep_faces=brep_faces, sheet=sheet, by_edge=by_edge, loop_vidx=loop_vidx,
                 dropped_edges=dropped, seam_edges=seams, reversed_faces=reversed_faces)
 
+# ================================================================ cavity orientation
+# A cavity's walls are an ORIENTED_CLOSED_SHELL around a base CLOSED_SHELL.
+# ISO 10303-42 has the base shell's face normals point out of the cavity,
+# into the material (5.5.28: a closed shell's normals point from its finite
+# region to the infinite one), and the flag .F. (6.4.3; AP242's WR5 forbids
+# .T.). Writers differ: Open CASCADE and NX write exactly that, Spatial
+# InterOp writes .T. around the same base shell, and Onshape writes .F.
+# around a base shell whose normals point into the cavity. The flag decides
+# nothing, so pack_regions reads the side from the geometry: the sign of the
+# volume the face normals enclose.
+#
+# That volume is a third of the flux of the position vector x through the
+# shell, summed over its faces. face_flux takes each face's flux about a
+# point p where (x - p).N is simple on its surface, as term + p.A, A being
+# the face's vector area, which its boundary alone fixes. On a plane, and on
+# a cone about its apex, (x - p).N is zero. On a cylinder, a cone band, a
+# sphere and a torus, Green's theorem in the surface's parameters turns its
+# integral into one round the face's loops, sampled as extract_brep samples
+# them and in STEP's order, counter-clockwise about the face normal.
+
+def _vector_area(loop_pts, ref):
+    """The integral of the face normal over a face whose loops are loop_pts:
+    half the sum of p x dp round them, taken about ref, which changes nothing
+    but the size of the products."""
+    ax = ay = az = 0.0
+    for pts in loop_pts:
+        n = len(pts)
+        for i in range(n):
+            p, q = vsub(pts[i], ref), vsub(pts[(i + 1) % n], ref)
+            ax += p[1]*q[2] - p[2]*q[1]
+            ay += p[2]*q[0] - p[0]*q[2]
+            az += p[0]*q[1] - p[1]*q[0]
+    return (0.5*ax, 0.5*ay, 0.5*az)
+
+def _unwrap(vals):
+    out = [vals[0]]
+    for a in vals[1:]:
+        out.append(out[-1] + (a - out[-1] + math.pi) % _TWO_PI - math.pi)
+    return out
+
+def _loop_coords(loop_pts, uv, periodic):
+    """Each loop closed (its first sample again at its end) and mapped by uv
+    to (us, vs), the coordinates periodic names unwrapped along the loop.
+    None when a step between samples turns more than 2 radians, too coarse to
+    unwrap."""
+    out = []
+    for pts in loop_pts:
+        if len(pts) < 2:
+            continue
+        cs = [uv(p) for p in pts + [pts[0]]]
+        us, vs = [c[0] for c in cs], [c[1] for c in cs]
+        if periodic[0]: us = _unwrap(us)
+        if periodic[1]: vs = _unwrap(vs)
+        for xs, per in ((us, periodic[0]), (vs, periodic[1])):
+            if per and any(abs(xs[i + 1] - xs[i]) > 2.0 for i in range(len(xs) - 1)):
+                return None
+        out.append((us, vs))
+    return out
+
+def _int_du(loops, f):
+    """The loops' integral of f(v) du, by the trapezoid rule."""
+    return sum(0.5 * (f(vs[i]) + f(vs[i + 1])) * (us[i + 1] - us[i])
+               for us, vs in loops for i in range(len(us) - 1))
+
+def _windings(loops, k):
+    return [round((c[k][-1] - c[k][0]) / _TWO_PI) for c in loops]
+
+def _wrapped(area0, whole):
+    """How many whole surfaces to add to an area integrated in a chart that
+    the face may wrap past: the count that brings it into (0, whole], a face
+    that comes to nothing in the chart counting as the whole surface."""
+    k = -math.floor(area0 / whole)
+    if area0 + k * whole <= 1e-9 * whole:
+        k += 1
+    return k
+
+def face_flux(stok, sg, sense, loop_pts):
+    """The flux of the position vector through a face, as (term, p, A): term
+    + p.A, with p a point near the face and A its vector area. None for a
+    surface this does not integrate: a NURBS surface that is not flat, or a
+    torus whose loops wind round both of its circles."""
+    sigma = 1.0 if sense else -1.0
+    pts = [q for lp in loop_pts for q in lp]
+    if stok == "BrepSurfaceNurbAPI":
+        cps = sg.get("controlVertices") or []
+        if len(cps) < 3:
+            return None
+        p0 = cps[0]
+        p1 = max(cps, key=lambda q: math.dist(q, p0))
+        n = max((vcross(vsub(p1, p0), vsub(q, p0)) for q in cps),
+                key=lambda c: vdot(c, c))
+        size = math.dist(p1, p0)
+        if not size or vdot(n, n) <= (1e-12 * size * size) ** 2:
+            return None
+        n = vnorm(n)
+        if any(abs(vdot(vsub(q, p0), n)) > 1e-7 * size for q in cps):
+            return None
+        return 0.0, p0, _vector_area(loop_pts, p0)
+    if stok == "BrepSurfacePlaneAPI":
+        return 0.0, sg["origin"], _vector_area(loop_pts, sg["origin"])
+    if stok in ("BrepSurfaceCylinderAPI", "BrepSurfaceConeAPI"):
+        o, x, y, z = _uframe(sg)
+        R = sg["radius"]
+        t = math.tan(sg["semiAngle"]) if stok == "BrepSurfaceConeAPI" else 0.0
+        if not pts:
+            return None
+        hs = [vdot(vsub(q, o), z) for q in pts]
+        if abs(t) > 1e-12:
+            # About the apex when the face may reach it: its loops wind round
+            # the axis (a cap), or it lies within ten of its own sizes of it.
+            apex = tuple(o[k] - R / t * z[k] for k in range(3))
+            lo, hi = [min(c) for c in zip(*pts)], [max(c) for c in zip(*pts)]
+            diam = math.dist(lo, hi)
+            uang = lambda q: math.atan2(vdot(vsub(q, o), y), vdot(vsub(q, o), x))
+            loops = _loop_coords(loop_pts, lambda q: (uang(q), 0.0), (True, False))
+            if (loops is None or any(_windings(loops, 0))
+                    or min(math.dist(q, apex) for q in pts) <= 10.0 * diam):
+                return 0.0, apex, _vector_area(loop_pts, apex)
+        # About the axis point at the face's mid-height: (x - p).N dA is
+        # R(R + v tan a) du dv there, a cylinder's r^2 du dv.
+        m = 0.5 * (min(hs) + max(hs))
+        p = tuple(o[k] + m * z[k] for k in range(3))
+        R += m * t
+        loops = _loop_coords(
+            loop_pts, lambda q: (math.atan2(vdot(vsub(q, p), y), vdot(vsub(q, p), x)),
+                                 vdot(vsub(q, p), z)), (True, False))
+        if loops is None:
+            return None
+        term = -R * _int_du(loops, lambda v: R * v + 0.5 * t * v * v)
+        return term, p, _vector_area(loop_pts, p)
+    if stok == "BrepSurfaceSphereAPI":
+        c, r = sg["center"], sg["radius"]
+        A = _vector_area(loop_pts, c)
+        whole = 4.0 * math.pi * r * r
+        if not pts:
+            return sigma * r * whole, c, A
+        # Integrate in a frame whose poles keep away from the face's loops.
+        _, x, y, z = _uframe(sg, "center")
+        dirs = [vnorm(vsub(q, c)) for q in pts]
+        cands = [z, x, y] + [vnorm(tuple(a * x[k] + b * y[k] + e * z[k] for k in range(3)))
+                             for a, b, e in ((1, 1, 1), (1, -1, 1), (-1, 1, 1), (1, 1, -1))]
+        ax = max(cands, key=lambda a: min(1.0 - abs(vdot(d, a)) for d in dirs))
+        ref = x if abs(vdot(x, ax)) < 0.9 else y
+        fx = vnorm(vsub(ref, tuple(vdot(ref, ax) * ax[k] for k in range(3))))
+        fy = vcross(ax, fx)
+        def uv(q):
+            d = vnorm(vsub(q, c))
+            return (math.atan2(vdot(d, fy), vdot(d, fx)),
+                    math.asin(max(-1.0, min(1.0, vdot(d, ax)))))
+        loops = _loop_coords(loop_pts, uv, (True, False))
+        if loops is None:
+            return None
+        # Area from -(r^2 (sin v + 1)) du round the loops: zero at the frame's
+        # south pole, and the whole sphere added when the face holds its north.
+        area0 = -sigma * _int_du(loops, lambda v: r * r * (math.sin(v) + 1.0))
+        area = area0 + _wrapped(area0, whole) * whole
+        if not 0.0 < area <= whole * (1.0 + 1e-6):
+            return None
+        return sigma * r * area, c, A
+    if stok == "BrepSurfaceTorusAPI":
+        o, x, y, z = _uframe(sg)
+        R, r = sg["majorRadius"], sg["minorRadius"]
+        if not R > r > 0.0:
+            return None
+        A = _vector_area(loop_pts, o)
+        whole, flux_whole = 4.0 * math.pi ** 2 * R * r, 6.0 * math.pi ** 2 * R * r * r
+        if not pts:
+            return sigma * flux_whole, o, A
+        def uv(q):
+            d = vsub(q, o)
+            u = math.atan2(vdot(d, y), vdot(d, x))
+            e = (math.cos(u) * x[0] + math.sin(u) * y[0], math.cos(u) * x[1] + math.sin(u) * y[1],
+                 math.cos(u) * x[2] + math.sin(u) * y[2])
+            t = vsub(d, tuple(R * e[k] for k in range(3)))
+            return u, math.atan2(vdot(t, z), vdot(t, e))
+        loops = _loop_coords(loop_pts, uv, (True, True))
+        if loops is None:
+            return None
+        # (x - o).N dA = g(v) du dv, g = r (R + r cos v)(R cos v + r); the
+        # area element is a(v) du dv, a = r (R + r cos v).
+        g = lambda v: r * (R + r * math.cos(v)) * (R * math.cos(v) + r)
+        if not any(_windings(loops, 1)):
+            G = lambda v: r * ((R * R + r * r) * math.sin(v)
+                               + R * r * (1.5 * v + 0.25 * math.sin(2.0 * v)))
+            area0 = -sigma * _int_du(loops, lambda v: r * (R * v + r * math.sin(v)))
+            term = -_int_du(loops, G)
+        elif not any(_windings(loops, 0)):
+            # Loops round the tube: integrate u f(v) dv instead.
+            dv = lambda f: sum(0.5 * (us[i] * f(vs[i]) + us[i + 1] * f(vs[i + 1]))
+                               * (vs[i + 1] - vs[i])
+                               for us, vs in loops for i in range(len(us) - 1))
+            area0 = sigma * dv(lambda v: r * (R + r * math.cos(v)))
+            term = dv(g)
+        else:
+            return None
+        return term + sigma * _wrapped(area0, whole) * flux_whole, o, A
+    return None
+
+def shell_volume(b, face_ids):
+    """The volume a closed shell's faces enclose, positive when their normals
+    (surface normal and same_sense) point out of it. None when a face's flux
+    is unknown, or when the sum is too small against its parts to trust."""
+    total = gross = 0.0
+    p0 = None
+    for fi in face_ids:
+        flux = b["faces"][fi].get("flux")
+        if flux is None:
+            return None
+        term, p, A = flux
+        p0 = p if p0 is None else p0
+        part = vdot(vsub(p, p0), A)
+        total += term + part
+        gross += abs(term) + abs(part)
+    if not gross or abs(total) < 1e-3 * gross:
+        return None
+    return total / 3.0
+
 # ================================================================ region packing
 def pack_regions(b):
     """Void-included radial-edge form: regions, their shells, and the two
@@ -1469,7 +1715,12 @@ def pack_regions(b):
 
     Each face contributes one faceuse to the region on either side of it: the
     outer shell faces the infinite void and the solid, a cavity wall faces the
-    solid and that cavity.
+    solid and that cavity. Which side of a cavity wall is the cavity's comes
+    from the volume its face normals enclose (shell_volume), whatever the
+    ORIENTED_CLOSED_SHELL's flag says: a positive volume puts the cavity
+    against the normals. When the volume cannot be had (a curved NURBS face),
+    the wall is read as ISO 10303-42 writes it, normals into the material.
+    b["cavities"] records, per body, how many cavities each way was read.
 
     A sheet body (a SHELL_BASED_SURFACE_MODEL, of open shells as NAPA Designer
     exports a plate, or of closed ones) encloses no material: the proposal supports it and exempts
@@ -1478,6 +1729,7 @@ def pack_regions(b):
     """
     regionCount, regionType, regionShellCount, shellFaceuseCount = [], [], [], []
     fuFaceIndex, fuOrient = [], []
+    cavities = b["cavities"] = []
 
     def emit_shell(face_ids, outward):
         """One faceuse per face, on the side facing the region being built.
@@ -1498,6 +1750,7 @@ def pack_regions(b):
 
     for k, shells in enumerate(b["brep_faces"]):
         if (b.get("sheet") or [False] * (k + 1))[k]:
+            cavities.append(dict(byVolume=0, byRule=0))
             regionCount.append(1)
             regionType.append("voidRegion")
             regionShellCount.append(len(shells))
@@ -1512,12 +1765,18 @@ def pack_regions(b):
         regionType += ["voidRegion", "solidRegion"] + ["voidRegion"] * len(voids)
         regionShellCount += [1, 1 + len(voids)] + [1] * len(voids)
 
+        # True where a cavity wall's normals point into the material.
+        vols = [shell_volume(b, v) for v in voids]
+        into = [True if vol is None else vol > 0.0 for vol in vols]
+        cavities.append(dict(byVolume=sum(vol is not None for vol in vols),
+                             byRule=sum(vol is None for vol in vols)))
+
         emit_shell(outer, True)                 # infinite exterior void
         emit_shell(outer, False)                # solid: its outer shell
-        for v in voids:
-            emit_shell(v, False)                # solid: one inner shell per cavity
-        for v in voids:
-            emit_shell(v, True)                 # each cavity, seen from inside
+        for v, w in zip(voids, into):
+            emit_shell(v, w)                    # solid: one inner shell per cavity
+        for v, w in zip(voids, into):
+            emit_shell(v, not w)                # each cavity, seen from inside
 
     return dict(regionCount=regionCount, regionType=regionType,
                 regionShellCount=regionShellCount, shellFaceuseCount=shellFaceuseCount,
@@ -2436,9 +2695,14 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
                     cpv.Set(Vt.Vec3fArray([Gf.Vec3f(*body)]))
             if verbose:
                 errs = self_check(b)
+                cav = b.get("cavities") or []
+                nrule = sum(c["byRule"] for c in cav)
+                ncav = nrule + sum(c["byVolume"] for c in cav)
                 print(f"  {name + '/' + child:32} faces={len(b['faces']):5} "
                       f"verts={len(b['verts']):6} "
-                      f"selfcheck={'OK' if not errs else str(len(errs)) + 'err'}")
+                      f"selfcheck={'OK' if not errs else str(len(errs)) + 'err'}"
+                      + (f" cavities={ncav}" if ncav else "")
+                      + (f" ({nrule} read by ISO 10303-42's rule)" if nrule else ""))
 
 def convert(inp, out, up_axis="Z", meters_per_unit=None, verbose=True):
     """Convert one STEP file to a UsdSolid stage: one Xform + BrepArray prim per
