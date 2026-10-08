@@ -46,7 +46,7 @@ _ASSEMBLY = [("rig", "arm", ((100, 0, 0), (0, 0, 1), (0, 1, 0)), _IDENTITY_ITEM)
 
 
 def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
-                 densityMetre=False, surfaceModel=False, solidWorks=False):
+                 densityMetre=False, surfaceModel=False, solidWorks=False, rootBox=None):
     """Return an AP214 STEP file describing the box above, as a string. Each
     face index in reversedFaces is written as a reversed face: its plane's
     normal points into the box and its ADVANCED_FACE same_sense is .F., which
@@ -65,7 +65,12 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
     25.4 millimetres. densityMetre adds a metre LENGTH_UNIT in a context no
     shape uses, as a file declaring a density in kg/m3 does. surfaceModel
     writes the single box as a SHELL_BASED_SURFACE_MODEL of its CLOSED_SHELL
-    under a MANIFOLD_SURFACE_SHAPE_REPRESENTATION."""
+    under a MANIFOLD_SURFACE_SHAPE_REPRESENTATION. rootBox gives the
+    assembly's root a box of its own, reached through two
+    SHAPE_DEFINITION_REPRESENTATIONs: "joined", one to the root's
+    SHAPE_REPRESENTATION and one to an ADVANCED_BREP_SHAPE_REPRESENTATION a
+    SHAPE_REPRESENTATION_RELATIONSHIP joins to it; "unjoined", the same solid
+    listed in both, with no relationship."""
     rows, state = [], {"n": 0}
 
     def emit(text):
@@ -118,7 +123,7 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
     context = newContext()
     if rep1IsParent is not None:
         _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent,
-                      newContext=newContext if solidWorks else None)
+                      newContext=newContext if solidWorks else None, rootBox=rootBox)
     elif products is None:
         emit("%s('Box',(#%d,#%d),#%d)"
              % ("MANIFOLD_SURFACE_SHAPE_REPRESENTATION" if surfaceModel
@@ -200,7 +205,8 @@ def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surface
     return emit("MANIFOLD_SOLID_BREP('%s',#%d)" % (solidName, shell))
 
 
-def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent, newContext=None):
+def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent, newContext=None,
+                  rootBox=None):
     """Emit _ASSEMBLY: a product, definition and shape representation per
     product, then one NEXT_ASSEMBLY_USAGE_OCCURRENCE with its
     CONTEXT_DEPENDENT_SHAPE_REPRESENTATION per row. With newContext, each
@@ -223,8 +229,17 @@ def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent, newCo
         own[child].append(ci)
     listed = lambda ids: ",".join("#%d" % i for i in ids)
     ctx = newContext or (lambda: context)
+    rigBox = box(-4 * _S, "") if rootBox else None
+    if rootBox == "unjoined":
+        own["rig"].append(rigBox)
     rep = {n: emit("SHAPE_REPRESENTATION('%s',(%s),#%d)" % (n, listed(own[n]), ctx()))
            for n in ("rig", "arm")}
+    rigBrep = None
+    if rootBox:
+        rigBrep = emit("ADVANCED_BREP_SHAPE_REPRESENTATION('rig',(#%d,#%d),#%d)"
+                       % (wcs, rigBox, ctx()))
+        if rootBox == "joined":
+            emit("SHAPE_REPRESENTATION_RELATIONSHIP('','',#%d,#%d)" % (rep["rig"], rigBrep))
     if newContext is None:
         rep["box"] = emit("ADVANCED_BREP_SHAPE_REPRESENTATION('box',(%s),#%d)"
                           % (listed(own["box"] + [box(0.0, "")]), context))
@@ -243,6 +258,9 @@ def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent, newCo
             emit("PRODUCT_DEFINITION_CONTEXT('part definition',#%d,'design')" % app)))
         emit("SHAPE_DEFINITION_REPRESENTATION(#%d,#%d)" % (
             emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % pd[n]), rep[n]))
+    if rigBrep is not None:
+        emit("SHAPE_DEFINITION_REPRESENTATION(#%d,#%d)" % (
+            emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % pd["rig"]), rigBrep))
     for k, ((parent, child, _, _), (pi, ci)) in enumerate(zip(_ASSEMBLY, items)):
         nauo = emit("NEXT_ASSEMBLY_USAGE_OCCURRENCE('%d','','',#%d,#%d,$)"
                     % (k + 1, pd[parent], pd[child]))
@@ -671,6 +689,19 @@ class TestStepToUsdSolid(unittest.TestCase):
         for k, (want_lo, want_hi) in enumerate(((-10.0, 10.0), (-30.0, 10.0), (-20.0, 55.0))):
             self.assertLessEqual(lo[k], want_lo + 1e-9)
             self.assertGreaterEqual(hi[k], want_hi - 1e-9)
+
+    def test_RootShapeOnce(self):
+        """An assembly root's own body is written once when two
+        SHAPE_DEFINITION_REPRESENTATIONs reach it, whether a
+        SHAPE_REPRESENTATION_RELATIONSHIP joins their representations or the
+        solid is listed in both."""
+        for layout in ("joined", "unjoined"):
+            st = self._Convert(_MakeBoxStep(rep1IsParent=False, rootBox=layout),
+                               "root_box_" + layout)
+            names = [p.GetParent().GetName() for p in self._Breps(st)]
+            self.assertEqual(sum(1 for n in names if n.startswith("rig")), 1,
+                             "%s: %s" % (layout, names))
+            self.assertEqual(len(names), 4, "%s: %s" % (layout, names))
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not

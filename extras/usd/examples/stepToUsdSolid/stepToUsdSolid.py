@@ -2086,7 +2086,8 @@ def assembly_placements(rd):
     way is read the CAx-IF way.
 
     An occurrence is placed once, by the first CONTEXT_DEPENDENT_SHAPE_REPRESENTATION
-    that names it, and a root's own representations once per coordinate space.
+    that names it, and a root's own bodies once, however many of its
+    SHAPE_DEFINITION_REPRESENTATIONs reach them.
 
     Returns [] when the file has no assembly structure, which is the single-part
     case and leaves the caller's flat path untouched."""
@@ -2147,11 +2148,23 @@ def assembly_placements(rd):
             Mw = _mat_mul(M, Mc)
             out.append((rep, path, Mw))
             walk(child, Mw, path, chain | {child})
+    bodies_of = solids_by_representation(rd)
     for r in roots:
-        own = {}                        # one representation per coordinate space
-        for rep in reps.get(r, []):
-            own.setdefault(space(rep), rep)
-        out += [(rep, _product_name(rd, ("ref", r)), _IDENTITY) for rep in own.values()]
+        # A root's own bodies, once, however its SHAPE_DEFINITION_REPRESENTATIONs
+        # reach them. Largest first, a representation is dropped when the kept
+        # ones already hold all its bodies, and a body-less one when a kept one
+        # shares its coordinate space. The kept ones stay in file order.
+        cands = reps.get(r, [])
+        keep, held = [], set()
+        for rep in sorted(cands, key=lambda x: -len(bodies_of.get(x, ()))):   # largest first
+            bodies = set(bodies_of.get(rep, ()))
+            if bodies and bodies <= held:
+                continue
+            if not bodies and any(space(k) == space(rep) for k in keep):
+                continue
+            held |= bodies
+            keep.append(rep)
+        out += [(rep, _product_name(rd, ("ref", r)), _IDENTITY) for rep in cands if rep in keep]
         walk(r, _IDENTITY, "", {r})
     return out
 
