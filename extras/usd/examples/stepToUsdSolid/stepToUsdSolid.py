@@ -440,6 +440,12 @@ def lower_revolution(rd, ref, a0=0.0, a1=2*math.pi):
     ap = rd.args(a[2])
     axp = rd.point(ap[1])
     axd = vnorm(rd.direction(ap[2])) if len(ap) > 2 and isinstance(ap[2], tuple) else (0.,0.,1.)
+    return _revolve(basis, axp, axd, a0, a1)
+
+def _revolve(basis, axp, axd, a0=0.0, a1=2*math.pi):
+    """The NURBS surface sweeping the profile basis (a poles dict) round the
+    axis through axp along axd, from angle a0 to a1: u runs round the axis
+    and v along the profile."""
     span = a1 - a0
     nseg = max(1, int(math.ceil(span/(math.pi/2) - DEGENERATE_TOL)))
     seg = span/nseg
@@ -505,9 +511,22 @@ def surface_geom(rd, ref, cfg, fpts=None):
     if t == "SPHERICAL_SURFACE":
         o, z, x = rd.placement(a[1])
         return ("BrepSurfaceSphereAPI", dict(center=o, axis=z, refDirection=x, radius=float(a[2])))
-    if t == "TOROIDAL_SURFACE":
+    if t in ("TOROIDAL_SURFACE", "DEGENERATE_TOROIDAL_SURFACE"):
         o, z, x = rd.placement(a[1])
-        return ("BrepSurfaceTorusAPI", dict(origin=o, axis=z, refDirection=x, majorRadius=float(a[2]), minorRadius=float(a[3])))
+        R, r = float(a[2]), float(a[3])
+        if t == "DEGENERATE_TOROIDAL_SURFACE" and a[4] == ("enum", "F"):
+            # The inner, lemon-shaped portion: the torus formula with v from phi
+            # to 2*pi - phi, where r cos(phi) = -R, its normal pointing out of
+            # the lemon and so against the formula's (ISO 10303-42). A UsdSolid
+            # torus cannot turn its normal, so this revolves the tube circle's
+            # arc across the axis, run upwards, whose normal points out.
+            half = math.pi - math.acos(max(-1.0, min(1.0, -R / r)))
+            centre = tuple(o[k] - R * x[k] for k in range(3))
+            return ("BrepSurfaceNurbAPI",
+                    _revolve(_arc_poles(centre, x, z, r, r, -half, half), o, z))
+        # A torus, or a degenerate torus's outer, apple-shaped portion: the
+        # same formula with v from -phi to phi, and the same normal.
+        return ("BrepSurfaceTorusAPI", dict(origin=o, axis=z, refDirection=x, majorRadius=R, minorRadius=r))
     if t == "SURFACE_OF_LINEAR_EXTRUSION":
         # face:range is the lowered surface's whole knot domain, so the surface
         # has to reach every boundary point: P = curve(u) + v*vector bounds v by

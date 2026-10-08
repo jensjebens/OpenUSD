@@ -25,7 +25,11 @@ The converter takes no modes or presets; it converts every construct below that
 the file contains:
 
 - **Analytic surfaces** — plane, cylinder, cone, sphere, torus — and **NURBS**
-  surfaces, authored to the matching `BrepSurface*API`.
+  surfaces, authored to the matching `BrepSurface*API`. A degenerate torus
+  (`DEGENERATE_TOROIDAL_SURFACE`, its major radius below its minor) is a torus
+  when its outer, apple-shaped portion is selected; its inner, lemon-shaped
+  portion, whose normal ISO 10303-42 points against the torus formula's, is
+  lowered to an exact NURBS surface of revolution.
 - **Analytic curves** — line, circle, ellipse — and **NURBS** curves, bare or
   wrapped in `SURFACE_CURVE` / `SEAM_CURVE`.
 - **Swept surfaces** — linear extrusion and revolution — lowered to NURBS with

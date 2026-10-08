@@ -338,7 +338,8 @@ def _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent, newCo
              % (rr, emit("PRODUCT_DEFINITION_SHAPE('','',#%d)" % nauo)))
 
 
-def _MakeSheetStep(sheets=1, product=None, oriented=False, uncertainty=1.e-3, withBox=False):
+def _MakeSheetStep(sheets=1, product=None, oriented=False, uncertainty=1.e-3, withBox=False,
+                   torusPatch=None):
     """Return an AP242 STEP file holding sheet bodies, as NAPA Designer exports
     a plate: each a SHELL_BASED_SURFACE_MODEL whose OPEN_SHELL holds one planar
     face, a 3 x 2 rectangle (the k-th moved 4k along x), under one
@@ -347,7 +348,9 @@ def _MakeSheetStep(sheets=1, product=None, oriented=False, uncertainty=1.e-3, wi
     is a part's shape, named product (as a stiffener profile's web and flange
     are one part). oriented wraps each OPEN_SHELL in a reversed
     ORIENTED_OPEN_SHELL. withBox adds the test box as a solid, under an
-    ADVANCED_BREP_SHAPE_REPRESENTATION of its own."""
+    ADVANCED_BREP_SHAPE_REPRESENTATION of its own. torusPatch ("outer" or
+    "inner") makes the one sheet's face a patch of a degenerate torus instead
+    (_EmitTorusPatch)."""
     rows = []
 
     def emit(text):
@@ -367,6 +370,11 @@ def _MakeSheetStep(sheets=1, product=None, oriented=False, uncertainty=1.e-3, wi
 
     models = []
     for k in range(sheets):
+        if torusPatch:
+            shell = emit("OPEN_SHELL('',(#%d))" % _EmitTorusPatch(
+                emit, point, direction, torusPatch == "outer"))
+            models.append(emit("SHELL_BASED_SURFACE_MODEL('',(#%d))" % shell))
+            continue
         V = [(4 * k, 0, 0), (4 * k + 3, 0, 0), (4 * k + 3, 2, 0), (4 * k, 2, 0)]
         pts = [emit(point(v)) for v in V]
         vtx = [emit("VERTEX_POINT('',#%d)" % p) for p in pts]
@@ -422,6 +430,61 @@ def _MakeSheetStep(sheets=1, product=None, oriented=False, uncertainty=1.e-3, wi
             "FILE_NAME('sheet.step','2026-01-01T00:00:00',(''),(''),'','','');\n"
             "FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));\n"
             "ENDSEC;\nDATA;\n%s\nENDSEC;\nEND-ISO-10303-21;\n" % "\n".join(rows))
+
+
+# The degenerate torus of _EmitTorusPatch: about z through the origin, its
+# major radius below its minor.
+_TORUS_R, _TORUS_r = 3.0, 4.0
+
+
+def _TorusPoint(u, v):
+    rho = _TORUS_R + _TORUS_r * math.cos(v)
+    return (rho * math.cos(u), rho * math.sin(u), _TORUS_r * math.sin(v))
+
+
+def _EmitTorusPatch(emit, point, direction, selectOuter):
+    """Emit one face on a DEGENERATE_TOROIDAL_SURFACE (_TORUS_R, _TORUS_r),
+    bounded by four circular arcs; return its id. selectOuter: the outer,
+    apple-shaped portion, u from 0 to pi/2 and v from 0.3 to 1.2; otherwise
+    the inner, lemon-shaped portion, u from 0 to pi/2 and v within 0.5 of pi,
+    whose points lie across the axis from their tube circle's centre. The
+    loop runs counter-clockwise about ISO 10303-42's normal, which points out
+    of the enclosed volume."""
+    R, r = _TORUS_R, _TORUS_r
+    u0, u1 = 0.0, math.pi / 2
+    v0, v1 = (0.3, 1.2) if selectOuter else (math.pi + 0.5, math.pi - 0.5)
+    corners = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+    vtx = [emit("VERTEX_POINT('',#%d)" % emit(point(_TorusPoint(u, v)))) for u, v in corners]
+
+    def placement(o, z, x):
+        return emit("AXIS2_PLACEMENT_3D('',#%d,#%d,#%d)"
+                    % (emit(point(o)), emit(direction(z)), emit(direction(x))))
+
+    edges = []
+    for k in range(4):
+        (ua, va), (ub, vb) = corners[k], corners[(k + 1) % 4]
+        if va == vb:
+            # A parallel: a circle about the axis, its parameter the angle at
+            # which the point lies, which is u + pi across the axis.
+            rho = R + r * math.cos(va)
+            flip = math.pi if rho < 0 else 0.0
+            ta, tb = ua + flip, ub + flip
+            circle = emit("CIRCLE('',#%d,%r)" % (placement(
+                (0.0, 0.0, r * math.sin(va)), (0, 0, 1), (1, 0, 0)), abs(rho)))
+        else:
+            # A meridian: the tube circle at angle u, its parameter v.
+            e = (math.cos(ua), math.sin(ua), 0.0)
+            ta, tb = va, vb
+            circle = emit("CIRCLE('',#%d,%r)" % (placement(
+                (R * e[0], R * e[1], 0.0), (e[1], -e[0], 0.0), e), r))
+        a, b = (k, (k + 1) % 4) if ta < tb else ((k + 1) % 4, k)
+        curve = emit("EDGE_CURVE('',#%d,#%d,#%d,.T.)" % (vtx[a], vtx[b], circle))
+        edges.append(emit("ORIENTED_EDGE('',*,*,#%d,.%s.)" % (curve, "T" if ta < tb else "F")))
+    loop = emit("EDGE_LOOP('',(%s))" % ",".join("#%d" % e for e in edges))
+    surface = emit("DEGENERATE_TOROIDAL_SURFACE('',#%d,%r,%r,.%s.)" % (
+        placement((0, 0, 0), (0, 0, 1), (1, 0, 0)), R, r, "T" if selectOuter else "F"))
+    return emit("ADVANCED_FACE('',(#%d),#%d,.T.)"
+                % (emit("FACE_OUTER_BOUND('',#%d,.T.)" % loop), surface))
 
 
 def _Frame(axis):
@@ -946,6 +1009,63 @@ class TestStepToUsdSolid(unittest.TestCase):
         nurb = lambda cvs: dict(nurb=True, controlVertices=cvs)
         self.assertIsNotNone(S.face_flux("BrepSurfaceNurbAPI", nurb(flat), True, square))
         self.assertIsNone(S.face_flux("BrepSurfaceNurbAPI", nurb(saddle), True, square))
+
+    def test_DegenerateTorus(self):
+        """A DEGENERATE_TOROIDAL_SURFACE converts. Its outer, apple-shaped
+        portion is the torus formula with the torus's normal, and is authored
+        as a torus. ISO 10303-42 points the inner, lemon-shaped portion's
+        normal out of the lemon, against the formula's, so that portion is a
+        NURBS surface of revolution: every point of it lies on the lemon,
+        and its normal points away from the axis at the patch's middle."""
+        S = stepToUsdSolid
+        R, r = _TORUS_R, _TORUS_r
+        for portion in ("outer", "inner"):
+            text = _MakeSheetStep(torusPatch=portion)
+            stage = self._Convert(text, "degenerate_torus_" + portion)
+            self._AssertValid(stage)
+            prim = self._Breps(stage)[0]
+            kind = list(prim.GetAttribute("face:surfaceType").Get())
+            if portion == "outer":
+                self.assertEqual(kind, ["BrepSurfaceTorusAPI"])
+                self.assertEqual(list(prim.GetAttribute("brep:surface:torus:majorRadius").Get()), [R])
+                self.assertEqual(list(prim.GetAttribute("brep:surface:torus:minorRadius").Get()), [r])
+                continue
+            self.assertEqual(kind, ["BrepSurfaceNurbAPI"])
+            rd = S.Reader(S.parse_step(text))
+            _, g = S.surface_geom(rd, ("ref", rd.find("DEGENERATE_TOROIDAL_SURFACE")[0]), None)
+            nU, nV = g["uVertexCount"], g["vVertexCount"]
+
+            def at(u, v):
+                rows = []
+                for i in range(nU):
+                    cvs = g["controlVertices"][i * nV:(i + 1) * nV]
+                    ws = g["weights"][i * nV:(i + 1) * nV]
+                    c, _ = S._deboor_rational(g["vOrder"], g["vKnots"], cvs, ws, v)
+                    w, _ = S._deboor_rational(g["vOrder"], g["vKnots"],
+                                              [(x, 0.0, 0.0) for x in ws], [1.0] * nV, v)
+                    rows.append((c, w[0]))
+                p, _ = S._deboor_rational(g["uOrder"], g["uKnots"], [c for c, _ in rows],
+                                          [w for _, w in rows], u)
+                return p
+
+            (ulo, uhi), (vlo, vhi) = (g["uKnots"][0], g["uKnots"][-1]), (g["vKnots"][0], g["vKnots"][-1])
+            for i in range(9):
+                for j in range(9):
+                    x, y, z = at(ulo + (uhi - ulo) * i / 8, vlo + (vhi - vlo) * j / 8)
+                    self.assertAlmostEqual((math.hypot(x, y) + R) ** 2 + z * z, r * r, 9)
+            # The patch's middle: u = pi/4 and v = pi put it across the axis,
+            # in the direction of 5 pi / 4.
+            out = (-math.sqrt(0.5), -math.sqrt(0.5), 0.0)
+            best = min(((ulo + (uhi - ulo) * i / 64, vlo + (vhi - vlo) * j / 64)
+                        for i in range(65) for j in range(65)),
+                       key=lambda uv: math.dist(at(*uv), (out[0], out[1], 0.0)))
+            h = 1e-6
+            p0, pu, pv = at(*best), at(best[0] + h, best[1]), at(best[0], best[1] + h)
+            du = [pu[k] - p0[k] for k in range(3)]
+            dv = [pv[k] - p0[k] for k in range(3)]
+            n = (du[1] * dv[2] - du[2] * dv[1], du[2] * dv[0] - du[0] * dv[2],
+                 du[0] * dv[1] - du[1] * dv[0])
+            self.assertGreater(sum(a * b for a, b in zip(n, out)), 0.0)
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not
