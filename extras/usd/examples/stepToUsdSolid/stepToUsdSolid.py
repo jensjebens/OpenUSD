@@ -2434,12 +2434,17 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
             fcolors = None
             frefs = face_refs_for_solid(rd, sref)
             if len(frefs) == len(b["faces"]):
+                styled = {face_col.get(fr[1]) for fr in frefs}
+                if len(styled) == 1 and None not in styled and styled != {body}:
+                    # Every face styled alike: a face's style beats its solid's,
+                    # so the faces' colour is the body's as shown.
+                    body = styled.pop()
                 base = body or (0.6, 0.6, 0.6)
                 fcolors = [face_col.get(fr[1], base) for fr in frefs]
             child = "brep" if len(part_solids) == 1 else f"brep_{j}"
             path = f"/World/{name}/{child}"
             author_brep(stage, path, b, cfg, face_colors=fcolors)
-            if body and common is None:
+            if body and body != common:
                 cpv = UsdGeom.PrimvarsAPI(stage.GetPrimAtPath(path)).CreatePrimvar(
                     "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant)
                 if not cpv.HasAuthoredValue():
