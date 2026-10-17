@@ -41,6 +41,10 @@ the file contains:
   trimming edges; a NURBS face, including a lowered swept surface, takes its
   surface's knot domain.
 - **Colors** — per-body and per-face `displayColor` read from STEP styled items.
+  A STEP colour is the sRGB value the CAD system displays, and Open CASCADE reads it
+  so too; `displayColor` is linear, so each component is decoded with sRGB's transfer
+  function: NX's deep orange, 1, 0.4, 0, becomes 1, 0.133, 0. A face's style beats its
+  solid's, so a body whose faces are all styled alike shows the faces' colour.
 
 The plane-angle unit (degrees vs radians), the length unit and the intersection
 tolerance are read from the file. The length unit is the one the context of the

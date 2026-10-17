@@ -46,7 +46,8 @@ _ASSEMBLY = [("rig", "arm", ((100, 0, 0), (0, 0, 1), (0, 1, 0)), _IDENTITY_ITEM)
 
 
 def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
-                 densityMetre=False, surfaceModel=False, solidWorks=False, rootBox=None):
+                 densityMetre=False, surfaceModel=False, solidWorks=False, rootBox=None,
+                 colour=None, faceColour=None, facesColour=None):
     """Return an AP214 STEP file describing the box above, as a string. Each
     face index in reversedFaces is written as a reversed face: its plane's
     normal points into the box and its ADVANCED_FACE same_sense is .F., which
@@ -70,7 +71,10 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
     SHAPE_DEFINITION_REPRESENTATIONs: "joined", one to the root's
     SHAPE_REPRESENTATION and one to an ADVANCED_BREP_SHAPE_REPRESENTATION a
     SHAPE_REPRESENTATION_RELATIONSHIP joins to it; "unjoined", the same solid
-    listed in both, with no relationship."""
+    listed in both, with no relationship. colour, an (r, g, b) as a STEP file
+    writes it, styles the single box, faceColour, (face index, (r, g, b)),
+    one of its faces, and facesColour every face, each through AP214's
+    STYLED_ITEM chain."""
     rows, state = [], {"n": 0}
 
     def emit(text):
@@ -125,9 +129,17 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
         _EmitAssembly(emit, point, direction, box, wcs, context, rep1IsParent,
                       newContext=newContext if solidWorks else None, rootBox=rootBox)
     elif products is None:
+        solid = box(0.0, "Box")
         emit("%s('Box',(#%d,#%d),#%d)"
              % ("MANIFOLD_SURFACE_SHAPE_REPRESENTATION" if surfaceModel
-                else "ADVANCED_BREP_SHAPE_REPRESENTATION", wcs, box(0.0, "Box"), context))
+                else "ADVANCED_BREP_SHAPE_REPRESENTATION", wcs, solid, context))
+        if colour is not None:
+            _EmitStyle(emit, solid, colour)
+        faces = [int(r[1:r.index("=")]) for r in rows if "=ADVANCED_FACE(" in r]
+        if faceColour is not None:
+            _EmitStyle(emit, faces[faceColour[0]], faceColour[1])
+        for face in faces if facesColour is not None else ():
+            _EmitStyle(emit, face, facesColour)
     else:
         app = emit("APPLICATION_CONTEXT('core data for automotive mechanical "
                    "design processes')")
@@ -150,6 +162,17 @@ def _MakeBoxStep(reversedFaces=(), products=None, rep1IsParent=None, unit="mm",
             "FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 3 1 1 }'));\n"
             "ENDSEC;\nDATA;\n%s\nENDSEC;\nEND-ISO-10303-21;\n"
             % "\n".join(rows))
+
+
+def _EmitStyle(emit, target, rgb):
+    """Colour the item #target rgb, as an AP214 writer does: a STYLED_ITEM
+    whose presentation style reaches a COLOUR_RGB through a surface style."""
+    colour = emit("COLOUR_RGB('',%r,%r,%r)" % tuple(float(c) for c in rgb))
+    fill = emit("FILL_AREA_STYLE('',(#%d))" % emit("FILL_AREA_STYLE_COLOUR('',#%d)" % colour))
+    side = emit("SURFACE_SIDE_STYLE('',(#%d))" % emit("SURFACE_STYLE_FILL_AREA(#%d)" % fill))
+    usage = emit("SURFACE_STYLE_USAGE(.BOTH.,#%d)" % side)
+    emit("STYLED_ITEM('color',(#%d),#%d)" % (emit("PRESENTATION_STYLE_ASSIGNMENT((#%d))" % usage),
+                                             target))
 
 
 def _EmitBox(emit, point, direction, unit, reversedFaces, dx, solidName, surfaceModel=False):
@@ -702,6 +725,31 @@ class TestStepToUsdSolid(unittest.TestCase):
             self.assertEqual(sum(1 for n in names if n.startswith("rig")), 1,
                              "%s: %s" % (layout, names))
             self.assertEqual(len(names), 4, "%s: %s" % (layout, names))
+
+    def test_ColoursAreLinear(self):
+        # A STEP colour is the sRGB value the CAD system shows; displayColor
+        # holds linear values, so 1, 0.4, 0 (NX's deep orange) becomes
+        # 1, 0.1329, 0 and 0.2 grey 0.0331, as Open CASCADE reads them.
+        stage = self._Convert(_MakeBoxStep(colour=(1.0, 0.4, 0.0),
+                                           faceColour=(_TOP, (0.2, 0.2, 0.2))), "colours")
+        brep = self._Breps(stage)[0]
+        pv = UsdGeom.PrimvarsAPI(brep).GetPrimvar("displayColor")
+        self.assertEqual(pv.GetInterpolation(), UsdGeom.Tokens.uniform)
+        colours = [tuple(round(c, 4) for c in v) for v in pv.Get()]
+        self.assertEqual(colours[_TOP], (0.0331, 0.0331, 0.0331))
+        self.assertEqual(sorted(set(colours) - {colours[_TOP]}), [(1.0, 0.1329, 0.0)])
+        self.assertEqual(colours.count((1.0, 0.1329, 0.0)), len(colours) - 1)
+
+    def test_FacesStyledAlikeBeatTheBody(self):
+        # Every face styled 0.4 grey, the solid 0.2: a face's style beats its
+        # solid's, so the body shows 0.4 (0.1329 linear), as Open CASCADE
+        # shows four of the KUKA KR 640's bodies.
+        stage = self._Convert(_MakeBoxStep(colour=(0.2, 0.2, 0.2),
+                                           facesColour=(0.4, 0.4, 0.4)), "faces_alike")
+        brep = self._Breps(stage)[0]
+        pv = UsdGeom.PrimvarsAPI(brep).FindPrimvarWithInheritance("displayColor")
+        self.assertEqual([tuple(round(c, 4) for c in v) for v in pv.Get()],
+                         [(0.1329, 0.1329, 0.1329)])
 
     def test_ValidatorsCatchCorruption(self):
         """A guard on the check above: point one edge at a vertex that does not

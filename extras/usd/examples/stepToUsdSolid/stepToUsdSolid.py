@@ -18,7 +18,9 @@ SURFACE_CURVE / SEAM_CURVE), and NURBS surfaces and curves; lowers swept surface
 ORIENTED_CLOSED_SHELL) and vertex loops; converts sheet bodies
 (SHELL_BASED_SURFACE_MODEL) beside solids; derives the parametric UV window of each
 analytic face from its trimming edges (a NURBS face takes its surface's knot
-domain); and reads per-body / per-face colors from STEP styled items. The
+domain); and reads per-body / per-face colors from STEP styled items, decoded
+from the sRGB values a CAD system writes to the linear values displayColor
+holds. The
 plane-angle unit, the length unit (from the context of the bodies'
 representations) and the tolerance are read from the file.
 
@@ -2286,6 +2288,14 @@ def solid_name(rd, solid_ref, i, products=None):
     nm = (products or {}).get(solid_ref) or _prim_name(rd.args(("ref", solid_ref))[0])
     return nm if nm else f"body_{i}"
 
+def _linear(c):
+    """A STEP colour component as displayColor holds it. CAD systems write
+    the colour they display, an sRGB value (an NX palette's 'deep orange' is
+    1, 0.4, 0: 255, 102, 0), and Open CASCADE reads it so; displayColor is
+    linear, so the value is decoded with sRGB's transfer function."""
+    c = min(max(float(c), 0.0), 1.0)
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
 def resolve_colors(rd, ents, solid_refs):
     """Per-solid body color and per-face color overrides, read from STEP styled
     items. A body-level style (the styled item targets the solid) wins outright;
@@ -2320,7 +2330,7 @@ def resolve_colors(rd, ents, solid_refs):
             e = ents.get(node[1])
             if not e: return None
             if e[0] == "COLOUR_RGB":
-                return (round(float(e[1][1]), 4), round(float(e[1][2]), 4), round(float(e[1][3]), 4))
+                return tuple(round(_linear(e[1][k]), 4) for k in (1, 2, 3))
             if e[0] in ("DRAUGHTING_PRE_DEFINED_COLOUR", "PRE_DEFINED_COLOUR"):
                 nm = (e[1][0] or "").lower() if e[1] else ""
                 return _PREDEF.get(nm)
@@ -2424,12 +2434,17 @@ def _emit_assembly(stage, rd, cfg, placed, srmap, colors, face_col, solids, verb
             fcolors = None
             frefs = face_refs_for_solid(rd, sref)
             if len(frefs) == len(b["faces"]):
+                styled = {face_col.get(fr[1]) for fr in frefs}
+                if len(styled) == 1 and None not in styled and styled != {body}:
+                    # Every face styled alike: a face's style beats its solid's,
+                    # so the faces' colour is the body's as shown.
+                    body = styled.pop()
                 base = body or (0.6, 0.6, 0.6)
                 fcolors = [face_col.get(fr[1], base) for fr in frefs]
             child = "brep" if len(part_solids) == 1 else f"brep_{j}"
             path = f"/World/{name}/{child}"
             author_brep(stage, path, b, cfg, face_colors=fcolors)
-            if body and common is None:
+            if body and body != common:
                 cpv = UsdGeom.PrimvarsAPI(stage.GetPrimAtPath(path)).CreatePrimvar(
                     "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant)
                 if not cpv.HasAuthoredValue():
